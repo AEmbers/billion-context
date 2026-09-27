@@ -121,6 +121,24 @@ test("#1494 A: a parse-dropped entry is surfaced in the SUCCESS receipt and logg
     assert.equal(ctx.session.state.blocks.filter((b) => b.active).length, 1);
 });
 
+test("#1494 A: a parse-dropped entry is surfaced in the FAILED receipt too (0-blocks apply failure)", () => {
+    _setStoreForTest(new SessionStore({ enabled: false }));
+    const ctx = makeCtx();
+    seedTurn(ctx, [["user", "hello there"], ["assistant", "x".repeat(500)]], 2);
+    // Force the apply-time gate: one entry survives parsing but its range is
+    // below minCompressRange → blocksCreated === 0 (FAILED branch) while the
+    // garbage sibling was dropped at parse — the receipt must still name it.
+    ctx.config.compress.minCompressRange = 10_000;
+    const out = applyRanges(parseCompressInput({ content: [
+        { startId: "m00001", endId: "m00002", summary: "valid but too small" },
+        { startId: "m00003" },
+    ] }), ctx);
+    assert.ok(out.startsWith("[Compression FAILED:"), out.split("\n")[0]);
+    assert.ok(out.includes("1 of the submitted entry was REJECTED and NOT compressed"), out);
+    assert.ok(out.includes("entry 1: missing range bounds"), out);
+    assert.equal(ctx.session.state.blocks.filter((b) => b.active).length, 0);
+});
+
 test("#1494 A+B: single-object content folds end-to-end through applyRanges", () => {
     _setStoreForTest(new SessionStore({ enabled: false }));
     const ctx = makeCtx();
