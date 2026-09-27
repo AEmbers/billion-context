@@ -1008,7 +1008,10 @@ async function handle(
             res.end(JSON.stringify({ ok: false, error: "conversationId query parameter is required" }));
             return;
         }
-        return handlePluginStatus(conversationId, res, { core, config, log }, params.get("fallback") === "latest");
+        // Web UI origin as the user's browser dials it: the ACTUAL bound port
+        // (req.socket.localPort differs from opts.port when listening on port 0).
+        const webOrigin = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${req.socket?.localPort ?? opts.port}`;
+        return handlePluginStatus(conversationId, res, { core, config, log, webOrigin }, params.get("fallback") === "latest");
     }
     if (req.method === "POST" && req.url === "/__bili/watcher") {
         // #7: an ATTACHING claude session registers its host pid so the shared
@@ -1040,7 +1043,8 @@ async function handle(
     if (req.method === "POST" && req.url === "/__bili/plugin/tool") {
         try {
             const body = await readBody(req);
-            return await handlePluginTool(body.toString("utf8"), res, { core, config, log });
+            const webOrigin = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${req.socket?.localPort ?? opts.port}`;
+            return await handlePluginTool(body.toString("utf8"), res, { core, config, log, webOrigin });
         } catch (err) {
             res.writeHead(err instanceof BodyTooLargeError ? 413 : 400, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: String(err) }));
