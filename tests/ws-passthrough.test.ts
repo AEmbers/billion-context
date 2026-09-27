@@ -204,6 +204,31 @@ test("ws passthrough: 101 + bidirectional frame round-trip for /bili/ws:// embed
     }
 });
 
+test("ws passthrough: bytes pipelined behind the handshake request are forwarded upstream", async () => {
+    _setStoreForTest(new SessionStore({ enabled: false }));
+    setRegistryForTest({});
+    const fake = await startFakeWs("ok");
+    try {
+        const server = await startServer(baseOpts(true, { enabled: false, domains: [] }));
+        await once(server, "listening");
+        const port = (server.address() as { port: number }).port;
+        try {
+            // One single write: handshake request + trailing frame bytes, sent
+            // BEFORE any 101 — Node hands the trailing bytes to the upgrade
+            // handler as its `head` argument; they must reach the upstream.
+            const raw = handshake(`/bili/ws://127.0.0.1:${fake.port}/realtime`, `127.0.0.1:${port}`) + "C-EARLY";
+            const result = await relaySession(port, raw);
+            assert.match(result.head, /^HTTP\/1\.1 101/);
+            assert.ok(result.body.includes("C-EARLY"), "pipelined post-request bytes must reach the upstream (echoed back), not be dropped");
+        } finally {
+            await close(server);
+            server.closeAllConnections?.();
+        }
+    } finally {
+        await fake.close();
+    }
+});
+
 test("ws passthrough: absolute-form ws:// target is relayed", async () => {
     _setStoreForTest(new SessionStore({ enabled: false }));
     setRegistryForTest({});

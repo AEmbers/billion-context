@@ -456,7 +456,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
                 body,
         );
     };
-    server.on("upgrade", (req) => {
+    server.on("upgrade", (req, _socket, head) => {
         if (!opts.wsPassthrough) {
             rejectUpgrade426(req);
             return;
@@ -469,7 +469,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
             proxy: opts.proxy,
             proxyFallback: opts.proxyFallback,
             log,
-        }).then((handled) => {
+        }, head).then((handled) => {
             if (!handled) rejectUpgrade426(req);
         });
     });

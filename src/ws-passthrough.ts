@@ -167,7 +167,7 @@ function sendErrorAndClose(client: net.Socket, status: string, message: string):
 /** Handle one WebSocket upgrade when ws.passthrough is enabled. Returns true
  *  when the upgrade was consumed (relayed, denied, or answered with an error)
  *  and false when it is unroutable — the caller then answers the standard 426. */
-export async function handleWsUpgrade(req: http.IncomingMessage, client: net.Socket, deps: WsUpgradeDeps): Promise<boolean> {
+export async function handleWsUpgrade(req: http.IncomingMessage, client: net.Socket, deps: WsUpgradeDeps, head: Buffer = Buffer.alloc(0)): Promise<boolean> {
     const dest = resolveWsDestination(req, client);
     if (!dest) return false;
     client.on("error", () => {}); // client may vanish mid-write; don't let ECONNRESET crash the process
@@ -212,6 +212,10 @@ export async function handleWsUpgrade(req: http.IncomingMessage, client: net.Soc
     }
 
     upstream.write(buildUpgradeHead(req, dest.targetPath, dest.hostHeader));
+    // Bytes the client pipelined behind its handshake request (Node hands them
+    // over as the upgrade event's `head`): compliant clients send none, but a
+    // pipelining client's early frames must not be silently dropped.
+    if (head.length > 0) upstream.write(head);
 
     let headInfo: { head: string; rest: Buffer };
     try {
