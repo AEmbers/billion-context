@@ -1,0 +1,424 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import http from "node:http";
+import net from "node:net";
+import { once } from "node:events";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { defaultConfig } from "acp-kernel";
+import { startServer } from "../src/server.ts";
+import { loadRoutes, type ProxyOptions } from "../src/config.ts";
+import { SessionStore, _setStoreForTest } from "../src/persist.ts";
+import { _setForTest as setRegistryForTest } from "../src/registry.ts";
+import { streamStallMs, _liveUpstreamTimersForTest } from "../src/fetch-util.ts";
+import { setLogCapture } from "../src/logger.ts";
+
+function close(server: http.Server | net.Server): Promise<void> {
+    return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+}
+
+async function freePort(): Promise<number> {
+    const server = http.createServer();
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const port = (server.address() as { port: number }).port;
+    await close(server);
+    return port;
+}
+
+interface Harness {
+    port: number;
+    stop: () => Promise<void>;
+    cleanup: () => void;
+}
+
+async function startProxy(upstream: http.Server | net.Server, debug: boolean): Promise<Harness> {
+    _setStoreForTest(new SessionStore({ enabled: false }));
+    setRegistryForTest({});
+    const root = path.join(tmpdir(), `bili-issue1452-${process.pid}-${Date.now()}`);
+    const biliConfig = path.join(root, "billion-context.json");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(biliConfig, "{}", "utf8");
+    const previous = process.env.BILI_CONFIG_FILE;
+    process.env.BILI_CONFIG_FILE = biliConfig;
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    const port = await freePort();
+    const opts: ProxyOptions = {
+        port,
+        host: "127.0.0.1",
+        upstream: `http://127.0.0.1:${upstreamPort}`,
+        routes: loadRoutes(),
+        proxy: "",
+        proxyMode: "direct",
+        proxySource: "direct",
+        modelContextLimit: 400_000,
+        kernelConfig: defaultConfig(400_000),
+        compress: { injectTool: false, injectNudge: false },
+        promptCache: { routing: "auto" },
+        compat: { roles: {} },
+        sessionHeader: "x-acp-session",
+        // log:true routes startServer's local log through the global logger so
+        // setLogCapture sees the [conn]/[exposure] lines under test.
+        log: true,
+        debug,
+        passthrough: false,
+        passthroughSource: null,
+        autoUpdate: false,
+        mitm: { enabled: false, domains: [] },
+    };
+    const proxy = await startServer(opts);
+    if (!proxy.listening) await once(proxy, "listening");
+    return {
+        port,
+        stop: async () => { await close(proxy); },
+        cleanup: () => {
+            if (previous === undefined) delete process.env.BILI_CONFIG_FILE; else process.env.BILI_CONFIG_FILE = previous;
+            rmSync(root, { recursive: true, force: true });
+        },
+    };
+}
+
+const CHAT_BODY = JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] });
+// Streaming variant: without `stream: true` the request takes the non-loop
+// pipeThrough path (no compress loop, no in-band error emission) — real agent
+// traffic always streams, so the stall tests must too (#1452).
+const STREAM_BODY = JSON.stringify({ model: "m", stream: true, messages: [{ role: "user", content: "hi" }] });
+
+function withEnv(name: string, value: string | undefined): () => void {
+    const prev = process.env[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    return () => {
+        if (prev === undefined) delete process.env[name]; else process.env[name] = prev;
+    };
+}
+
+test("streamStallMs: env parsing — off by default, strict positive integers only (#1452)", () => {
+    const restore = withEnv("BILI_STREAM_STALL_MS", undefined);
+    try {
+        assert.equal(streamStallMs(), 0);
+        process.env.BILI_STREAM_STALL_MS = "400";
+        assert.equal(streamStallMs(), 400);
+        process.env.BILI_STREAM_STALL_MS = "0";
+        assert.equal(streamStallMs(), 0);
+        process.env.BILI_STREAM_STALL_MS = "-5";
+        assert.equal(streamStallMs(), 0);
+        process.env.BILI_STREAM_STALL_MS = "garbage";
+        assert.equal(streamStallMs(), 0);
+    } finally {
+        restore();
+    }
+});
+
+test("clientError: parse-fail flood is drained and closed with FIN, never destroy-RST (#1452)", async () => {
+    // Upstream is irrelevant — the bytes die in bili's HTTP parser before any
+    // forwarding happens.
+    const upstream = http.createServer((_req, res) => res.end("{}"));
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    let harness: Harness | null = null;
+    try {
+        harness = await startProxy(upstream, false);
+        const socket = net.connect(harness.port, "127.0.0.1");
+        await once(socket, "connect");
+        let sawError: string | null = null;
+        socket.on("error", (e) => { sawError = e.code ?? e.message; });
+        // Guaranteed llhttp parse failure on byte one; the remaining ~64KB
+        // stays unread in the kernel buffer — exactly the residual state that
+        // makes a destroy() surface as RST to the peer (verified matrix).
+        socket.write(Buffer.alloc(65_536, 0));
+        await once(socket, "close");
+        assert.equal(sawError, null, `client socket must close cleanly, got error ${sawError}`);
+        const marker = captured.find((c) => c.msg.includes("[conn] clientError"));
+        assert.ok(marker, `expected [conn] clientError log line, got: ${captured.map((c) => c.msg).join(" | ")}`);
+        assert.equal(marker!.level, "warn");
+    } finally {
+        setLogCapture(null);
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});
+
+test("lifecycle ledger: client FIN first classifies reason=peer-fin (#1452)", async () => {
+    // Keep-alive upstream on purpose: a connection:close upstream makes bili end
+    // the client socket itself (prefinish → server-end), which would mask the
+    // peer-FIN-first ordering this test pins (#1452).
+    const upstream = http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    let harness: Harness | null = null;
+    try {
+        harness = await startProxy(upstream, true);
+        const base = captured.length;
+        // req.socket is only attached after the first tick even with agent:false —
+        // capture it from the response instead (#1452 test hardening).
+        // agent:false also defaults to Connection: close; the explicit keep-alive
+        // header above is required so bili keeps the socket open post-response.
+        const closed = new Promise<void>((resolve) => {
+            const req = http.request(
+                { host: "127.0.0.1", port: harness.port, path: "/v1/chat/completions", method: "POST", agent: false, headers: { "content-type": "application/json", "content-length": Buffer.byteLength(CHAT_BODY), "connection": "keep-alive" } },
+                (res) => {
+                    const s = res.socket as net.Socket;
+                    s.once("close", () => resolve());
+                    res.resume();
+                    res.on("end", () => s.end());
+                },
+            );
+            req.end(CHAT_BODY);
+        });
+        await closed;
+        // The server-side socket 'close' (emitting the ledger line) queues in
+        // this same process but can land AFTER the client-side close we awaited;
+        // late closes from earlier tests also leak into the shared capture —
+        // hence bounded polling + the reqs=1 anchor (#1452).
+        const deadline = Date.now() + 2000;
+        let line = captured.slice(base).find((c) => /closed reason=peer-fin .* reqs=1$/.test(c.msg));
+        while (!line && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+            line = captured.slice(base).find((c) => /closed reason=peer-fin .* reqs=1$/.test(c.msg));
+        }
+        assert.ok(line, `expected reason=peer-fin ledger line, got: ${captured.slice(base).filter((c) => c.msg.includes("closed reason=")).map((c) => c.msg).join(" | ")}`);
+        assert.equal(line!.level, "debug");
+    } finally {
+        setLogCapture(null);
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});
+
+test("lifecycle ledger + kat knob: idle keep-alive close classifies reason=idle-timeout as clean FIN (#1452)", async () => {
+    const upstream = http.createServer((_req, res) => {
+        // Upstream stays keep-alive so bili keeps the client socket open and
+        // lets it idle until the kat reaper — that idle window IS the scenario
+        // under test (#1452). A connection:close upstream made bili end the
+        // client leg right after the response (age≈78ms), never reaching the
+        // 300ms reap; teardown-order swap below absorbs any pool redial noise.
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    const restoreKat = withEnv("BILI_KEEP_ALIVE_TIMEOUT_MS", "300");
+    let harness: Harness | null = null;
+    let sock: net.Socket | null = null;
+    try {
+        const h = await startProxy(upstream, true);
+        harness = h;
+        const base = captured.length;
+        const katLine = captured.find((c) => c.msg.includes("[conn] keepAliveTimeout=300ms"));
+        assert.ok(katLine, "expected startup keepAliveTimeout=300ms log line (kat knob wired)");
+        // Raw socket on purpose — every higher-level client is nondeterministic
+        // here (#1452): agent:false closes its own socket right after the body,
+        // and a pooling http.Agent drops the socket because bili's Keep-Alive
+        // header truncates sub-second kat to whole seconds (timeout=0 → Node
+        // treats the connection as done). Only a raw socket that never sends
+        // FIN is the pure-idle peer the kat reaper must close.
+        // The no-op 'data' consumer is REQUIRED: Node does not treat a socket
+        // with an unread buffered response as idle, so without it the reaper
+        // never fires (verified against a vanilla http.Server control).
+        const reaped = new Promise<string | null>((resolve, reject) => {
+            let sawError: string | null = null;
+            const s = net.connect(h.port, "127.0.0.1");
+            sock = s;
+            s.once("connect", () => {
+                s.write(`POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:${h.port}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(CHAT_BODY)}\r\nConnection: keep-alive\r\n\r\n${CHAT_BODY}`);
+            });
+            s.on("data", () => {});
+            s.on("error", (e) => { sawError = e.code ?? e.message; reject(new Error(`client socket error during idle reap: ${sawError}`)); });
+            // Await 'end' (peer FIN), not 'close': a raw socket never ends its
+            // own side, so 'close' would hang until we destroyed it ourselves.
+            s.once("end", () => resolve(sawError));
+        });
+        // Measured on Node v22: the reaper lands at ≈kat+1s with ±40ms jitter;
+        // the deadline keeps CI-load headroom while a missing reap fails fast.
+        const reapTimeout = new Promise<never>((_resolve, reject) => {
+            const t = setTimeout(() => reject(new Error(`kat reaper did not FIN the idle socket within 6000ms (kat=300ms)`)), 6000);
+            t.unref();
+        });
+        const sawError = await Promise.race([reaped, reapTimeout]);
+        assert.equal(sawError, null, `idle reap must be a clean FIN, got error ${sawError}`);
+        // Destroying our side completes the four-way close; the server-side
+        // 'close' (which emits the ledger line) only fires after that.
+        sock?.destroy();
+        // Same same-process close-ordering race as the peer-fin test (#1452).
+        const deadline = Date.now() + 2000;
+        let line = captured.slice(base).find((c) => /closed reason=idle-timeout .* reqs=1$/.test(c.msg));
+        while (!line && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+            line = captured.slice(base).find((c) => /closed reason=idle-timeout .* reqs=1$/.test(c.msg));
+        }
+        assert.ok(line, `expected reason=idle-timeout ledger line, got: ${captured.slice(base).filter((c) => c.msg.includes("closed reason=")).map((c) => c.msg).join(" | ")}`);
+    } finally {
+        restoreKat();
+        setLogCapture(null);
+        if (sock && !sock.destroyed) sock.destroy();
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});
+
+test("exposure telemetry: periodic info line with liveConns breakdown (#1452)", async () => {
+    const upstream = http.createServer((_req, res) => res.end("{}"));
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    const restoreExposure = withEnv("BILI_EXPOSURE_LOG_INTERVAL_MS", "100");
+    let harness: Harness | null = null;
+    try {
+        harness = await startProxy(upstream, false);
+        await new Promise((r) => setTimeout(r, 400));
+        const line = captured.find((c) => /\[exposure\] uptime=/.test(c.msg));
+        assert.ok(line, `expected [exposure] telemetry line, got: ${captured.map((c) => c.msg).join(" | ")}`);
+        assert.match(line!.msg, /liveConns=\d+ tcpHandles=\d+ handles=\d+ sessions=\d+ blindTunnels=\d+ inFlight=\d+/);
+        assert.equal(line!.level, "info");
+    } finally {
+        restoreExposure();
+        setLogCapture(null);
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});
+
+test("stall guard: silent mid-stream upstream ends in in-band error + FIN, not a hang (#1452)", async () => {
+    // First chunk then silence forever — the exact incident shape (reasoning
+    // stream that stops emitting). The stall guard must cut it long before
+    // the 12-minute idle budget.
+    const upstream = http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream", "connection": "close" });
+        res.flushHeaders();
+        res.write('data: {"choices":[{"delta":{"content":"chunk-1"}}]}\n\n');
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const restoreStall = withEnv("BILI_STREAM_STALL_MS", "400");
+    const restoreIdle = withEnv("BILI_UPSTREAM_TIMEOUT_MS", "60000");
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    let harness: Harness | null = null;
+    try {
+        harness = await startProxy(upstream, false);
+        const ac = new AbortController();
+        const guard = setTimeout(() => ac.abort(), 15_000);
+        guard.unref?.();
+        const started = Date.now();
+        const res = await fetch(`http://127.0.0.1:${harness.port}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: STREAM_BODY,
+            signal: ac.signal,
+        });
+        const body = await res.text();
+        const elapsed = Date.now() - started;
+        assert.equal(res.status, 200, `headers were committed before the stall, got ${res.status}`);
+        // #721 converts upstream read failures into a stable in-band truncation
+        // frame (code upstream_stream_truncated) + terminal event; the exact
+        // cause (the stall-guard abort) is pinned via the server-side warn line.
+        assert.ok(body.includes("upstream_stream_truncated"), `expected in-band truncation frame, got: ${body.slice(0, 300)}`);
+        assert.ok(body.includes("data: [DONE]"), "stream must terminate with the protocol terminal event");
+        const warn = captured.find((c) => c.level === "warn" && c.msg.includes("upstream stalled: no bytes for 400ms"));
+        assert.ok(warn, `expected stall-guard attribution in server logs, got: ${captured.map((c) => c.msg).join(" | ").slice(0, 400)}`);
+        assert.ok(elapsed < 10_000, `stall guard took too long to fire (${elapsed}ms)`);
+    } finally {
+        restoreStall();
+        restoreIdle();
+        setLogCapture(null);
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+        assert.equal(_liveUpstreamTimersForTest(), 0, "no upstream timers leaked after stall abort");
+    }
+});
+
+test("stall guard: healthy stream longer than the budget survives — re-arm per byte (#1452)", async () => {
+    // 8 chunks at 80ms = ~640ms total > 400ms budget. A total-time deadline
+    // would cut this stream; per-byte re-arm must not.
+    const intervalMs = 80;
+    const totalChunks = 8;
+    const upstream = http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream", "connection": "close" });
+        res.flushHeaders();
+        let sent = 0;
+        const t = setInterval(() => {
+            sent += 1;
+            res.write(`data: {"choices":[{"delta":{"content":"chunk-${sent}"}}]}\n\n`);
+            if (sent >= totalChunks) {
+                clearInterval(t);
+                res.write("data: [DONE]\n\n");
+                res.end();
+            }
+        }, intervalMs);
+        _req.on("close", () => clearInterval(t));
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const restoreStall = withEnv("BILI_STREAM_STALL_MS", "400");
+    const restoreIdle = withEnv("BILI_UPSTREAM_TIMEOUT_MS", "60000");
+    let harness: Harness | null = null;
+    try {
+        harness = await startProxy(upstream, false);
+        const ac = new AbortController();
+        const guard = setTimeout(() => ac.abort(), 15_000);
+        guard.unref?.();
+        const res = await fetch(`http://127.0.0.1:${harness.port}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: STREAM_BODY,
+            signal: ac.signal,
+        });
+        const body = await res.text();
+        for (let i = 1; i <= totalChunks; i++) assert.ok(body.includes(`chunk-${i}`), `missing chunk-${i}: ${body.slice(0, 300)}`);
+        assert.ok(body.includes("[DONE]"), `healthy stream must complete with the terminal event: ${body.slice(0, 300)}`);
+        assert.ok(!body.includes("stream error"), `healthy stream must not trip the stall guard: ${body.slice(0, 300)}`);
+    } finally {
+        restoreStall();
+        restoreIdle();
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+        assert.equal(_liveUpstreamTimersForTest(), 0, "no upstream timers leaked after normal completion");
+    }
+});
+
+test("stall guard: default-off — silence after first byte does NOT cut the stream (#1452)", async () => {
+    const upstream = http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream", "connection": "close" });
+        res.flushHeaders();
+        res.write('data: {"choices":[{"delta":{"content":"chunk-1"}}]}\n\n');
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const restoreStall = withEnv("BILI_STREAM_STALL_MS", undefined);
+    const restoreIdle = withEnv("BILI_UPSTREAM_TIMEOUT_MS", "60000");
+    let harness: Harness | null = null;
+    try {
+        harness = await startProxy(upstream, false);
+        const seen: string[] = [];
+        const req = http.request(
+            { host: "127.0.0.1", port: harness.port, path: "/v1/chat/completions", method: "POST", agent: false, headers: { "content-type": "application/json", "content-length": Buffer.byteLength(STREAM_BODY) } },
+            (res) => {
+                res.setEncoding("utf8");
+                res.on("data", (d: string) => seen.push(d));
+            },
+        );
+        req.end(STREAM_BODY);
+        await new Promise((r) => setTimeout(r, 900));
+        const soFar = seen.join("");
+        assert.ok(soFar.length > 0, "first chunk should have flowed through");
+        assert.ok(!soFar.includes("stream error"), `default-off must not emit a stall error: ${soFar.slice(0, 300)}`);
+        assert.ok(!soFar.includes("[DONE]"), `default-off must not terminate a still-open stream: ${soFar.slice(0, 300)}`);
+        req.destroy();
+    } finally {
+        restoreStall();
+        restoreIdle();
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});
