@@ -21,7 +21,8 @@ import { applyRanges } from "../stream.js";
 import { executeSearchContextTarget, resolveDecompress } from "../decompress-shared.js";
 import { buildVisibilityMarker } from "../compress-loop.js";
 import { fetchWithRetry, UpstreamHttpError } from "../fetch-util.js";
-import { proxyDispatcher } from "../upstream-proxy.js";
+import { classifyUpstreamFailure, type UpstreamFailureKind } from "../upstream-fail.js";
+import { formatUpstreamError, proxyDispatcher } from "../upstream-proxy.js";
 import { warnCacheCollapse } from "../cache-warn.js";
 import { dumpRejectedBody } from "../error-dump.js";
 import { dumpsDir } from "../paths.js";
@@ -50,6 +51,27 @@ function isLoopThinking(m: CoreMessage): boolean {
 
 function stripLoopThinking(messages: CoreMessage[]): CoreMessage[] {
     return messages.filter((m) => !isLoopThinking(m));
+}
+
+// #1453 client-facing labels for transport failures that end the turn in-band.
+// Deliberately kind-level only: raw error text can embed endpoint hostnames/IPs,
+// which must never reach the client stream (the full masked chain goes to the
+// server log via formatUpstreamError instead).
+const TRANSPORT_FAILURE_LABELS: Record<UpstreamFailureKind, string> = {
+    "client-abort": "aborted",
+    "upstream-timeout": "upstream timeout",
+    "proxy-reset": "connection reset by an intermediate proxy",
+    "upstream-reset": "connection reset by the upstream",
+    "connect-refused": "connection refused",
+    "connect-timeout": "connect timed out",
+    dns: "name resolution failed",
+    tls: "TLS handshake failure",
+    unknown: "network error",
+};
+
+function activeAbsorbToolName(session: Session, config: Config): string | undefined {
+    const a = effectiveAbsorbConfig(session, config);
+    return a?.enabled === true ? a.toolName ?? ABSORB_TOOL_NAME : undefined;
 }
 
 // Canonical args for repeat-detection: key-order/whitespace differences must not
@@ -725,10 +747,7 @@ export async function* runCompressLoop(
                 // its refresh is a harmless identical-view re-fold. Falls back
                 // to the pre-compress view (previous behavior) if the host hook
                 // is absent or throws.
-                const absorbName = (() => {
-                    const a = effectiveAbsorbConfig(ctx.session, ctx.config);
-                    return a?.enabled === true ? a.toolName ?? ABSORB_TOOL_NAME : undefined;
-                })();
+                const absorbName = activeAbsorbToolName(ctx.session, ctx.config);
                 if (
                     ctx.refreshFolded &&
                     proxyResults.some((pr) => (pr.name === "compress" || pr.name === absorbName) && !pr.result.includes("FAILED"))
@@ -865,7 +884,37 @@ export async function* runCompressLoop(
                     respResult = await fetchUpstream(newBody);
                 }
             } catch (e) {
-                if (!(e instanceof UpstreamHttpError)) throw e;
+                if (!(e instanceof UpstreamHttpError)) {
+                    // #1453: transport-level failure — no HTTP response ever
+                    // arrived. Previously this escaped the loop and surfaced as
+                    // a bare "fetch failed" stream error, killing the turn even
+                    // though the round's compress may already have landed. End
+                    // in-band like every other loop exit and tell the user what
+                    // survived. Client abort keeps the old path (socket gone).
+                    if (!signal?.aborted) {
+                        const kind = classifyUpstreamFailure(e, { viaProxy: ctx.proxyUrl !== undefined });
+                        let committedTokens = 0;
+                        let committedBlocks = 0;
+                        for (const pr of proxyResults) {
+                            if (pr.name === "compress" && !pr.result.includes("FAILED")) {
+                                const saved = /~(\d[\d,]*) tokens saved/.exec(pr.result);
+                                if (saved) committedTokens += Number(saved[1]!.replace(/,/g, ""));
+                                const blocks = /(\d+) block\(s\)/.exec(pr.result);
+                                if (blocks) committedBlocks += Number(blocks[1]);
+                            }
+                        }
+                        const absorbed = proxyResults.some((pr) => pr.name === activeAbsorbToolName(ctx.session, ctx.config) && !pr.result.includes("FAILED"));
+                        const note = committedTokens > 0
+                            ? `compression committed (~${committedTokens.toLocaleString("en-US")} tokens saved${committedBlocks > 0 ? ` in ${committedBlocks} block(s)` : ""}); `
+                            : absorbed ? "context work committed; " : "";
+                        const msg = `${note}the follow-up request to the model failed (${TRANSPORT_FAILURE_LABELS[kind]}) before any response — your context is intact, resend your last message to continue`;
+                        ctx.log(`[acp-loop] round ${round}: re-request transport failure (${kind}); ending turn in-band instead of throwing (#1453)`);
+                        loggerLog("error", `[acp-loop] re-request transport failure after ${round} round(s): ${formatUpstreamError(e, requestOptions.url, ctx.proxyUrl)}`);
+                        yield adapter.emitError(msg);
+                        return;
+                    }
+                    throw e;
+                }
                 // #684 learn-on-failure: a 400 mentioning reasoning_content on
                 // a thinking session is the split-turn signature — remember it
                 // on the session so #651's reasoning-drop never fires here
