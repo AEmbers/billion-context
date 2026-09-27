@@ -1126,11 +1126,6 @@ type FileConfig = {
     compress?: CompressSettings & { injectTool?: boolean; injectNudge?: boolean };
     promptCache?: { routing?: string };
     mitm?: { enabled?: boolean; domains?: string[] };
-    /** #1392: opt-in allowlist of non-http(s) baseUrl providers whose traffic MAY ride
-     *  bili (e.g. pi-claude-bridge's opaque "claude-bridge" scheme). A provider id is
-     *  opted in iff its value is strictly `true`. Only widens the compaction-ownership
-     *  candidate set — carriage evidence (carriedSids / status probe) still decides, so
-     *  unrouted traffic never cancels and #1382 cannot recur for a new provider class. */
     /** Set `false` to log real (non-public) target hosts instead of the
      *  `<private-host>` placeholder (#897; env BILI_LOG_MASK_HOSTS=0 wins). */
     maskHosts?: boolean;
