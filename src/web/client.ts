@@ -267,8 +267,9 @@ export const WEB_CLIENT = `(function () {
         rows.forEach((s) => tb.appendChild(sessionRow(s, false)));
     }
 
-    function mini(parts, label, value, good, sub, tip) {
-        parts.push('<div class="stat' + (good ? " good" : "") + '"' + (tip ? ' title="' + escapeHtml(tip) + '"' : "") + '"><div class="k">' + label + '</div><div class="v' + (value == null ? " faint" : "") + '">' + (value == null ? t("common.none") : value) + "</div>" + (sub ? '<div class="s">' + sub + "</div>" : "") + "</div>");
+    function mini(parts, label, value, good, sub, info) {
+        if (info) label = label + '<span class="qmark" data-qtip="' + escapeHtml(info) + '">?</span>';
+        parts.push('<div class="stat' + (good ? " good" : "") + '"><div class="k">' + label + '</div><div class="v' + (value == null ? " faint" : "") + '">' + (value == null ? t("common.none") : value) + "</div>" + (sub ? '<div class="s">' + sub + "</div>" : "") + "</div>");
     }
     function kv(parts, label, value, mono) {
         parts.push('<div class="k">' + label + '</div><div class="v' + (mono ? " mono" : "") + '">' + (value == null || value === "" ? t("common.none") : escapeHtml(String(value))) + "</div>");
@@ -692,6 +693,44 @@ export const WEB_CLIENT = `(function () {
             if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(md).then(done, fallback);
             else fallback();
         });
+        // #1426 web UI: "?" info marks (e.g. hit-rate miss split) - click opens a floating note
+        let qtipEl = null;
+        let qtipFor = null;
+        const hideQTip = () => { if (qtipEl) { qtipEl.remove(); qtipEl = null; qtipFor = null; } };
+        const showQTip = (el) => {
+            hideQTip();
+            const text = el.getAttribute("data-qtip") || "";
+            if (!text) return;
+            qtipEl = document.createElement("div");
+            qtipEl.className = "qtip";
+            qtipEl.textContent = text;
+            document.body.appendChild(qtipEl);
+            const r = el.getBoundingClientRect();
+            const w = qtipEl.offsetWidth;
+            const h = qtipEl.offsetHeight;
+            let left = r.right - 8;
+            if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
+            let top = r.bottom + 6;
+            if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+            qtipEl.style.left = left + "px";
+            qtipEl.style.top = top + "px";
+            qtipFor = el;
+        };
+        document.addEventListener("click", (ev) => {
+            const target = ev.target;
+            if (!target || !target.closest) return;
+            const q = target.closest(".qmark");
+            if (q) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                if (qtipFor === q) hideQTip();
+                else showQTip(q);
+                return;
+            }
+            hideQTip();
+        });
+        document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") hideQTip(); });
+        window.addEventListener("hashchange", hideQTip);
         if (dlBtn) dlBtn.addEventListener("click", () => {
             const url = URL.createObjectURL(new Blob([md], { type: "text/markdown;charset=utf-8" }));
             const a = document.createElement("a");
