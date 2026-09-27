@@ -12,8 +12,10 @@ import {
 import { log as loggerLog } from "./logger.js";
 import type { Session } from "./session.js";
 
-const SAMPLE_CAP = 512;
-const FOLD_CAP = 256;
+// Render window for handleAcpCache's detail:"full" text view (#1489). The
+// ledger itself is unbounded — this only bounds how many lines the text
+// listing shows so a marathon session cannot flood the caller's context.
+const FULL_DETAIL_LINES = 512;
 
 interface LedgerFold {
     seq: number;
@@ -118,7 +120,6 @@ function pushFold(led: CacheLedger, f: Omit<LedgerFold, "seq" | "T" | "hPct" | "
     }
     led.foldSeqCounter += 1;
     led.folds.push({ ...f, seq: led.foldSeqCounter, T: 0, hPct: null, requestsAfter: 0, k: null });
-    if (led.folds.length > FOLD_CAP) led.folds.splice(0, led.folds.length - FOLD_CAP);
 }
 
 /** Record compression folds materialized as new kernel blocks. Proxy mode
@@ -210,7 +211,6 @@ export function recordCacheSample(session: Session, s: { at: number; input: numb
         tr: dec.ttlRepay,
         foldSeq,
     });
-    if (led.lines.length > SAMPLE_CAP) led.lines.splice(0, led.lines.length - SAMPLE_CAP);
     const agg = led.agg;
     agg.requests += 1;
     agg.input += s.input;
@@ -297,7 +297,16 @@ export function buildSessionCacheReport(session: Session): CacheReport {
 export function handleAcpCache(session: Session, args?: Record<string, unknown>): string {
     try {
         const detail = args?.detail === "full" ? "full" : "summary";
-        return formatCacheReport(buildSessionCacheReport(session), session.id, { detail });
+        const report = buildSessionCacheReport(session);
+        if (detail === "full" && report.lines.length > FULL_DETAIL_LINES) {
+            const dropped = report.lines.length - FULL_DETAIL_LINES;
+            return formatCacheReport(
+                { ...report, lines: report.lines.slice(-FULL_DETAIL_LINES), linesOmitted: report.linesOmitted + dropped },
+                session.id,
+                { detail },
+            );
+        }
+        return formatCacheReport(report, session.id, { detail });
     } catch (err) {
         loggerLog("warn", `[${session.id}] [acp_cache] report failed: ${String(err)}`);
         return `[acp_cache FAILED: ${String(err)}]`;
