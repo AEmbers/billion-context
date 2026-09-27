@@ -64,6 +64,9 @@ function imageConversation(): unknown[] {
 interface RelayOpts {
     failFirstStreamingWith?: number;
     destroyFirst?: boolean;
+    /** 1-based streaming-call index that fails (default 1). F2 needs failure on
+     *  the SECOND call: the first establishes the session with a healthy turn. */
+    failStreamingCall?: number;
 }
 
 /** Mock relay: fails the FIRST streaming call (5xx or socket drop), then serves
@@ -85,8 +88,9 @@ function makeRelay(opts: RelayOpts) {
                 return;
             }
             streamingCall += 1;
-            if (opts.destroyFirst && streamingCall === 1) { req.socket.destroy(); return; }
-            if (opts.failFirstStreamingWith && streamingCall === 1) {
+            const failAt = opts.failStreamingCall ?? 1;
+            if (opts.destroyFirst && streamingCall === failAt) { req.socket.destroy(); return; }
+            if (opts.failFirstStreamingWith && streamingCall === failAt) {
                 res.writeHead(opts.failFirstStreamingWith, { "content-type": "application/json" });
                 res.end(RELAY_ERROR_BODY);
                 return;
@@ -200,6 +204,53 @@ test("#1493: relay 5xx arms at the outbound payload (fits) → below the emergen
         await r2.text();
         const s2 = listSessions().find((x) => x.id === sid);
         assert.equal(s2?.stats.lastInputTokens, 5000, "real usage report overwrote the armed value");
+    } finally {
+        proxy.close();
+        await once(proxy, "close");
+        relay.server.close();
+        await once(relay.server, "close");
+    }
+});
+
+test("#1498-F2: transform-failure fallback arms at the RAW view, not wire overhead", async () => {
+    // Scene: turn 1 healthy (usage 5000). Turn 2's kernel transform throws
+    // (broken state) → processedMessages = [] → the outbound IS the raw client
+    // body — the very scene #1493's fix claims to handle. Pre-rework the
+    // estimator saw only wire overhead (~hundreds of tokens) and the rescue
+    // never armed; it must measure the raw view instead.
+    const relay = makeRelay({ failFirstStreamingWith: 500, failStreamingCall: 2 });
+    relay.server.listen(0, "127.0.0.1");
+    await once(relay.server, "listening");
+    const upstreamPort = relay.server.address().port;
+    const { proxy, port } = await startProxy(upstreamPort, "pixels");
+
+    const TEXT_CHARS = 60_000;
+    const history = [{ role: "user", content: "x".repeat(TEXT_CHARS) }];
+    try {
+        const url = `http://127.0.0.1:${port}/bili/http://127.0.0.1:${upstreamPort}/v1/messages`;
+        const headers = { "content-type": "application/json", "x-acp-session": "f2-sess" };
+        const body = JSON.stringify({ model: "claude-relay", max_tokens: 1024, stream: true, system: "You are a helpful assistant.", messages: history });
+
+        const r1 = await fetch(url, { method: "POST", headers, body });
+        assert.equal(r1.status, 200, "turn 1 succeeds");
+        await r1.text();
+        const s1 = listSessions().find((x) => x.stats.lastInputTokens === 5000);
+        assert.ok(s1, "turn 1 reported usage (lastInputTokens = 5000)");
+
+        // Break the kernel state so turn 2's transform throws (the same seam
+        // tests/count-tokens.test.ts uses) → fallback forwards the raw body.
+        (s1 as unknown as { state: { messageRefs: null } }).state.messageRefs = null;
+
+        const r2 = await fetch(url, { method: "POST", headers, body });
+        assert.equal(r2.status, 500, "relay 5xx passes through on the fallback turn");
+        await r2.text();
+
+        const s2 = listSessions().find((x) => x.id === s1!.id);
+        assert.equal(s2?.stats.lastInputTokensSource, "estimate", "armed baseline is tagged as an estimate");
+        assert.ok(
+            (s2?.stats.lastInputTokens ?? 0) >= TEXT_CHARS,
+            `fallback arm must measure the RAW view (>= ${TEXT_CHARS} char bound), got ${s2?.stats.lastInputTokens} — overhead-only arming never rescues the #604 deadlock`,
+        );
     } finally {
         proxy.close();
         await once(proxy, "close");

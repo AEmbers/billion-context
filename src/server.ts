@@ -4278,12 +4278,26 @@ function outboundPayloadBreakdown(
     opts: ProxyOptions,
     route: ReturnType<typeof resolveUpstream>,
     reqUrl: string,
-): { textEstimate: number; overheadEstimate: number; imageTokens: number; payloadEstimate: number } {
+): { textEstimate: number; overheadEstimate: number; imageTokens: number; payloadEstimate: number; armEstimate: number } {
     const billingUpstream = route?.rewrittenUrl ?? (/^https?:\/\//i.test(reqUrl) ? reqUrl : opts.upstream);
     const imageTokens = imageTokensInRawBody(prepared.protocol, prepared.body, imageBillingFor(opts, billingUpstream));
-    const textEstimate = estimateCoreMessages(prepared.processedMessages);
+    // #1498-F2: a kernel-transform failure leaves processedMessages empty while
+    // the outbound IS the raw client body — measure that view instead of arming
+    // at wire overhead only (the mirror of localInputEstimate's fallback).
+    const msgs = prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages;
+    const textEstimate = estimateCoreMessages(msgs);
     const overheadEstimate = estimateWireOverhead(prepared.protocol, prepared.body);
-    return { textEstimate, overheadEstimate, imageTokens, payloadEstimate: textEstimate + overheadEstimate + imageTokens };
+    // #1498-F1: the arm value is not only a preflight floor — the kernel's
+    // tool-result truncation loop consumes it as its remaining-depth input, so
+    // an optimistic text estimate (chars/4 undercounts dense JSON/code by up to
+    // ~4x, #553) stops the loop one candidate early and re-breaks the #604
+    // relay rescue. The arming quantity is therefore floored by the text char
+    // bound, which never undershoots and deliberately does NOT count image
+    // base64 — image-heavy payloads keep the billing-accurate payloadEstimate
+    // (#1493) while text-dominated near-window payloads arm deep enough for the
+    // truncation loop to clear hidden upstream tolerances (#604).
+    const armEstimate = Math.max(textEstimate, estimateCoreMessagesUpper(msgs)) + overheadEstimate + imageTokens;
+    return { textEstimate, overheadEstimate, imageTokens, payloadEstimate: textEstimate + overheadEstimate + imageTokens, armEstimate };
 }
 
 async function preflightCompressIfNeeded(
@@ -4794,7 +4808,7 @@ async function forward(
         recordUpstreamConnection(upstreamUrl, proxyUrl, error);
         // #604: a network-level failure (socket reset, timeout abort) also never
         // reports usage — arm the emergency shrink like the 5xx branch below.
-        if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure", outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").payloadEstimate);
+        if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure", outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").armEstimate);
         // [#1343] no response means the attached full text never reached the model —
         // drop-and-log it (a corrective note surfaces on the next qualifying request).
         if (prepared && prepared.attachedRetrievals && prepared.attachedRetrievals.length > 0) dropRetrievals(prepared.session, prepared.attachedRetrievals.map((i) => i.ref), "upstream network failure");
@@ -5116,7 +5130,7 @@ async function forward(
         // inspectContextOverflow never matches 5xx (400/413 only), so the
         // overflow path above could not have handled this response.
         if (prepared?.session && upstream.status >= 500) {
-            armFailureShrink(prepared, log, `upstream ${upstream.status}`, outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").payloadEstimate);
+            armFailureShrink(prepared, log, `upstream ${upstream.status}`, outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").armEstimate);
         }
         // #174: always log a non-2xx upstream response (status + request-id +
         // body snippet) — a 4xx/5xx with zero log trace is a diagnostic
