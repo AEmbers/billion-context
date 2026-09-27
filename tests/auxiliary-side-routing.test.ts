@@ -146,6 +146,26 @@ test("extractWireTexts: unrecognized shapes return undefined (fail-safe to main-
     assert.deepEqual(extractWireTexts("responses", { input: "just a string" }), [{ role: "user", text: "just a string" }]);
 });
 
+// [review F1-parity] content:null / absent content is the canonical shape of
+// tool-calling assistant turns — one such message must not abandon the whole
+// view, or the anchor is never recorded and routing stays silently inert.
+test("extractWireTexts: null/absent message content contributes empty text (F1)", () => {
+    assert.deepEqual(extractWireTexts("openai", { messages: [
+        { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "f", arguments: "{}" } }] },
+        { role: "tool", tool_call_id: "t1", content: "result" },
+    ] }), [
+        { role: "assistant", text: "" },
+        { role: "tool", text: "result" },
+    ]);
+    assert.deepEqual(extractWireTexts("responses", { input: [
+        { type: "message", role: "assistant" },
+        { type: "message", role: "user", content: "next" },
+    ] }), [
+        { role: "assistant", text: "" },
+        { role: "user", text: "next" },
+    ]);
+});
+
 test("extractWireTexts: responses and google wire shapes", () => {
     const resp = extractWireTexts("responses", { input: [
         { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },

@@ -267,6 +267,11 @@ export function extractWireTexts(protocol: WireProtocol, parsed: unknown): WireT
                     }
                 }
                 text = parts.join("\n");
+            } else if (c === null || c === undefined) {
+                // [#1431 review F1-parity] same canonical shape as the
+                // chat-wire branch: no content contributes empty text instead
+                // of abandoning the whole view (identity rides role + position).
+                text = "";
             } else {
                 return undefined;
             }
