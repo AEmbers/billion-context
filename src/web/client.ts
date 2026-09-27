@@ -267,8 +267,8 @@ export const WEB_CLIENT = `(function () {
         rows.forEach((s) => tb.appendChild(sessionRow(s, false)));
     }
 
-    function mini(parts, label, value, good) {
-        parts.push('<div class="stat' + (good ? " good" : "") + '"><div class="k">' + label + '</div><div class="v' + (value == null ? " faint" : "") + '">' + (value == null ? t("common.none") : value) + "</div></div>");
+    function mini(parts, label, value, good, sub, tip) {
+        parts.push('<div class="stat' + (good ? " good" : "") + '"' + (tip ? ' title="' + escapeHtml(tip) + '"' : "") + '"><div class="k">' + label + '</div><div class="v' + (value == null ? " faint" : "") + '">' + (value == null ? t("common.none") : value) + "</div>" + (sub ? '<div class="s">' + sub + "</div>" : "") + "</div>");
     }
     function kv(parts, label, value, mono) {
         parts.push('<div class="k">' + label + '</div><div class="v' + (mono ? " mono" : "") + '">' + (value == null || value === "" ? t("common.none") : escapeHtml(String(value))) + "</div>");
@@ -490,14 +490,14 @@ export const WEB_CLIENT = `(function () {
         mini(parts, t("common.requests"), d.requests ? fmtW(d.requests) : null);
         mini(parts, t("ov.input_tokens"), d.inputTokens ? fmtW(d.inputTokens) : null);
         mini(parts, t("ov.cached_tokens"), d.cachedTokens ? fmtW(d.cachedTokens) : null);
-        mini(parts, t("det.hit_pct"), d.cacheHitPct == null ? null : d.cacheHitPct.toFixed(1) + "%");
+        const mt = d.ledger && d.ledger.totals;
+        const missArgs = mt && mt.input > 0 ? { n: fmtW(mt.newContent || 0), c: fmtW(mt.compRepay || 0), x: fmtW(mt.ttlRepay || 0), pn: (((mt.newContent || 0) / mt.input) * 100).toFixed(1), pc: (((mt.compRepay || 0) / mt.input) * 100).toFixed(1), px: (((mt.ttlRepay || 0) / mt.input) * 100).toFixed(1) } : null;
+        mini(parts, t("det.hit_pct"), d.cacheHitPct == null ? null : d.cacheHitPct.toFixed(1) + "%", false, missArgs ? t("det.miss_sub", { x: missArgs.px, c: missArgs.pc, n: missArgs.pn }) : "", missArgs ? t("det.miss_split_line", missArgs) : "");
         mini(parts, t("ov.output_tokens"), d.outputTokens ? fmtW(d.outputTokens) : null);
         const dSavedV = d.netSaved != null ? d.netSaved : d.tokensSaved;
         mini(parts, t("ov.tokens_saved"), dSavedV ? fmtW(dSavedV) : null, dSavedV > 0);
         mini(parts, t("det.last_input"), (d.lastInputTokens || 0) > 0 ? fmtW(d.lastInputTokens) : null);
         parts.push("</div>");
-        const mt = d.ledger && d.ledger.totals;
-        if (mt && mt.input > 0) parts.push('<div style="margin-top:10px;font-size:12.5px;color:#57606a">' + t("det.miss_split_line", { n: fmtW(mt.newContent || 0), c: fmtW(mt.compRepay || 0), x: fmtW(mt.ttlRepay || 0), pn: (((mt.newContent || 0) / mt.input) * 100).toFixed(1), pc: (((mt.compRepay || 0) / mt.input) * 100).toFixed(1), px: (((mt.ttlRepay || 0) / mt.input) * 100).toFixed(1) }) + "</div>");
         if (d.contextWindow && d.contextWindow > 0) {
             const pct = Math.min(100, Math.round((d.contextTokens / d.contextWindow) * 100));
             const cls = pct >= 90 ? "bar-fill danger" : pct >= 70 ? "bar-fill warn" : "bar-fill";
