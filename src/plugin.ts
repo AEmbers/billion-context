@@ -16,6 +16,7 @@ import { ccrEnabled, ccrLoopConfig, contentStoreOf, retrieveToolName } from "./s
 import { imageUsageSuffix } from "./image-compress.js";
 import { emitStreamError, emitUpstreamTruncation } from "./stream-error.js";
 import { degenerateTurnWarning } from "./degenerate-turn.js";
+import { PANEL_BOX_FOOTER } from "./acp-panel.js";
 import { warnCacheCollapse } from "./cache-warn.js";
 import { recordCacheSample } from "./cache-ledger.js";
 import { promptInputTotal, type WireProtocol } from "./util.js";
@@ -600,6 +601,9 @@ export type PluginToolDeps = {
     core: CompressionCore;
     config: Config;
     log: (level: string, msg: string) => void;
+    // Browser-reachable origin of THIS proxy (http://host:port) for the human-facing
+    // Web UI deep links inside panels/reports; absent in test harnesses/embeds.
+    webOrigin?: string;
 };
 
 /** Reverse-lookup the conversation id bound to a session id. #656: the
@@ -694,6 +698,14 @@ export function _chainVerdictMapForTest(): Map<string, ChainVerdict> {
  *  server renders it once and all clients show it without agent-side changes. */
 function chainAdvisoryPanel(v: ChainVerdict): string {
     return `ℹ️ billion-context: this conversation carried ACP-shaped content (evidence: ${v.kind}, protocol ${v.protocol}) with no prior local compression state. Historical ACP content is advisory-only (#1357) — it was NOT treated as a foreign bili chain, so the request was processed normally and this conversation owns its own compression session. Last observation: ${new Date(v.at).toISOString()}. See the [chain] warn in the bili log.`;
+}
+
+/** Browser deep link into the built-in Web UI session detail page; undefined when no
+ *  usable origin was provided (tests/embeds) or the id is empty. */
+function webSessionUrl(origin: string | undefined, sessionId: string): string | undefined {
+    const o = typeof origin === "string" ? origin.trim().replace(/\/+$/, "") : "";
+    if (o.length === 0 || sessionId.length === 0) return undefined;
+    return `${o}/__bili/#/session/${encodeURIComponent(sessionId)}`;
 }
 
 export function handlePluginStatus(conversationId: string, res: import("node:http").ServerResponse, deps: PluginToolDeps, fallbackLatest = false): void {
@@ -802,6 +814,14 @@ export function handlePluginStatus(conversationId: string, res: import("node:htt
     } catch {
         panel = undefined;
     }
+    // Human-only deep link. Deliberately inserted BEFORE the footer line: the LLM-context
+    // stripper (src/acp-panel.ts) anchors this box on its top border AND its
+    // "Tag visibility" footer — anything appended after the footer would break the whole
+    // message match and ship the panel into the model context.
+    const webUrl = webSessionUrl(deps.webOrigin, session.id);
+    if (panel !== undefined && webUrl !== undefined) {
+        panel = panel.replace(PANEL_BOX_FOOTER, `\nWeb UI: ${webUrl}\n${PANEL_BOX_FOOTER}`);
+    }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
         ok: true,
@@ -820,6 +840,7 @@ export function handlePluginStatus(conversationId: string, res: import("node:htt
         requests: session.stats.requests,
         blocks: session.state.blocks.map((b) => ({ id: b.blockId, tier: b.tier, active: b.active })),
         panel,
+        webUrl: webUrl ?? null,
         lastSeen: session.lastSeen,
     }));
 }
@@ -946,8 +967,17 @@ export async function handlePluginTool(
     }
     markDirty(session);
     deps.log("info", `[${session.id}] [plugin] tool ${tool} executed via plugin (${result.length} chars)`);
+    // Same deep link on the /acp-cache display surfaces: clients wrap this text in
+    // [acp-cache]/[/acp-cache] markers and strip it from model context by marker
+    // (src/acp-panel.ts). The MCP acp_cache path shares this endpoint — one extra line
+    // is harmless context and lets the model tell the user the link, too.
+    let sentResult = result;
+    if (tool === "acp_cache") {
+        const wu = webSessionUrl(deps.webOrigin, session.id);
+        if (wu !== undefined) sentResult = `Web UI: ${wu}\n\n${result}`;
+    }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, tool, conversationId, result }));
+    res.end(JSON.stringify({ ok: true, tool, conversationId, result: sentResult }));
 }
 
 // creationTokens = Anthropic cache-write segment (cache_creation_input_tokens):

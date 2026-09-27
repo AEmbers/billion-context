@@ -68,11 +68,11 @@ import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
-import { buildSessionCacheReport } from "./cache-ledger.js";
+import { buildSessionCacheReport, handleAcpCache } from "./cache-ledger.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
-import { renderUI, handleConfigGet, handleConfigPut } from "./web/index.js";
+import { renderUI, handleConfigGet, handleConfigPut, buildOverview, buildSessionList, buildSessionDetail, hiddenEmptyCount } from "./web/index.js";
 import { reapOrphanBlocks } from "./orphan-gc.js";
 import { conflictScanEnabled, isDesignAbsorbed, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
 import { recordConflict, summarizeConflicts } from "./conflict-watch.js";
@@ -881,6 +881,10 @@ async function handle(
     if (req.method === "GET" && req.url === "/__bili/stats") return sendStats(res);
     if (req.method === "GET" && req.url?.startsWith("/__bili/cache-report")) return sendCacheReport(res, req.url);
     if (req.method === "GET" && req.url === "/__bili/status") return sendStatus(res, opts);
+    if (req.method === "GET" && req.url === "/__bili/overview") return sendOverview(res, opts);
+    if (req.method === "GET" && req.url === "/__bili/sessions") return sendWebSessions(res);
+    if (req.method === "GET" && req.url?.startsWith("/__bili/logs")) return sendWebLogs(res, req);
+    if (req.method === "GET" && req.url?.startsWith("/__bili/sessions/") && req.url.endsWith("/detail")) return sendWebSessionDetail(res, req.url);
     if (req.method === "GET" && req.url === "/") {
         // Browser visits root → redirect to the web UI. curl / health probes
         // (Accept: */* or no Accept) still get the JSON health check so
@@ -1004,7 +1008,10 @@ async function handle(
             res.end(JSON.stringify({ ok: false, error: "conversationId query parameter is required" }));
             return;
         }
-        return handlePluginStatus(conversationId, res, { core, config, log }, params.get("fallback") === "latest");
+        // Web UI origin as the user's browser dials it: the ACTUAL bound port
+        // (req.socket.localPort differs from opts.port when listening on port 0).
+        const webOrigin = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${req.socket?.localPort ?? opts.port}`;
+        return handlePluginStatus(conversationId, res, { core, config, log, webOrigin }, params.get("fallback") === "latest");
     }
     if (req.method === "POST" && req.url === "/__bili/watcher") {
         // #7: an ATTACHING claude session registers its host pid so the shared
@@ -1036,7 +1043,8 @@ async function handle(
     if (req.method === "POST" && req.url === "/__bili/plugin/tool") {
         try {
             const body = await readBody(req);
-            return await handlePluginTool(body.toString("utf8"), res, { core, config, log });
+            const webOrigin = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${req.socket?.localPort ?? opts.port}`;
+            return await handlePluginTool(body.toString("utf8"), res, { core, config, log, webOrigin });
         } catch (err) {
             res.writeHead(err instanceof BodyTooLargeError ? 413 : 400, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: String(err) }));
@@ -1820,6 +1828,15 @@ async function handle(
         }
         if (!pluginAgent && typeof session.metadata.pluginAgent === "string") pluginAgent = session.metadata.pluginAgent;
         if (pluginAgent && !pluginConversation) pluginConversation = conversation;
+        // #1426 web UI: persist which client this session came from, first hit wins.
+        // Plugin agents are already recorded above as metadata.pluginAgent; non-plugin
+        // clients fall back to header sniffing, then to a truncated User-Agent hint.
+        if (!pluginAgent && !session.metadata.clientHint) {
+            const uaRaw = req.headers["user-agent"];
+            const ua = typeof uaRaw === "string" ? uaRaw : Array.isArray(uaRaw) ? String(uaRaw[0] ?? "") : "";
+            const hint = sniffScanClient(req.headers) ?? (ua ? ua.slice(0, 120) : undefined);
+            if (hint) session.metadata.clientHint = hint;
+        }
         // [#1333] Real pi plugin traffic arrives pre-stamped: `x-bili-plugin`
         // + `x-bili-plugin-conversation` (set by the extension, pi.ts:127)
         // set pluginAgent/pluginConversation from headers above, so the
@@ -5701,7 +5718,9 @@ function sendCacheReport(res: http.ServerResponse, url: string): void {
         sessions = sessions.slice().sort((a, b) => b.lastSeen - a.lastSeen);
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ reports: sessions.map((s) => ({ id: s.id, report: buildSessionCacheReport(s) })) }, null, 2));
+    // Same markdown the acp_cache MCP tool emits (handleAcpCache = formatCacheReport),
+    // so web copy/download matches /acp-cache output exactly.
+    res.end(JSON.stringify({ reports: sessions.map((s) => ({ id: s.id, report: handleAcpCache(s, { detail: "full" }) })) }, null, 2));
 }
 
 // #1206: orphan reaping was silent — blocks deactivated because their source
@@ -5754,6 +5773,90 @@ async function sendStatus(res: http.ServerResponse, opts: ProxyOptions): Promise
     }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ version: VERSION, diskVersion, stale, autoRestartOnUpdate: opts.autoRestartOnUpdate, inFlight: totalInFlight(), conflicts: summarizeConflicts(listSessions()) }, null, 2));
+}
+
+async function sendOverview(res: http.ServerResponse, opts: ProxyOptions): Promise<void> {
+    let diskVersion: string | undefined;
+    let stale = false;
+    try {
+        ({ diskVersion, stale } = await detectStaleInstall(PACKAGE_NAME, VERSION));
+    } catch {
+        // fs hiccup: report running state only, never fail the overview endpoint
+    }
+    const overview = await buildOverview();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+        overview,
+        version: VERSION,
+        diskVersion,
+        stale,
+        autoRestartOnUpdate: opts.autoRestartOnUpdate,
+        inFlight: totalInFlight(),
+        blindTunnels: getBlindTunnelStats(),
+        conflicts: summarizeConflicts(listSessions()),
+        passthrough: { enabled: !!opts.passthrough, source: opts.passthroughSource },
+    }, null, 2));
+}
+
+async function sendWebSessions(res: http.ServerResponse): Promise<void> {
+    const sessions = await buildSessionList();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ sessions, hiddenEmpty: hiddenEmptyCount() }, null, 2));
+}
+
+/** #1426 web UI run-log viewer: tail of the rotated logger files (bili.log.old
+ *  + bili.log), optionally filtered by a case-insensitive substring (?q=).
+ *  ?lines= caps the tail at 2000; ?raw=1 streams the same tail as a .txt download. */
+async function sendWebLogs(res: http.ServerResponse, req: http.IncomingMessage): Promise<void> {
+    const u = new URL(req.url ?? "/__bili/logs", "http://localhost");
+    const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
+    let n = Number(u.searchParams.get("lines") ?? "500");
+    if (!Number.isFinite(n) || n <= 0) n = 500;
+    n = Math.min(Math.floor(n), 2000);
+    const logFile = getLogPath() ?? defaultLogFile();
+    const dir = logFile && logFile.includes("/") ? logFile.slice(0, logFile.lastIndexOf("/") + 1) : "";
+    const candidates = [dir + "bili.log.old", dir + "bili.log"];
+    const existing = candidates.filter((f) => {
+        try { return fs.statSync(f).isFile(); } catch { return false; }
+    });
+    let all: string[] = [];
+    for (const f of existing) {
+        let text: string;
+        try { text = fs.readFileSync(f, "utf8"); } catch { continue; }
+        const ls = text.split("\n").filter((l) => l.length > 0);
+        all = all.concat(q ? ls.filter((l) => l.toLowerCase().includes(q)) : ls);
+    }
+    const total = all.length;
+    const tail = all.slice(-n);
+    if (u.searchParams.get("raw") === "1") {
+        res.writeHead(200, {
+            "content-type": "text/plain; charset=utf-8",
+            "content-disposition": 'attachment; filename="billion-context-log.txt"',
+        });
+        res.end(tail.join("\n"));
+        return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ path: logFile, total, lines: tail }, null, 2));
+}
+
+async function sendWebSessionDetail(res: http.ServerResponse, url: string): Promise<void> {
+    const prefix = "/__bili/sessions/";
+    const suffix = "/detail";
+    let id = "";
+    try {
+        id = decodeURIComponent(url.slice(prefix.length, -suffix.length));
+    } catch {
+        // malformed percent-encoding → treat as unknown session (404 below)
+    }
+    const detail = await buildSessionDetail(id);
+    if (!detail) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: `unknown session: ${id}` }));
+        return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(detail, null, 2));
 }
 
 function headerValue(req: http.IncomingMessage, name: string): string | undefined {
