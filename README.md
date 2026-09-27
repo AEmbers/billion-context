@@ -1201,7 +1201,9 @@ section used to warn about (#1262):
 - A request with no usable signal at all is rejected with an explicit 400
   instead of silently colliding with something else's state.
 
-Design record and threat model: [SESSION-IDENTITY.md](SESSION-IDENTITY.md).
+Design record and threat model: [SESSION-IDENTITY.md](SESSION-IDENTITY.md). The
+message-granularity sibling (why identity is content-derived, not an
+assigned id) is [MESSAGE-IDENTITY.md](MESSAGE-IDENTITY.md).
 
 For upstream sticky-routing, the proxy forwards only identity values the
 client already supplied (e.g. a body `session_id` is forwarded upstream as
