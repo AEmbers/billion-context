@@ -106,3 +106,28 @@ test("#1439: non-streaming JSON executes + strips search_context text trigger (s
         globalThis.fetch = previousFetch;
     }
 });
+
+test("#1439 review: no-trigger response round-trips unchanged (byte-identical, zero fetch)", async () => {
+    let fetchCalls = 0;
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+        fetchCalls++;
+        return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+        const body = jsonResponse("plain answer, no triggers at all");
+        // extra unknown keys + unusual key order must survive untouched —
+        // the JSON loop only re-serializes when a trigger fires.
+        body["unusual_top_key"] = { z: 1, a: [1, 2, "three"] };
+        const out = await compressLoopResponsesJson(
+            body,
+            makeCtx(() => {}),
+            { model: "gpt-4o", input: [{ type: "message", role: "user", content: "plain" }] },
+            unusedOpts,
+        );
+        assert.equal(fetchCalls, 0, "no trigger → no upstream re-request");
+        assert.strictEqual(out, body, "same object reference — never re-serialized");
+    } finally {
+        globalThis.fetch = previousFetch;
+    }
+});
