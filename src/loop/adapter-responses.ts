@@ -28,9 +28,13 @@ interface FunctionCallBuffer {
 const RESPONSES_ITEM_ID_MAX = 64;
 
 /**
- * Heal client rollouts already poisoned with over-long ids (they 400 every
- * request otherwise). Rewrites in place, deterministically, so repeated
- * requests keep referencing the same replacement id (#242).
+ * Heal client rollouts already poisoned with over-long Bili-generated ids
+ * (they 400 every request otherwise). Only the msg-proxy-* namespace bili
+ * owns is rewritten — in place and deterministically, so repeated requests
+ * keep referencing the same replacement id (#242). Provider-issued opaque
+ * ids (reasoning rs_*, function_call fc_*, ...) validate against their
+ * owner's shape rules and carry replay correspondence, so they must reach
+ * the upstream byte-identical (#1474).
  */
 export function normalizeResponsesMessageItems(input: unknown): number {
     if (!Array.isArray(input)) return 0;
@@ -63,7 +67,8 @@ export function sanitizeResponsesInputIds(input: unknown): void {
             delete rec.id;
             continue;
         }
-        if (typeof rec?.id === "string" && rec.id.length > RESPONSES_ITEM_ID_MAX) {
+        if (typeof rec?.id === "string" && rec.id.startsWith("msg-proxy-")
+            && rec.id.length > RESPONSES_ITEM_ID_MAX) {
             rec.id = `msg-fix-${hashId(rec.id)}`;
         }
     }
