@@ -116,7 +116,7 @@ export const WEB_CLIENT = `(function () {
         const named = Boolean(s.title || s.label || s.firstBlockHint);
         const name = s.title || s.label || s.firstBlockHint || t("ses.no_title");
         const live = s.live && !s.restored;
-        return '<span class="row-title' + (named ? "" : " faint") + '">' + escapeHtml(name) + "</span>"
+        return '<span class="row-title clip w-title' + (named ? "" : " faint") + '">' + escapeHtml(name) + "</span>"
             + ' <span class="badge ' + (live ? "live" : "disk") + '">' + (live ? t("common.live") : t("common.disk")) + "</span>"
             + (s.restored ? ' <span class="dim small">' + t("common.restored") + "</span>" : "")
             + '<span class="row-id">' + escapeHtml(s.id) + "</span>";
@@ -132,9 +132,9 @@ export const WEB_CLIENT = `(function () {
         const tr = document.createElement("tr");
         tr.title = s.id;
         if (compact) {
-            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + protoBadge(s.protocol) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td>' + savedTd(s) + '<td class="dim">' + timeAgo(s.lastSeen) + "</td>";
+            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + protoBadge(s.protocol) + '</span></td><td class="num">' + fmtW(s.contextTokens) + '</td>' + savedTd(s) + '<td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         } else {
-            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td class="mono dim small">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + '<td class="num">' + (s.cacheHitPct == null ? t("common.none") : s.cacheHitPct.toFixed(1) + "%" + ((s.missDropNew != null || s.missDropComp != null || s.missDropTtl != null) ? '<br><span class="dim small" style="white-space:nowrap" title="' + escapeHtml(t("ses.drop_ph")) + '">' + t("ses.drop_split", { a: s.missDropNew, b: s.missDropComp, x: s.missDropTtl }) + "</span>" : "")) + '</td><td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
+            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td><span class="mono dim small clip w-up">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + '<td class="num">' + (s.cacheHitPct == null ? t("common.none") : s.cacheHitPct.toFixed(1) + "%" + ((s.missDropNew != null || s.missDropComp != null || s.missDropTtl != null) ? '<br><span class="dim small" title="' + escapeHtml(t("ses.drop_ph")) + '">' + t("ses.drop_split", { a: s.missDropNew, b: s.missDropComp, x: s.missDropTtl }) + "</span>" : "")) + '</td><td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         }
         tr.addEventListener("click", () => { location.hash = "#/session/" + encodeURIComponent(s.id); });
         return tr;
@@ -615,10 +615,10 @@ export const WEB_CLIENT = `(function () {
     }
     // Shared clipboard helper: flash "copied" on the clicked button.
     function copyText(text, btn) {
+        // Universal pattern: never swap the button label — flash a green state instead.
         const done = () => {
-            const orig = btn.textContent;
-            btn.textContent = "✓ " + t("common.copied");
-            setTimeout(() => { btn.textContent = orig; }, 1200);
+            btn.classList.add("copied");
+            setTimeout(() => { btn.classList.remove("copied"); }, 1200);
         };
         const fallback = () => {
             const ta = document.createElement("textarea");
@@ -694,9 +694,8 @@ export const WEB_CLIENT = `(function () {
                 const md = await grab();
                 try { await navigator.clipboard.writeText(md); }
                 catch (e) { const ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
-                const old = copyB.innerHTML;
-                copyB.innerHTML = "&#10003; " + t("common.copied");
-                setTimeout(() => { copyB.innerHTML = old; }, 1200);
+                copyB.classList.add("copied");
+                setTimeout(() => { copyB.classList.remove("copied"); }, 1200);
             } catch (e) { toast(t("toast.failed", { msg: e.message }), "err"); } finally { busy(copyB, false); }
         });
         dlB.addEventListener("click", async () => {
@@ -722,7 +721,7 @@ export const WEB_CLIENT = `(function () {
         }
         const md = d.handoffMd;
         if (copyBtn) copyBtn.addEventListener("click", () => {
-            const done = () => { copyBtn.textContent = t("common.copied"); setTimeout(() => { copyBtn.textContent = t("det.handoff_copy_md"); }, 1200); };
+            const done = () => { copyBtn.classList.add("copied"); setTimeout(() => { copyBtn.classList.remove("copied"); }, 1200); };
             const fallback = () => {
                 const ta = document.createElement("textarea");
                 ta.value = md;
@@ -872,7 +871,14 @@ export const WEB_CLIENT = `(function () {
         } catch (e) { /* the log endpoint is best-effort; stay quiet */ }
     }
 
+    function bindLauncherNotes() {
+        // Per-client launch notes (from the README launcher table) as hover tooltips.
+        const N = { pi: t("con.note_pi"), codex: t("con.note_codex"), claude: t("con.note_claude"), omp: t("con.note_omp"), opencode: t("con.note_opencode"), hermes: t("con.note_hermes"), dsh: t("con.note_dsh"), codebuddy: t("con.note_codebuddy"), qoder: t("con.note_qoder"), trae: t("con.note_trae"), jcode: t("con.note_jcode"), kimi: t("con.note_kimi"), gemini: t("con.note_gemini"), iflow: t("con.note_iflow"), qwen: t("con.note_qwen"), mcode: t("con.note_mcode"), aider: t("con.note_aider"), copilot: t("con.note_copilot"), amp: t("con.note_amp"), goose: t("con.note_goose") };
+        document.querySelectorAll(".chip[data-launcher]").forEach((el) => { const n = N[el.getAttribute("data-launcher")]; if (n) el.title = n; });
+    }
+
     function route() {
+        bindLauncherNotes();
         const hash = location.hash || "#/overview";
         const qi = hash.indexOf("?");
         const hbase = qi < 0 ? hash : hash.slice(0, qi);
@@ -1001,12 +1007,9 @@ export const WEB_CLIENT = `(function () {
                 if (box) text = box.textContent || "";
             }
             if (!text) return;
-            const span = btn.querySelector("span");
-            const getText = () => (span ? span.textContent : btn.textContent);
-            const setText = (v) => { if (span) span.textContent = v; else btn.textContent = v; };
-            const orig = getText();
             const done = () => {
-                setText(t("common.copied")); setTimeout(() => { setText(orig || t("common.copy")); }, 1200);
+                btn.classList.add("copied");
+                setTimeout(() => { btn.classList.remove("copied"); }, 1200);
             };
             const fallback = () => {
                 const ta = document.createElement("textarea");

@@ -125,11 +125,11 @@ main { max-width: 1200px; margin: 0 auto; padding: 20px; }
 
 table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.data th {
-    text-align: left; padding: 9px 12px; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em;
+    text-align: left; padding: 7px 9px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
     color: var(--text-muted); border-bottom: 1px solid var(--border); background: var(--bg-muted);
     white-space: nowrap;
 }
-table.data td { padding: 9px 12px; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+table.data td { padding: 7px 9px; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
 table.data tr:last-child td { border-bottom: none; }
 table.data tbody tr { cursor: pointer; }
 table.data tbody tr:hover { background: var(--bg-muted); }
@@ -288,7 +288,15 @@ pre.tool-args, pre.tool-out { margin: 6px 0 0; padding: 8px; background: var(--b
 .qmark:hover { color: var(--accent); }
 .qtip { position: fixed; z-index: 60; max-width: 380px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15); padding: 10px 12px; font-size: 12.5px; line-height: 1.55; color: var(--text-muted); }
 .twrap { overflow-x: auto; }
-.tproc table.data { min-width: 660px; }
-.twide table.data { min-width: 1020px; }
+.tproc table.data { min-width: 520px; }
+.twide table.data { min-width: 940px; }
+.clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.w-title { display: inline-block; max-width: 230px; vertical-align: bottom; }
+.w-up { display: inline-block; max-width: 128px; vertical-align: bottom; }
+.copy-btn.copied, .btn.copied { border-color: var(--green); color: var(--green); background: var(--green-soft); }
+.twide table.data th, .twide table.data td { padding-left: 7px; padding-right: 7px; }
+.twide .w-title { max-width: 200px; }
+.twide .w-up { max-width: 112px; }
+.twide .badge { white-space: normal; }
 .logbox { font-family: var(--mono); font-size: 11.5px; line-height: 1.5; padding: 12px 14px; max-height: 72vh; overflow: auto; white-space: pre-wrap; word-break: break-word; background: var(--bg-muted); border-radius: 0 0 8px 8px; margin: 0; color: var(--text); }
 `;
