@@ -268,8 +268,6 @@ function postCompressTail(ctx: RewriteCtx, cleanSuccess: boolean): string {
 // re-issuable. Apply-layer per-range errors (unknown refs, …) get the same
 // treatment: previously also invisible when some other range in the batch
 // succeeded.
-// #1495: apply-layer per-range errors were invisible whenever some other
-// range in the batch succeeded; surface them (capped) on the receipt.
 function applyErrorNote(r: { errors: string[] }): string {
     if (r.errors.length === 0) return "";
     const errs = r.errors.slice(0, 3).map((e) => e.length > 200 ? `${e.slice(0, 200)}…` : e).join(" | ");
