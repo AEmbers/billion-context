@@ -117,9 +117,13 @@ export const WEB_CLIENT = `(function () {
         const name = s.title || s.label || s.firstBlockHint || t("ses.no_title");
         const live = s.live && !s.restored;
         // Only actively running sessions get a status tag; disk/restored rows carry none.
-        return '<span class="row-title clip w-title' + (named ? "" : " faint") + '">' + escapeHtml(name) + "</span>"
+        // The whole cell is a real hash anchor: plain clicks route inside the SPA exactly as
+        // before (the row handler bails on <a>), while Ctrl/Cmd+click or middle-click opens
+        // the session in a new tab for free (#1426 user ask).
+        const href = "#/session/" + encodeURIComponent(s.id);
+        return '<a class="slink" href="' + href + '"><span class="row-title clip w-title' + (named ? "" : " faint") + '">' + escapeHtml(name) + "</span>"
             + (live ? ' <span class="badge live" title="' + escapeHtml(t("ses.badge_live_tip")) + '">' + t("common.live") + "</span>" : "")
-            + '<span class="row-id">' + escapeHtml(s.id) + "</span>";
+            + '<span class="row-id">' + escapeHtml(s.id) + "</span></a>";
     }
     // SAVED column prefers ledger-derived net savings; pre-tagging sessions fall back
     // to the local tokensSaved estimate; neither present => honest dash, never fake 0.

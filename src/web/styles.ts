@@ -279,6 +279,8 @@ pre.small-pre { max-height: 220px; overflow: auto; }
 .editor:disabled { opacity: 0.6; cursor: not-allowed; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { border: 1px solid var(--border); background: var(--bg-muted); border-radius: 999px; padding: 4px 12px; font-size: 12px; color: var(--text-muted); }
+.slink { display: block; color: inherit; text-decoration: none; }
+.slink:hover .row-title { color: var(--accent); text-decoration: underline; }
 .row-id { display: block; margin-top: 3px; font-family: var(--mono); font-size: 11px; color: var(--text-faint); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pt-row { display: flex; align-items: center; gap: 10px; }
 
