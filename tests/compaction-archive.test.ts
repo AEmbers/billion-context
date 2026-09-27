@@ -51,14 +51,14 @@ function sessionWithActiveBlock(): { session: Session; blockId: string; tail: Co
 
 // Mirrors server.ts prepareAnthropic: capture active ids → shortened-history
 // turn (syncBlocks deactivates) → applyCompactionArchive.
-function runShortenedTurn(session: Session, tail: CoreMessage[], boundary: boolean): string {
+function runShortenedTurn(session: Session, tail: CoreMessage[], boundary: boolean, log: (level: string, msg: string) => void = noLog): string {
     const core = createCore();
     const config = defaultConfig(200000);
     const activeBefore = new Set(session.state.blocks.filter((b) => b.active).map((b) => b.blockId));
     if (boundary) markCompactionBoundary(session);
     const turn = core.processTurn({ messages: tail, state: session.state, config, tokenCount: 9999, renderTags: "text-only" });
     session.state = turn.state;
-    applyCompactionArchive(session, activeBefore, new Set(tail.map((m) => m.id)), noLog);
+    applyCompactionArchive(session, activeBefore, new Set(tail.map((m) => m.id)), log);
     return [...activeBefore].join(",");
 }
 
@@ -87,12 +87,14 @@ test("compaction archive: WITHOUT the boundary the block is silently deactivated
 test("compaction archive: byRaw/byRef are pruned to live ids (stops the additive leak)", () => {
     const { session, tail } = sessionWithActiveBlock();
     const before = Object.keys(session.state.messageRefs.byRaw).length;
-    runShortenedTurn(session, tail, true);
+    const logs: string[] = [];
+    runShortenedTurn(session, tail, true, (_level, msg) => logs.push(msg));
     const liveIds = new Set(tail.map((m) => m.id));
     for (const rawId of Object.keys(session.state.messageRefs.byRaw)) {
         assert.ok(liveIds.has(rawId), `byRaw entry ${rawId} should have been pruned`);
     }
     assert.ok(Object.keys(session.state.messageRefs.byRaw).length < before, "byRaw shrank after the boundary");
+    assert.ok(logs.some((msg) => msg.includes(`pruned ref maps to ${tail.length} live raw id(s)`)), "log reports the surviving ref count");
 });
 
 test("compaction archive: the boundary log reports the surviving raw-id count (#1513)", () => {
