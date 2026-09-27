@@ -460,15 +460,16 @@ export async function* runCompressLoop(
                 //     counted any forwarded byte).
                 // (b) only INVISIBLE bytes were forwarded (reasoning/meta prefix):
                 //     invisible to host turn semantics, so a high-reasoning model that
-                //     thinks and then truncates still retries. OpenAI wire ONLY, whose
-                //     chunks are stateless — a re-fetched response duplicates nothing
-                //     client-side. Stateful wires keep shape (a) only: once stateful
-                //     framing was forwarded their per-response identity is already live
-                //     (anthropic message_start with open content blocks, responses
-                //     response.created — #440's single-created invariant), and a
-                //     re-fetched response would emit it a second time. Round ≥2 on
-                //     stateful wires suppresses the start frame itself (firstRoundOnly),
-                //     so a ping-only prefix there carries no identity hazard.
+                //     thinks and then truncates still retries. OpenAI wire (stateless
+                //     chunks — a re-fetched response duplicates nothing client-side) AND
+                //     anthropic: its two stateful hazards are neutralized in the adapter
+                //     (#1455 supplement) — the start frame is suppressed by ACTUAL
+                //     forwarding state rather than round number, so a re-fetched stream
+                //     cannot emit a second response identity, and parseStream closes the
+                //     dead attempt's still-open blocks before resuming, so no dangling
+                //     content_block_start survives. responses/google keep shape (a) only:
+                //     their item-lifecycle identity frames (response.created — #440's
+                //     single-created invariant) have no equivalent dedup here.
                 // One retry per request; 200+early-EOF flakiness (common on relays) no
                 // longer lands in the agent session.
                 // `truncatedDone` covers adapters that surface truncation as a synthetic
@@ -476,7 +477,7 @@ export async function* runCompressLoop(
                 // same retry, both shapes.
                 if (
                     (!sawDone || truncatedDone) &&
-                    ((!forwardedVisible && !forwardedFraming) || (ctx.protocol === "openai" && !forwardedVisible)) &&
+                    (!forwardedVisible && (!forwardedFraming || ctx.protocol === "openai" || ctx.protocol === "anthropic")) &&
                     calls.length === 0 &&
                     !(ctx.textProtocol && assistantText.length > 0) &&
                     !signal?.aborted &&

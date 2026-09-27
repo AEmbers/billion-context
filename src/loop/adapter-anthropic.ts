@@ -278,6 +278,21 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
                 }
             };
 
+            // #1455: a re-fetched stream (blind truncation retry) resumes the SAME logical
+            // response — close the dead attempt's still-open blocks first, so the client
+            // never sees a dangling content_block_start; clientIndex keeps counting up
+            // across attempts, so the new stream's blocks continue at higher indices.
+            // Normal round boundaries reach here with openBlocks empty (blocks close or
+            // buffer to self-contained form before a round ends), so this is a no-op
+            // except after an aborted stream.
+            for (const index of openBlocks.splice(0)) {
+                yield {
+                    kind: "meta",
+                    chunk: Buffer.from(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index })}\n\n`, "utf8"),
+                    firstRoundOnly: false,
+                } as ParsedStreamEvent;
+            }
+
             for await (const eventStr of iterSseEvents(upstream)) {
                 const parsed = parseAnthropicSse(eventStr);
                 if (!parsed) continue;
@@ -291,7 +306,13 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
                     if (typeof u.input_tokens === "number") roundInput = u.input_tokens;
                     if (typeof u.cache_read_input_tokens === "number") roundCached = u.cache_read_input_tokens;
                     if (typeof u.cache_creation_input_tokens === "number") roundCreation = u.cache_creation_input_tokens;
-                    if (round === 1) {
+                    // #1455: suppression keys off ACTUAL forwarding state, not the round
+                    // parameter — a re-fetched stream (blind truncation retry) re-parses
+                    // at the SAME round, and re-emitting the start frame would hand the
+                    // client a second response identity for one logical turn. The usage
+                    // capture above runs regardless, so the retry's start still feeds
+                    // the ledger even when the frame itself is withheld.
+                    if (!messageStartForwarded) {
                         // #1310: forward the start frame usage-NEUTRAL. The real
                         // values were captured above; on a stitched stream the
                         // pre-fold start usage is stale the moment the compress

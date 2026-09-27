@@ -80,6 +80,13 @@ const ROUND1_PROXY_TOOL = [MESSAGE_START, toolUseBlock(0, "toolu_1", "acp_status
 // Incident shape: stream opens, keep-alive ping, EOF — no completion event.
 const PING_THEN_EOF = MESSAGE_START + PING;
 const GOOD_ROUND2 = [MESSAGE_START, textStart(0), textDelta(0, "recovered"), blockStop(0), MESSAGE_DELTA(), MESSAGE_STOP].join("");
+// #1455 supplement (reporter's round-1 cases): thinking-only prefix — the identity
+// frame plus an OPENED thinking block with live deltas, then EOF. Zero visible
+// output reached the client; old gates (any-byte and framing-aware alike) locked
+// this out because the reasoning bytes count as forwarded.
+const THINKING_START = ev("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } });
+const THINKING_DELTA = (text: string) => ev("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: text } });
+const REASONING_ONLY_TRUNCATED = MESSAGE_START + THINKING_START + THINKING_DELTA("let me think about this");
 
 async function drainAnthropic(first: string, attempts: string[], id: string, errorShape: "protocol" | "completion" = "protocol"): Promise<{ out: string; calls: number }> {
     let n = 0;
@@ -89,10 +96,12 @@ async function drainAnthropic(first: string, attempts: string[], id: string, err
         return new Response(attempts[n - 1] ?? "", { status: 200 });
     }) as typeof fetch;
     const chunks: Buffer[] = [];
+    const ctx = makeCtx(id);
+    (ctx as Record<string, unknown>).protocol = "anthropic";
     try {
         for await (const c of runCompressLoop(
             streamOf(first),
-            makeCtx(id),
+            ctx,
             ANTHROPIC_BODY,
             { url: "http://mock", headers: {} },
             createAnthropicAdapter(ANTHROPIC_BODY, undefined, undefined, errorShape),
@@ -134,6 +143,35 @@ test("#1455 B opt-out: errorShape=\"completion\" restores the legacy synthesized
     assert.ok(tail.includes("upstream stream truncated"));
     assert.match(tail, /"stop_reason":"end_turn"/, "legacy shape: synthesized successful completion");
     assert.match(tail, /event: message_stop/);
+});
+
+test("#1455 A2: reasoning-only truncation on round 1 no longer locks the blind retry — recovers with a single start frame and no dangling block", async () => {
+    const { out, calls } = await drainAnthropic(REASONING_ONLY_TRUNCATED, [GOOD_ROUND2], "i1455-a2");
+    assert.equal(calls, 1, "one invisible truncation retry");
+    assert.ok(out.includes("recovered"), "retried content reached the client");
+    assert.ok(!out.includes("upstream stream truncated"), "self-healed: no error surfaced");
+    const blocks = sseBlocks(out);
+    assert.equal(blocks.filter((b) => b.startsWith("event: message_start")).length, 1, "exactly one message_start — the retry's start frame must be suppressed by forwarding state, not round number");
+    const starts = (out.match(/event: content_block_start/g) ?? []).length;
+    const stops = (out.match(/event: content_block_stop/g) ?? []).length;
+    assert.equal(stops, starts, "every opened block is closed, including the dead attempt's dangling thinking block");
+    assert.ok(
+        out.indexOf('"type":"content_block_stop","index":0') < out.indexOf('"type":"content_block_start","index":1'),
+        "dangling thinking block closed BEFORE the retry's blocks continue at higher indices",
+    );
+});
+
+test("#1455 B2: exhausted reasoning-only retries terminate on the protocol-native error channel with all blocks closed", async () => {
+    const { out, calls } = await drainAnthropic(REASONING_ONLY_TRUNCATED, [REASONING_ONLY_TRUNCATED], "i1455-b2");
+    assert.equal(calls, 1, "one retry, then give up");
+    const blocks = sseBlocks(out);
+    assert.ok(blocks[blocks.length - 1].startsWith("event: error"), `last event is the error event (got ${blocks[blocks.length - 1].slice(0, 40)})`);
+    assert.match(blocks[blocks.length - 1], /"code":"upstream_error"/);
+    assert.doesNotMatch(out, /event: message_(stop|delta)/, "no completion event anywhere");
+    assert.doesNotMatch(out, /"stop_reason":"end_turn"/, "no synthesized success terminal");
+    const starts = (out.match(/event: content_block_start/g) ?? []).length;
+    const stops = (out.match(/event: content_block_stop/g) ?? []).length;
+    assert.equal(stops, starts, "both attempts' dangling thinking blocks are closed before the error frame");
 });
 
 const frames = (list: Array<Record<string, unknown>>): string => list.map((f) => `data: ${JSON.stringify(f)}\n\n`).join("");
