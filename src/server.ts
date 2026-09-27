@@ -85,8 +85,8 @@ import { hoistTrappedToolItems } from "./tool-pair-order.js";
 import { runCompressLoop, pickAdapter } from "./loop/index.js";
 import { reconcileSystemAnchor } from "./system-anchor.js";
 import { containsToolCallXmlFragment } from "./loop/tag-echo-filter.js";
-import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoReasoning } from "./strict-echo.js";
-export { isStrictReasoningEcho, normalizeStrictEchoReasoning };
+import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoReasoning, normalizeStrictEchoResponsesInput } from "./strict-echo.js";
+export { isStrictReasoningEcho, normalizeStrictEchoReasoning, normalizeStrictEchoResponsesInput };
 import { isFakeCompletion, injectFakeCompletionHint, maxFakeCompletionRetries, fakeBufCap } from "./fake-completion.js";
 import { makeContinuationRefetch } from "./degenerate-retry.js";
 import { reasoningGuardEngages, runReasoningGuard } from "./reasoning-guard.js";
@@ -2504,8 +2504,14 @@ export function warnAnthropicThinkingPairs(
     }
 }
 
-/** [#684] Responses-wire twin: function_call item with no reasoning item
- *  immediately preceding it while other turns carry reasoning. */
+/** [#684,#1479] Responses-wire sentinel, run-based: the rejection signature on
+ *  strict-echo upstreams is an assistant RUN (maximal consecutive stretch of
+ *  reasoning / assistant message / function_call / custom_tool_call items) that
+ *  carries a tool call but NO reasoning item. The old immediate-precedence check
+ *  reset on every non-reasoning item and flagged every healthy [reasoning,
+ *  message, function_call] turn and multi-call run (#1479: 798× in one session's
+ *  log, mostly passing requests) — a message between the echo and the calls is
+ *  normal run order, not a violation. Names the orphaned call_ids. */
 export function warnResponsesReasoningPairs(
     input: unknown[],
     log: (level: string, msg: string) => void,
@@ -2513,19 +2519,43 @@ export function warnResponsesReasoningPairs(
 ): void {
     let withReasoning = 0;
     let split = 0;
-    let prevWasReasoning = false;
+    let runs = 0;
+    const orphans: string[] = [];
+    let runCalls = 0;
+    let runReasoning = 0;
+    let runIds: string[] = [];
+    const closeRun = (): void => {
+        if (runCalls > 0 && runReasoning === 0) {
+            split += runCalls;
+            runs++;
+            orphans.push(...runIds);
+        }
+        runCalls = 0;
+        runReasoning = 0;
+        runIds = [];
+    };
     for (const item of input) {
-        const it = item as { type?: string };
-        if (it?.type === "reasoning") {
+        const it = item as { type?: string; role?: string; call_id?: string };
+        const t = it?.type;
+        if (t === "reasoning") {
             withReasoning++;
-            prevWasReasoning = true;
+            runReasoning++;
             continue;
         }
-        if (it?.type === "function_call" && !prevWasReasoning) split++;
-        prevWasReasoning = false;
+        if (t === "function_call" || t === "custom_tool_call") {
+            runCalls++;
+            if (typeof it.call_id === "string" && it.call_id) runIds.push(it.call_id);
+            continue;
+        }
+        // a call's output belongs to the same assistant turn as the call
+        if (t === "function_call_output" || t === "custom_tool_call_output") continue;
+        if (t === "message" && it.role === "assistant") continue;
+        closeRun();
     }
+    closeRun();
     if (withReasoning > 0 && split > 0) {
-        log("warn", `[${sessionId}] reasoning-pair-violated: ${split} function_call item(s) lack a preceding reasoning item while ${withReasoning} exist — strict-echo upstreams will reject the request (#684)`);
+        const named = orphans.slice(0, 3).join(", ") + (orphans.length > 3 ? `, …+${orphans.length - 3}` : "");
+        log("warn", `[${sessionId}] reasoning-pair-violated: ${split} tool-call item(s) in ${runs} assistant run(s) lack any reasoning item while ${withReasoning} exist (${named}) — strict-echo upstreams will reject the request (#684)`);
     }
 }
 
@@ -3657,6 +3687,10 @@ async function prepareResponses(
         log("info", `[${sessionId}] codex compact intercepted (trigger); forged SSE with ${summaries.length} block summary(s), upstream not contacted`);
     }
 
+    // #1479: Responses-wire twin of the #762 repair — fold + kernel round-trip
+    // can leave a tool-call run without its reasoning item. Repair BEFORE the
+    // sentinel sees the array (a normalized body must not fire its own canary).
+    if (Array.isArray(rebuiltInput)) rebuiltInput = normalizeStrictEchoResponsesInput(rebuiltInput, isStrictReasoningEcho(session, upstreamOrigin, modelIdOf(parsed)), log, sessionId);
     const rebuilt: ResponsesRequestBody = { ...parsed, input: rebuiltInput, tools: toolsOut };
     warnResponsesReasoningPairs(Array.isArray(rebuiltInput) ? rebuiltInput : [], log, sessionId);
     if (!isCompactionTrigger) {

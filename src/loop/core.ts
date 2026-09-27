@@ -365,14 +365,18 @@ export async function* runCompressLoop(
     // re-submission can never succeed — break early instead of at MAX_LOOP_ROUNDS.
     const failedSignatures = new Set<string>();
 
-    // #762: strict-echo origin for re-request normalization (the learned flag
-    // rides on ctx.session.metadata; mirrors prepareOpenai's static gate).
+    // #762,#1479: strict-echo origin for re-request normalization (the learned
+    // flag rides on ctx.session.metadata; mirrors prepareOpenai's static gate).
+    // EVERY body this loop sends upstream goes through it — main re-request AND
+    // the nudge/degenerate retries, which rebuild from the same core view.
     let strictEchoOrigin: string | undefined;
     try {
         strictEchoOrigin = new URL(requestOptions.url).origin;
     } catch {
         strictEchoOrigin = undefined;
     }
+    const withStrictEchoRepair = (body: Record<string, unknown>): Record<string, unknown> =>
+        normalizeStrictEchoBody(body, isStrictReasoningEcho(ctx.session, strictEchoOrigin, modelIdOf(requestBody)), (level, msg) => loggerLog(level, `[acp-loop] ${msg}`), ctx.session.id ?? "unknown");
 
     try {
         for (let round = 1; round <= MAX_LOOP_ROUNDS; round++) {
@@ -590,7 +594,7 @@ export async function* runCompressLoop(
                         text: truncationContinuationNudge(tail),
                     };
                     try {
-                        const retryBody = adapter.buildRequest([...coreMessages, nudge], systemPrompt, requestBody);
+                        const retryBody = withStrictEchoRepair(adapter.buildRequest([...coreMessages, nudge], systemPrompt, requestBody));
                         const respResult = await fetchUpstream(retryBody);
                         if (!respResult.response.body) {
                             respResult.clearTimer();
@@ -635,7 +639,7 @@ export async function* runCompressLoop(
                         text: DEGENERATE_RETRY_NUDGE,
                     };
                     try {
-                        const retryBody = adapter.buildRequest([...coreMessages, nudge], systemPrompt, requestBody);
+                        const retryBody = withStrictEchoRepair(adapter.buildRequest([...coreMessages, nudge], systemPrompt, requestBody));
                         const respResult = await fetchUpstream(retryBody);
                         if (!respResult.response.body) {
                             respResult.clearTimer();
@@ -920,11 +924,7 @@ export async function* runCompressLoop(
 
             if (signal?.aborted) break;
 
-            let newBody = adapter.buildRequest(coreMessages, systemPrompt, requestBody);
-            // #762: this re-request bypasses prepareOpenai, whose strict-echo
-            // repair never reaches it — the kernel round-trip drops blank
-            // reasoning echoes, so DeepSeek thinking rejects the rebuilt body.
-            newBody = normalizeStrictEchoBody(newBody, isStrictReasoningEcho(ctx.session, strictEchoOrigin, modelIdOf(requestBody)), (level, msg) => loggerLog(level, `[acp-loop] ${msg}`), ctx.session.id ?? "unknown");
+            let newBody = withStrictEchoRepair(adapter.buildRequest(coreMessages, systemPrompt, requestBody));
             if (process.env.ACP_DUMP_BODY === "1") {
                 try {
                     const fs = await import("node:fs");
@@ -963,7 +963,7 @@ export async function* runCompressLoop(
                     coreMessages.push(...stripped);
                     ctx.log(`[acp-loop] round ${round}: re-request rejected (${e.status}: ${e.body.slice(0, 200)}); retrying without replayed thinking blocks`);
                     loggerLog("warn", `[acp-loop] re-request rejected (${e.status}); retrying without thinking replay: ${e.body.slice(0, 200)}`);
-                    newBody = adapter.buildRequest(coreMessages, systemPrompt, requestBody);
+                    newBody = withStrictEchoRepair(adapter.buildRequest(coreMessages, systemPrompt, requestBody));
                     respResult = await fetchUpstream(newBody);
                 }
             } catch (e) {
