@@ -27,6 +27,13 @@ export interface WireRule {
 
 export const WIRE_RULES: readonly WireRule[] = [
     {
+        id: "WC-009",
+        wire: "responses",
+        summary: "thinking-mode providers require prior-turn reasoning items echoed in resent history — an assistant run of calls/messages with no reasoning item gets 400 code 11155 reasoning_content_missing",
+        provenance:
+            "bili #762 (chat wire) and #1479 (responses wire) production 400s (code 11155 'the reasoning content from the previous turn must be passed back in thinking mode'); repair = src/strict-echo.ts blank-reasoning injection on both wires, learned per upstream origin",
+    },
+    {
         id: "WC-008",
         wire: "openai-chat",
         summary: "Copilot Gemini requires scalar schema types and self-contained typed anyOf alternatives",
@@ -183,6 +190,39 @@ export function validateResponsesBody(body: unknown): string[] {
                 out.push(`WC-005 ${label}: top-level "${kw}" not portable — banned on every wire shape (#1302 policy, restored by #1305 review)`);
         }
     });
+    // WC-009 (#762 chat / #1479 responses): thinking-mode providers reject resent
+    // history where an assistant run (calls/messages) carries no reasoning item —
+    // 400 code 11155 reasoning_content_missing. Validation-parity: the fake enforces
+    // the strictest known shape; the repair (src/strict-echo.ts) injects a blank
+    // reasoning item at orphan run starts before forwarding.
+    if (Array.isArray(body.input)) {
+        const RUN_ITEMS = new Set(["reasoning", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"]);
+        let runStart = -1;
+        let runHasReasoning = false;
+        const closeRun = (endIdx: number): void => {
+            if (runStart >= 0 && !runHasReasoning)
+                out.push(`WC-009 input[${runStart}..${endIdx}]: assistant run carries no reasoning item — thinking-mode providers 400 code 11155 reasoning_content_missing`);
+            runStart = -1;
+            runHasReasoning = false;
+        };
+        body.input.forEach((it, i) => {
+            if (!isPlainObject(it)) {
+                closeRun(i - 1);
+                return;
+            }
+            if (it.type === "reasoning") {
+                if (runStart < 0) runStart = i;
+                runHasReasoning = true;
+                return;
+            }
+            if (RUN_ITEMS.has(it.type as string) || (it.type === "message" && it.role === "assistant")) {
+                if (runStart < 0) runStart = i;
+                return;
+            }
+            closeRun(i - 1);
+        });
+        closeRun(body.input.length - 1);
+    }
     return out;
 }
 

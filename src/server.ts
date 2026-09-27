@@ -68,11 +68,11 @@ import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
-import { buildSessionCacheReport } from "./cache-ledger.js";
+import { buildSessionCacheReport, handleAcpCache } from "./cache-ledger.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
-import { renderUI, handleConfigGet, handleConfigPut } from "./web/index.js";
+import { renderUI, handleConfigGet, handleConfigPut, buildOverview, buildSessionList, buildSessionDetail, hiddenEmptyCount } from "./web/index.js";
 import { reapOrphanBlocks } from "./orphan-gc.js";
 import { conflictScanEnabled, isDesignAbsorbed, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
 import { recordConflict, summarizeConflicts } from "./conflict-watch.js";
@@ -85,8 +85,8 @@ import { hoistTrappedToolItems } from "./tool-pair-order.js";
 import { runCompressLoop, pickAdapter } from "./loop/index.js";
 import { reconcileSystemAnchor } from "./system-anchor.js";
 import { containsToolCallXmlFragment } from "./loop/tag-echo-filter.js";
-import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoReasoning } from "./strict-echo.js";
-export { isStrictReasoningEcho, normalizeStrictEchoReasoning };
+import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoReasoning, normalizeStrictEchoResponsesInput } from "./strict-echo.js";
+export { isStrictReasoningEcho, normalizeStrictEchoReasoning, normalizeStrictEchoResponsesInput };
 import { isFakeCompletion, injectFakeCompletionHint, maxFakeCompletionRetries, fakeBufCap } from "./fake-completion.js";
 import { makeContinuationRefetch } from "./degenerate-retry.js";
 import { reasoningGuardEngages, runReasoningGuard } from "./reasoning-guard.js";
@@ -104,7 +104,7 @@ import { maybeAdoptForkBlocks } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
 import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats } from "./mitm.js";
-import { evaluateChain } from "./chain-checkpoint.js";
+import { evaluateChain, extractChainCarriers, stampOutbound } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "./util.js";
 
@@ -881,6 +881,10 @@ async function handle(
     if (req.method === "GET" && req.url === "/__bili/stats") return sendStats(res);
     if (req.method === "GET" && req.url?.startsWith("/__bili/cache-report")) return sendCacheReport(res, req.url);
     if (req.method === "GET" && req.url === "/__bili/status") return sendStatus(res, opts);
+    if (req.method === "GET" && req.url === "/__bili/overview") return sendOverview(res, opts);
+    if (req.method === "GET" && req.url === "/__bili/sessions") return sendWebSessions(res);
+    if (req.method === "GET" && req.url?.startsWith("/__bili/logs")) return sendWebLogs(res, req);
+    if (req.method === "GET" && req.url?.startsWith("/__bili/sessions/") && req.url.endsWith("/detail")) return sendWebSessionDetail(res, req.url);
     if (req.method === "GET" && req.url === "/") {
         // Browser visits root → redirect to the web UI. curl / health probes
         // (Accept: */* or no Accept) still get the JSON health check so
@@ -1004,7 +1008,10 @@ async function handle(
             res.end(JSON.stringify({ ok: false, error: "conversationId query parameter is required" }));
             return;
         }
-        return handlePluginStatus(conversationId, res, { core, config, log }, params.get("fallback") === "latest");
+        // Web UI origin as the user's browser dials it: the ACTUAL bound port
+        // (req.socket.localPort differs from opts.port when listening on port 0).
+        const webOrigin = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${req.socket?.localPort ?? opts.port}`;
+        return handlePluginStatus(conversationId, res, { core, config, log, webOrigin }, params.get("fallback") === "latest");
     }
     if (req.method === "POST" && req.url === "/__bili/watcher") {
         // #7: an ATTACHING claude session registers its host pid so the shared
@@ -1036,7 +1043,8 @@ async function handle(
     if (req.method === "POST" && req.url === "/__bili/plugin/tool") {
         try {
             const body = await readBody(req);
-            return await handlePluginTool(body.toString("utf8"), res, { core, config, log });
+            const webOrigin = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${req.socket?.localPort ?? opts.port}`;
+            return await handlePluginTool(body.toString("utf8"), res, { core, config, log, webOrigin });
         } catch (err) {
             res.writeHead(err instanceof BodyTooLargeError ? 413 : 400, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: String(err) }));
@@ -1246,19 +1254,48 @@ async function handle(
         if (Array.isArray(p.input)) return p.input.length;
         return null;
     })();
-    // #1395 step 2 (shadow): chain-checkpoint recognition — log the verdict
-    // only, ZERO forwarding behavior change (enforcement lands in step 3).
+    // #1395 step 3 (#1421): chain-checkpoint ENFORCEMENT — first-processor-
+    // wins. A verifiable checkpoint means an upstream bili already ran the
+    // pipeline on this exact body: forward it verbatim (pipeline skipped)
+    // instead of re-running kernel/injection. Only trusted verdicts skip;
+    // stale-unmatched carriers are stripped and processed normally (this
+    // instance becomes the processor and re-stamps on egress in forward()).
     // Gated like the legacy artifact fallback (chainContentDetection) and
     // skipped when x-bili-hop is present (that path already decides).
+    let chainSkip = false;
     if (protocol && hopMarker === undefined && opts.chainContentDetection !== false && parsed !== null && typeof parsed === "object") {
         try {
             const chainCtx = evaluateChain(parsed, protocol);
             if (chainCtx.verdict !== "none") {
                 const sel = chainCtx.selected;
-                log(chainCtx.verdict === "valid" ? "info" : "warn", `[chain-shadow] inbound ${protocol} request carries ${chainCtx.candidates.length} chain checkpoint(s) — verdict=${chainCtx.verdict}${sel ? ` (v=${sel.v} processor=${sel.processor} issued-at=${sel.issuedAt} request-id=${sel.requestId})` : ""}${chainCtx.malformed > 0 ? ` malformed=${chainCtx.malformed}` : ""}; shadow mode: no forwarding decision made (#1395 step 3 enforces)`);
+                const selTxt = sel ? ` (v=${sel.v} processor=${sel.processor} issued-at=${sel.issuedAt} request-id=${sel.requestId})` : "";
+                const malTxt = chainCtx.malformed > 0 ? ` malformed=${chainCtx.malformed}` : "";
+                const head = `[chain] inbound ${protocol} request carries ${chainCtx.candidates.length} chain checkpoint(s) — verdict=${chainCtx.verdict}${selTxt}${malTxt}`;
+                switch (chainCtx.verdict) {
+                    case "valid":
+                        chainSkip = true;
+                        log("info", `${head}; first-processor-wins: forwarding verbatim, pipeline skipped (#1421)`);
+                        break;
+                    case "recent-mismatch":
+                        chainSkip = true;
+                        log("warn", `${head}; interop: forwarding verbatim + warn (well-formed fresh checkpoint, no digest match — body may have drifted since stamp) (#1421)`);
+                        break;
+                    case "stale":
+                        if (chainCtx.selectedMatched) {
+                            chainSkip = true;
+                            log("warn", `${head}; digest match but out-of-window/future timestamp — forwarding verbatim + warn (replay or clock skew) (#1421)`);
+                        } else {
+                            parsed = extractChainCarriers(parsed, protocol).stripped;
+                            log("info", `${head}; no digest match — stripping stale checkpoint(s), processing normally (#1421)`);
+                        }
+                        break;
+                    case "invalid":
+                        log("warn", `${head}; never trusted — processing normally (#1421)`);
+                        break;
+                }
             }
         } catch (err) {
-            log("debug", `[chain-shadow] evaluation failed (${String(err)}); ignoring`);
+            log("debug", `[chain] evaluation failed (${String(err)}); ignoring`);
         }
     }
     // #806: a parseable body missing the conversation field used to crash the
@@ -1469,8 +1506,9 @@ async function handle(
     }
     // #300: `hopMarker !== undefined` means an upstream bili already processed
     // this request — skip the whole pipeline (prepared stays null) so the
-    // passthrough path below forwards it verbatim.
-    if (!opts.passthrough && !routePassthrough && hopMarker === undefined && protocol && parsed && typeof parsed === "object") {
+    // passthrough path below forwards it verbatim. #1421: `chainSkip` is the
+    // content-level twin of the same decision (verifiable checkpoint present).
+    if (!opts.passthrough && !routePassthrough && !chainSkip && hopMarker === undefined && protocol && parsed && typeof parsed === "object") {
         const sessionHeader = headerValue(req, opts.sessionHeader);
         // Plugin mode (issue #1, "内外呼应"): a cooperative agent-side plugin
         // announces itself with x-bili-plugin. The proxy then treats the
@@ -1708,15 +1746,16 @@ async function handle(
                 // through to processTurn so this session establishes ownership.
                 // Decisive passthrough stays reserved for the authenticated
                 // x-bili-hop header (above + at the passthrough tail). Trade-off:
-                // a bili→bili relay that STRIPS x-bili-hop now double-processes
-                // until signed request-bound chain proof ships (#1357 Phase 2/3).
+                // a bili→bili relay that STRIPS x-bili-hop double-processes until
+                // both sides ship the request checkpoint (#1421) — once stamped,
+                // the content-level gate above catches it regardless of headers.
                 // #1218: recorded under the session id AND the client's own
                 // conversation value when they differ (same key space /acp
                 // status probes use) so the observation is visible to the client.
                 const firstVerdict = recordChainVerdict(sessionId, artifactKind, protocol);
                 if (clientConv !== undefined && clientConv !== sessionId) recordChainVerdict(clientConv, artifactKind, protocol);
                 if (firstVerdict) {
-                    log("warn", `[chain] inbound ${protocol} request carries ACP compression artifacts (${artifactKind}) but neither ${BILI_HOP_HEADER} nor local compression state for session ${sessionId}. Historical ACP content is advisory-only — continuing to processTurn so this session establishes ownership (#1357); a header-stripping bili→bili relay may now double-process until signed chain proof lands.`);
+                    log("warn", `[chain] inbound ${protocol} request carries ACP compression artifacts (${artifactKind}) but neither ${BILI_HOP_HEADER} nor local compression state for session ${sessionId}. Historical ACP content is advisory-only — continuing to processTurn so this session establishes ownership (#1357); a header-stripping bili→bili relay may now double-process until both sides ship the request checkpoint (#1421).`);
                 }
             } else if (artifactKind !== null) {
                 log("debug", `[chain] ACP artifacts (${artifactKind}) belong to this instance's own session ${sessionId} — self-produced, processing normally (#1086)`);
@@ -1820,6 +1859,15 @@ async function handle(
         }
         if (!pluginAgent && typeof session.metadata.pluginAgent === "string") pluginAgent = session.metadata.pluginAgent;
         if (pluginAgent && !pluginConversation) pluginConversation = conversation;
+        // #1426 web UI: persist which client this session came from, first hit wins.
+        // Plugin agents are already recorded above as metadata.pluginAgent; non-plugin
+        // clients fall back to header sniffing, then to a truncated User-Agent hint.
+        if (!pluginAgent && !session.metadata.clientHint) {
+            const uaRaw = req.headers["user-agent"];
+            const ua = typeof uaRaw === "string" ? uaRaw : Array.isArray(uaRaw) ? String(uaRaw[0] ?? "") : "";
+            const hint = sniffScanClient(req.headers) ?? (ua ? ua.slice(0, 120) : undefined);
+            if (hint) session.metadata.clientHint = hint;
+        }
         // [#1333] Real pi plugin traffic arrives pre-stamped: `x-bili-plugin`
         // + `x-bili-plugin-conversation` (set by the extension, pi.ts:127)
         // set pluginAgent/pluginConversation from headers above, so the
@@ -2504,8 +2552,14 @@ export function warnAnthropicThinkingPairs(
     }
 }
 
-/** [#684] Responses-wire twin: function_call item with no reasoning item
- *  immediately preceding it while other turns carry reasoning. */
+/** [#684,#1479] Responses-wire sentinel, run-based: the rejection signature on
+ *  strict-echo upstreams is an assistant RUN (maximal consecutive stretch of
+ *  reasoning / assistant message / function_call / custom_tool_call items) that
+ *  carries a tool call but NO reasoning item. The old immediate-precedence check
+ *  reset on every non-reasoning item and flagged every healthy [reasoning,
+ *  message, function_call] turn and multi-call run (#1479: 798× in one session's
+ *  log, mostly passing requests) — a message between the echo and the calls is
+ *  normal run order, not a violation. Names the orphaned call_ids. */
 export function warnResponsesReasoningPairs(
     input: unknown[],
     log: (level: string, msg: string) => void,
@@ -2513,19 +2567,43 @@ export function warnResponsesReasoningPairs(
 ): void {
     let withReasoning = 0;
     let split = 0;
-    let prevWasReasoning = false;
+    let runs = 0;
+    const orphans: string[] = [];
+    let runCalls = 0;
+    let runReasoning = 0;
+    let runIds: string[] = [];
+    const closeRun = (): void => {
+        if (runCalls > 0 && runReasoning === 0) {
+            split += runCalls;
+            runs++;
+            orphans.push(...runIds);
+        }
+        runCalls = 0;
+        runReasoning = 0;
+        runIds = [];
+    };
     for (const item of input) {
-        const it = item as { type?: string };
-        if (it?.type === "reasoning") {
+        const it = item as { type?: string; role?: string; call_id?: string };
+        const t = it?.type;
+        if (t === "reasoning") {
             withReasoning++;
-            prevWasReasoning = true;
+            runReasoning++;
             continue;
         }
-        if (it?.type === "function_call" && !prevWasReasoning) split++;
-        prevWasReasoning = false;
+        if (t === "function_call" || t === "custom_tool_call") {
+            runCalls++;
+            if (typeof it.call_id === "string" && it.call_id) runIds.push(it.call_id);
+            continue;
+        }
+        // a call's output belongs to the same assistant turn as the call
+        if (t === "function_call_output" || t === "custom_tool_call_output") continue;
+        if (t === "message" && it.role === "assistant") continue;
+        closeRun();
     }
+    closeRun();
     if (withReasoning > 0 && split > 0) {
-        log("warn", `[${sessionId}] reasoning-pair-violated: ${split} function_call item(s) lack a preceding reasoning item while ${withReasoning} exist — strict-echo upstreams will reject the request (#684)`);
+        const named = orphans.slice(0, 3).join(", ") + (orphans.length > 3 ? `, …+${orphans.length - 3}` : "");
+        log("warn", `[${sessionId}] reasoning-pair-violated: ${split} tool-call item(s) in ${runs} assistant run(s) lack any reasoning item while ${withReasoning} exist (${named}) — strict-echo upstreams will reject the request (#684)`);
     }
 }
 
@@ -3657,6 +3735,10 @@ async function prepareResponses(
         log("info", `[${sessionId}] codex compact intercepted (trigger); forged SSE with ${summaries.length} block summary(s), upstream not contacted`);
     }
 
+    // #1479: Responses-wire twin of the #762 repair — fold + kernel round-trip
+    // can leave a tool-call run without its reasoning item. Repair BEFORE the
+    // sentinel sees the array (a normalized body must not fire its own canary).
+    if (Array.isArray(rebuiltInput)) rebuiltInput = normalizeStrictEchoResponsesInput(rebuiltInput, isStrictReasoningEcho(session, upstreamOrigin, modelIdOf(parsed)), log, sessionId);
     const rebuilt: ResponsesRequestBody = { ...parsed, input: rebuiltInput, tools: toolsOut };
     warnResponsesReasoningPairs(Array.isArray(rebuiltInput) ? rebuiltInput : [], log, sessionId);
     if (!isCompactionTrigger) {
@@ -4610,6 +4692,22 @@ async function forward(
                 wireBody = applied.body;
                 log("info", `[${prepared?.session.id ?? "passthrough"}] [output-steering] applied (${applied.labels.join(", ")})`);
             }
+        }
+    }
+    // #1421: outbound chain checkpoint — every request THIS instance actually
+    // processed leaves with a request-level stamp, so a downstream bili applies
+    // first-processor-wins even when x-bili-hop was stripped in transit. Lands
+    // AFTER compat roles + output steering: the digest must cover the exact
+    // bytes forwarded. Best-effort — a stamp failure never breaks the forward.
+    // Passthrough/side/forge/classifier forwards carry no stamp: only a real
+    // kernel pass (processedMessages non-empty — side/classifier Prepareds are
+    // empty) claims processing, per the first-processor-wins contract.
+    if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainContentDetection !== false) {
+        try {
+            const stamped = stampOutbound(JSON.parse(wireBody), prepared.protocol, instanceId);
+            if (stamped !== null) wireBody = JSON.stringify(stamped);
+        } catch (err) {
+            log("debug", `[${prepared.session.id}] [chain] outbound stamping failed (${String(err)}); forwarding unstamped`);
         }
     }
     // #552: wire transform shared by ALL re-send paths (compress-retry loops
@@ -5667,7 +5765,9 @@ function sendCacheReport(res: http.ServerResponse, url: string): void {
         sessions = sessions.slice().sort((a, b) => b.lastSeen - a.lastSeen);
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ reports: sessions.map((s) => ({ id: s.id, report: buildSessionCacheReport(s) })) }, null, 2));
+    // Same markdown the acp_cache MCP tool emits (handleAcpCache = formatCacheReport),
+    // so web copy/download matches /acp-cache output exactly.
+    res.end(JSON.stringify({ reports: sessions.map((s) => ({ id: s.id, report: handleAcpCache(s, { detail: "full" }) })) }, null, 2));
 }
 
 // #1206: orphan reaping was silent — blocks deactivated because their source
@@ -5720,6 +5820,90 @@ async function sendStatus(res: http.ServerResponse, opts: ProxyOptions): Promise
     }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ version: VERSION, diskVersion, stale, autoRestartOnUpdate: opts.autoRestartOnUpdate, inFlight: totalInFlight(), conflicts: summarizeConflicts(listSessions()) }, null, 2));
+}
+
+async function sendOverview(res: http.ServerResponse, opts: ProxyOptions): Promise<void> {
+    let diskVersion: string | undefined;
+    let stale = false;
+    try {
+        ({ diskVersion, stale } = await detectStaleInstall(PACKAGE_NAME, VERSION));
+    } catch {
+        // fs hiccup: report running state only, never fail the overview endpoint
+    }
+    const overview = await buildOverview();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+        overview,
+        version: VERSION,
+        diskVersion,
+        stale,
+        autoRestartOnUpdate: opts.autoRestartOnUpdate,
+        inFlight: totalInFlight(),
+        blindTunnels: getBlindTunnelStats(),
+        conflicts: summarizeConflicts(listSessions()),
+        passthrough: { enabled: !!opts.passthrough, source: opts.passthroughSource },
+    }, null, 2));
+}
+
+async function sendWebSessions(res: http.ServerResponse): Promise<void> {
+    const sessions = await buildSessionList();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ sessions, hiddenEmpty: hiddenEmptyCount() }, null, 2));
+}
+
+/** #1426 web UI run-log viewer: tail of the rotated logger files (bili.log.old
+ *  + bili.log), optionally filtered by a case-insensitive substring (?q=).
+ *  ?lines= caps the tail at 2000; ?raw=1 streams the same tail as a .txt download. */
+async function sendWebLogs(res: http.ServerResponse, req: http.IncomingMessage): Promise<void> {
+    const u = new URL(req.url ?? "/__bili/logs", "http://localhost");
+    const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
+    let n = Number(u.searchParams.get("lines") ?? "500");
+    if (!Number.isFinite(n) || n <= 0) n = 500;
+    n = Math.min(Math.floor(n), 2000);
+    const logFile = getLogPath() ?? defaultLogFile();
+    const dir = logFile && logFile.includes("/") ? logFile.slice(0, logFile.lastIndexOf("/") + 1) : "";
+    const candidates = [dir + "bili.log.old", dir + "bili.log"];
+    const existing = candidates.filter((f) => {
+        try { return fs.statSync(f).isFile(); } catch { return false; }
+    });
+    let all: string[] = [];
+    for (const f of existing) {
+        let text: string;
+        try { text = fs.readFileSync(f, "utf8"); } catch { continue; }
+        const ls = text.split("\n").filter((l) => l.length > 0);
+        all = all.concat(q ? ls.filter((l) => l.toLowerCase().includes(q)) : ls);
+    }
+    const total = all.length;
+    const tail = all.slice(-n);
+    if (u.searchParams.get("raw") === "1") {
+        res.writeHead(200, {
+            "content-type": "text/plain; charset=utf-8",
+            "content-disposition": 'attachment; filename="billion-context-log.txt"',
+        });
+        res.end(tail.join("\n"));
+        return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ path: logFile, total, lines: tail }, null, 2));
+}
+
+async function sendWebSessionDetail(res: http.ServerResponse, url: string): Promise<void> {
+    const prefix = "/__bili/sessions/";
+    const suffix = "/detail";
+    let id = "";
+    try {
+        id = decodeURIComponent(url.slice(prefix.length, -suffix.length));
+    } catch {
+        // malformed percent-encoding → treat as unknown session (404 below)
+    }
+    const detail = await buildSessionDetail(id);
+    if (!detail) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: `unknown session: ${id}` }));
+        return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(detail, null, 2));
 }
 
 function headerValue(req: http.IncomingMessage, name: string): string | undefined {
