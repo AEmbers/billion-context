@@ -535,3 +535,37 @@ test("clientError backstop: knob off restores hold-until-peer-FIN status quo (#1
         await close(upstream);
     }
 });
+
+test("clientError backstop: knob parse — negative / non-numeric fall back to the 30s default (#1529)", async () => {
+    // Pins the documented contract (CONFIGURATION.md + PR body): only a valid
+    // non-negative integer is honored (0 disables); a negative or non-numeric
+    // value falls back to the 30s default rather than silently disabling the
+    // backstop. The value is read at startServer, so each case boots its own
+    // proxy and reads the [conn] startup line that echoes the resolved value.
+    const upstream = http.createServer((_req, res) => res.end("{}"));
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    const bootLine = async (value: string | undefined): Promise<string> => {
+        const restore = withEnv("BILI_CLIENT_ERROR_BACKSTOP_MS", value);
+        try {
+            const base = captured.length;
+            const h = await startProxy(upstream, true);
+            try {
+                return (captured.slice(base).find((c) => c.msg.includes("clientErrorBackstop="))?.msg ?? "");
+            } finally {
+                await h.stop(); h.cleanup();
+            }
+        } finally {
+            restore();
+        }
+    };
+    try {
+        assert.ok((await bootLine("-5")).includes("clientErrorBackstop=30000ms"), "negative knob must fall back to the 30s default");
+        assert.ok((await bootLine("garbage")).includes("clientErrorBackstop=30000ms"), "non-numeric knob must fall back to the 30s default");
+    } finally {
+        setLogCapture(null);
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});

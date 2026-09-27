@@ -473,7 +473,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     // drained the recv buffer for the whole window, so no unread residual
     // bytes ride the destroy. 0 restores hold-until-peer-death (status quo).
     const backstopRaw = Number(process.env.BILI_CLIENT_ERROR_BACKSTOP_MS);
-    const clientErrorBackstopMs = Number.isInteger(backstopRaw) ? Math.max(0, backstopRaw) : 30_000;
+    const clientErrorBackstopMs = Number.isInteger(backstopRaw) && backstopRaw >= 0 ? backstopRaw : 30_000;
     log("info", `[conn] keepAliveTimeout=${keepAliveTimeoutMs}ms clientErrorBackstop=${clientErrorBackstopMs}ms`);
     // #1452: per-connection lifecycle ledger — turns "which side closed this
     // socket, and why" from forensic inference into one debug line per
