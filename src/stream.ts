@@ -203,6 +203,12 @@ export function summaryFingerprintLine(blockId: string, summary: string): string
 // success (the exact report in the issue; the kernel diagnostics carry the
 // per-entry reasons but nothing surfaced them when ≥1 range survived).
 function droppedEntriesNote(diagnostics: CompressParseDiagnostics): string {
+    // #1495: a gateway-stringified content array can arrive CUT — the lenient
+    // parser salvages only the complete leading entries (kind="truncated") and
+    // the unterminated tail is lost without counting as invalidItems.
+    if (diagnostics.kind === "truncated" && diagnostics.invalidItems <= 0) {
+        return `[The compress arguments arrived TRUNCATED — only the complete leading entries could be salvaged; any requested range not listed above was LOST, not compressed. Check acp_status for what is still compressible and re-issue the missing range(s).]`;
+    }
     if (diagnostics.invalidItems <= 0) return "";
     const reasons = (diagnostics.invalidReasons ?? []).slice(0, 3).map((r) => (r.length > 160 ? r.slice(0, 160) + "..." : r));
     const why = reasons.length > 0 ? reasons.join(" | ") : `${diagnostics.invalidItems} entr(ies) failed validation (parse kind=${diagnostics.kind})`;
@@ -251,6 +257,21 @@ function postCompressTail(ctx: RewriteCtx, cleanSuccess: boolean): string {
     // errors an answer before any "you are done" verdict (pi #521 gate).
     if (!cleanSuccess || nudge.tier !== null) return "";
     return `\n\n${NO_RANGES_REMAIN_TEXT}`;
+}
+
+// #1495: the kernel's lenient parser salvages complete entries from damaged
+// arguments (truncated gateway-stringified arrays, corrupted elements) and
+// reports what it dropped via diagnostics — which this path only read on TOTAL
+// failure. On partial success the receipt was a clean "[Compressed … → N
+// block(s)]" for ranges that were requested but never folded. Every non-total
+// receipt now names what was dropped so partial application stays visible and
+// re-issuable. Apply-layer per-range errors (unknown refs, …) get the same
+// treatment: previously also invisible when some other range in the batch
+// succeeded.
+function applyErrorNote(r: { errors: string[] }): string {
+    if (r.errors.length === 0) return "";
+    const errs = r.errors.slice(0, 3).map((e) => e.length > 200 ? `${e.slice(0, 200)}…` : e).join(" | ");
+    return ` Errors: ${errs}`;
 }
 
 export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: RewriteCtx): string {
@@ -392,7 +413,7 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
                 ? ` This conversation holds only ${totalChars} char(s) — below the ${minChars}-char minimum, so NO range can succeed yet; do not retry compress or call acp_status/search_context about it — continue answering the user's task.`
                 : "";
             const dropped = droppedEntriesNote(diagnostics);
-            return `[Compression FAILED: ${errs}${revNote}${currentRefsSnapshot(ctx)}${recordCompressFailure(ctx.session, normalizedSpecKey(ranges))}${spanHint}${noViableAnywhere}${dropped ? " " + dropped : ""}]`;
+            return `[Compression FAILED: ${errs}${revNote}${currentRefsSnapshot(ctx)}${recordCompressFailure(ctx.session, normalizedSpecKey(ranges))}${spanHint}${noViableAnywhere}${dropped ? " " + dropped : ""}${applyErrorNote(r)}]`;
         }
         clearCompressFailures(ctx.session);
 
@@ -423,13 +444,17 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         );
 
         const warn = r.warnings.length > 0 ? ` ${r.warnings.join("; ")}` : "";
-        let msg = `[Compressed ${detail} → ${r.blocksCreated} block(s), ~${r.tokensCompressed} tokens saved.${warn}]`;
+        // #1495: apply-layer per-range errors (unknown refs, …) were invisible
+        // whenever some other range in the batch succeeded — surface them on
+        // the success line too, not only on total failure.
+        let msg = `[Compressed ${detail} → ${r.blocksCreated} block(s), ~${r.tokensCompressed} tokens saved.${warn}${applyErrorNote(r)}]`;
         // #1494: a partial fold must not read as a clean success — surface the
         // parse-dropped entries (and log them server-side) so the model
         // re-issues the rejected range instead of believing it folded.
+        // #1495: droppedEntriesNote also covers kind="truncated" salvage loss.
         const dropped = droppedEntriesNote(diagnostics);
         if (dropped !== "") {
-            ctx.log(`[acp-proxy: compress PARTIAL — ${diagnostics.invalidItems} entr(ies) rejected at parse: ${(diagnostics.invalidReasons ?? []).join(" | ")}]`);
+            ctx.log(`[acp-proxy: compress PARTIAL — kind=${diagnostics.kind} ${diagnostics.invalidItems} entr(ies) rejected at parse: ${(diagnostics.invalidReasons ?? []).join(" | ")}]`);
             msg += `\n${dropped}`;
         }
         // #1294 P1: append a fingerprint line per created/updated block —
