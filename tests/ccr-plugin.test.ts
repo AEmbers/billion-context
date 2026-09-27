@@ -515,16 +515,18 @@ test("e2e #1457 openai plugin lane: drop note survives failed delivery, rides th
         assert.equal(sess!.pendingRetrievals.length, 0, "carrier dropped with the ledger");
 
         // Turn 3: the SAME note rides again and commits on the confirmed 2xx.
-        // The resent retrieve call+ack also re-issues the retrieval (by design:
-        // dropping the carrier never deletes stored content), so the full text
-        // is back on the wire because the model asked for it again — not a leak.
+        // Post kernel #458: the resent original no longer leaks raw back onto
+        // the wire — it is re-projected to its canonical placeholder. The
+        // stored text reaches the model only when it actually re-issues
+        // acp_retrieve, exactly as the correction note instructs (turn 5 below).
         failNext = false;
         const r3 = await postRaw(rig, "/v1/chat/completions", { model: MODEL, max_tokens: 64_000, messages: msgs2 }, CONV);
         assert.equal(r3.status, 200);
         const f3 = rig.forwards[2]!;
         assert.ok(f3.includes("NOT delivered"), "turn-3 wire carries the correction note");
         assert.ok(f3.includes(ref), "note names the lost ref");
-        assert.ok(f3.includes(GONE), "re-issued retrieve (resent call+ack) still serves the stored text");
+        assert.ok(f3.includes("[acp-stored"), "resent original re-projected to its placeholder (kernel #458)");
+        assert.ok(!f3.includes(GONE), "no raw original leak on resend (kernel #458)");
         assert.equal(sess!.metadata.ccrDropNotes, undefined, "note committed after confirmed delivery");
         assert.equal(sess!.stats.retrieveDropped, 1, "counters untouched by the note lifecycle");
         assert.equal(sess!.stats.retrieveDelivered ?? 0, 0, "a correction is not a delivery");
@@ -533,6 +535,28 @@ test("e2e #1457 openai plugin lane: drop note survives failed delivery, rides th
         const r4 = await postRaw(rig, "/v1/chat/completions", { model: MODEL, max_tokens: 64_000, messages: msgs2 }, CONV);
         assert.equal(r4.status, 200);
         assert.ok(!rig.forwards[3]!.includes("NOT delivered"), "no phantom correction after commit");
+
+        // Turn 5: the model follows the note and re-issues acp_retrieve (same
+        // plugin-tool dispatch the MCP shim drives). The re-queued injection
+        // rides THIS forward with the full text, and the 2xx commits it as a
+        // real delivery — dropping the carrier never deletes stored content.
+        const reToolRes = await fetch(`http://127.0.0.1:${rig.proxyPort}/__bili/plugin/tool`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ conversationId: CONV, tool: "acp_retrieve", args: { ref } }),
+        });
+        const reToolJson = JSON.parse(await reToolRes.text()) as { ok: boolean; result?: string };
+        assert.ok(reToolRes.status === 200 && reToolJson.ok === true, `re-issued retrieve returned ${reToolRes.status}: ${JSON.stringify(reToolJson)}`);
+        const msgs5 = [
+            ...msgs2,
+            { role: "assistant", content: null, tool_calls: [{ id: "call_r2", type: "function", function: { name: "acp_retrieve", arguments: JSON.stringify({ ref }) } }] },
+            { role: "tool", tool_call_id: "call_r2", content: reToolJson.result! },
+        ];
+        const r5 = await postRaw(rig, "/v1/chat/completions", { model: MODEL, max_tokens: 64_000, messages: msgs5 }, CONV);
+        assert.equal(r5.status, 200);
+        assert.ok(rig.forwards[4]!.includes("[acp-retrieved"), "re-issued retrieve rides as the retrieval injection");
+        assert.ok(rig.forwards[4]!.includes(GONE), "re-issued retrieve serves the stored text on its delivery turn");
+        assert.equal(sess!.stats.retrieveDelivered ?? 0, 1, "confirmed delivery counted once");
     } finally {
         await closeRig(rig);
     }
@@ -579,9 +603,31 @@ test("e2e #1457 anthropic plugin lane: same snapshot→attach→commit-on-2xx li
         const f3 = rig.forwards[2]!;
         assert.ok(f3.includes("NOT delivered"), "turn-3 wire carries the correction note");
         assert.ok(f3.includes(ref), "note names the lost ref");
-        assert.ok(f3.includes(GONE), "re-issued retrieve (resent call+ack) still serves the stored text");
+        assert.ok(f3.includes("[acp-stored"), "resent original re-projected to its placeholder (kernel #458)");
+        assert.ok(!f3.includes(GONE), "no raw original leak on resend (kernel #458)");
         assert.equal(sess!.metadata.ccrDropNotes, undefined, "committed after confirmed delivery");
         assert.equal(sess!.stats.retrieveDelivered ?? 0, 0, "a correction is not a delivery");
+
+        // The model follows the note and re-issues acp_retrieve; the re-queued
+        // injection rides the NEXT forward with the full text (post kernel
+        // #458 this is the only path by which stored text returns to the wire).
+        const reToolRes = await fetch(`http://127.0.0.1:${rig.proxyPort}/__bili/plugin/tool`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ conversationId: CONV, tool: "acp_retrieve", args: { ref } }),
+        });
+        const reToolJson = JSON.parse(await reToolRes.text()) as { ok: boolean; result?: string };
+        assert.ok(reToolRes.status === 200 && reToolJson.ok === true, `re-issued retrieve returned ${reToolRes.status}: ${JSON.stringify(reToolJson)}`);
+        const msgs3 = [
+            ...msgs2,
+            { role: "assistant", content: [{ type: "tool_use", id: "call_r2", name: "acp_retrieve", input: { ref } }] },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "call_r2", content: reToolJson.result! }] },
+        ];
+        const r4 = await postRaw(rig, "/v1/messages", { model: MODEL, max_tokens: 64_000, messages: msgs3 }, CONV);
+        assert.equal(r4.status, 200);
+        assert.ok(rig.forwards[3]!.includes("[acp-retrieved"), "re-issued retrieve rides as the retrieval injection");
+        assert.ok(rig.forwards[3]!.includes(GONE), "re-issued retrieve serves the stored text on its delivery turn");
+        assert.equal(sess!.stats.retrieveDelivered ?? 0, 1, "confirmed delivery counted once");
     } finally {
         await closeRig(rig);
     }
