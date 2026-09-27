@@ -117,8 +117,8 @@ export const WEB_CLIENT = `(function () {
         const name = s.title || s.label || s.firstBlockHint || t("ses.no_title");
         const live = s.live && !s.restored;
         return '<span class="row-title clip w-title' + (named ? "" : " faint") + '">' + escapeHtml(name) + "</span>"
-            + ' <span class="badge ' + (live ? "live" : "disk") + '">' + (live ? t("common.live") : t("common.disk")) + "</span>"
-            + (s.restored ? ' <span class="dim small">' + t("common.restored") + "</span>" : "")
+            + ' <span class="badge ' + (live ? "live" : "disk") + '" title="' + escapeHtml(live ? t("ses.badge_live_tip") : t("ses.badge_disk_tip")) + '">' + (live ? t("common.live") : t("common.disk")) + "</span>"
+            + (s.restored ? ' <span class="dim small" title="' + escapeHtml(t("ses.badge_restored_tip")) + '">' + t("common.restored") + "</span>" : "")
             + '<span class="row-id">' + escapeHtml(s.id) + "</span>";
     }
     // SAVED column prefers ledger-derived net savings; pre-tagging sessions fall back
@@ -400,9 +400,9 @@ export const WEB_CLIENT = `(function () {
     }
     function detailBadges(d) {
         const live = d.live && !d.restored;
-        let html = '<span class="badge ' + (live ? "live" : "disk") + '">' + (live ? t("common.live") : t("common.disk")) + "</span>";
+        let html = '<span class="badge ' + (live ? "live" : "disk") + '" title="' + escapeHtml(live ? t("ses.badge_live_tip") : t("ses.badge_disk_tip")) + '">' + (live ? t("common.live") : t("common.disk")) + "</span>";
         if (d.protocol) html += " " + protoBadge(d.protocol);
-        if (d.restored) html += ' <span class="dim small">' + t("common.restored") + "</span>";
+        if (d.restored) html += ' <span class="dim small" title="' + escapeHtml(t("ses.badge_restored_tip")) + '">' + t("common.restored") + "</span>";
         return html;
     }
     // #1426: structured handoff rendering — per-role blocks with separated thinking,
@@ -673,13 +673,27 @@ export const WEB_CLIENT = `(function () {
             host.innerHTML = '<a class="btn sm" href="#/sessions">' + t("common.back") + '</a><div class="card" style="margin-top:12px"><div class="card-b"><div class="empty">⚠️ ' + escapeHtml(e.message) + "</div></div></div>";
         }
     }
-    // Shared clipboard helper: flash "copied" on the clicked button.
+    // Shared clipboard feedback: never swap the label — green state plus a transient
+    // “copied” bubble above the control so success is unmistakable.
+    function copiedHint(el) {
+        if (!el || !el.getBoundingClientRect) return;
+        const r = el.getBoundingClientRect();
+        const tip = document.createElement("span");
+        tip.className = "copied-hint";
+        tip.textContent = t("common.copied_hint");
+        tip.style.left = Math.max(60, Math.min(window.innerWidth - 60, r.left + r.width / 2)) + "px";
+        tip.style.top = Math.max(4, r.top - 38) + "px";
+        document.body.appendChild(tip);
+        setTimeout(() => { if (tip.parentNode) tip.parentNode.removeChild(tip); }, 1400);
+    }
+    function flashCopied(el) {
+        if (!el || !el.classList) return;
+        el.classList.add("copied");
+        setTimeout(() => { el.classList.remove("copied"); }, 1200);
+        copiedHint(el);
+    }
     function copyText(text, btn) {
-        // Universal pattern: never swap the button label — flash a green state instead.
-        const done = () => {
-            btn.classList.add("copied");
-            setTimeout(() => { btn.classList.remove("copied"); }, 1200);
-        };
+        const done = () => flashCopied(btn);
         const fallback = () => {
             const ta = document.createElement("textarea");
             ta.value = text;
@@ -754,8 +768,7 @@ export const WEB_CLIENT = `(function () {
                 const md = await grab();
                 try { await navigator.clipboard.writeText(md); }
                 catch (e) { const ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
-                copyB.classList.add("copied");
-                setTimeout(() => { copyB.classList.remove("copied"); }, 1200);
+                flashCopied(copyB);
             } catch (e) { toast(t("toast.failed", { msg: e.message }), "err"); } finally { busy(copyB, false); }
         });
         dlB.addEventListener("click", async () => {
@@ -781,7 +794,7 @@ export const WEB_CLIENT = `(function () {
         }
         const md = d.handoffMd;
         if (copyBtn) copyBtn.addEventListener("click", () => {
-            const done = () => { copyBtn.classList.add("copied"); setTimeout(() => { copyBtn.classList.remove("copied"); }, 1200); };
+            const done = () => flashCopied(copyBtn);
             const fallback = () => {
                 const ta = document.createElement("textarea");
                 ta.value = md;
@@ -1067,10 +1080,7 @@ export const WEB_CLIENT = `(function () {
                 if (box) text = box.textContent || "";
             }
             if (!text) return;
-            const done = () => {
-                btn.classList.add("copied");
-                setTimeout(() => { btn.classList.remove("copied"); }, 1200);
-            };
+            const done = () => flashCopied(btn);
             const fallback = () => {
                 const ta = document.createElement("textarea");
                 ta.value = text;

@@ -306,6 +306,14 @@ pre.tool-args, pre.tool-out { margin: 6px 0 0; padding: 8px; background: var(--b
 .w-title { display: inline-block; max-width: 230px; vertical-align: bottom; }
 .w-up { display: inline-block; max-width: 128px; vertical-align: bottom; }
 .copy-btn.copied, .btn.copied { border-color: var(--green); color: var(--green); background: var(--green-soft); }
+.tproc th.num, .tproc td.num { text-align: center; }
+.copied-hint { position: fixed; z-index: 60; transform: translate(-50%, 4px); background: var(--bg); border: 1px solid var(--border); color: var(--green); font-size: 12px; line-height: 1; padding: 5px 11px; border-radius: 14px; box-shadow: 0 4px 14px rgba(0, 0, 0, .12); pointer-events: none; white-space: nowrap; animation: copied-pop 1.4s ease forwards; }
+@keyframes copied-pop {
+    0% { opacity: 0; transform: translate(-50%, 4px); }
+    12% { opacity: 1; transform: translate(-50%, 0); }
+    78% { opacity: 1; transform: translate(-50%, 0); }
+    100% { opacity: 0; transform: translate(-50%, -3px); }
+}
 .twide table.data th, .twide table.data td { padding-left: 7px; padding-right: 7px; }
 .twide .w-title { max-width: 200px; }
 .twide .w-up { max-width: 112px; }
