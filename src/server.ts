@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { createCore, type CompressionCore, type CompressionState, type Config, type AbsorbConfig, type CoreMessage, type NudgeDecision, type Prompts, type PackSurface, type ToolPrompts, applyAcpToolOverrides, defaultPrompts, defaultCountTokens, estimateTokensFast, renderNudgeText, deactivateBlock, viableRanges, resolveOutputSteeringConfig } from "acp-kernel";
+import { createCore, type CompressionCore, type CompressionState, type Config, type AbsorbConfig, type CoreMessage, type NudgeDecision, type Prompts, type PackSurface, type ToolPrompts, applyAcpToolOverrides, defaultPrompts, defaultCountTokens, renderNudgeText, deactivateBlock, viableRanges, resolveOutputSteeringConfig } from "acp-kernel";
 import { DEFAULT_STRIP_IMAGES_KEEP_RECENT, applyCompressSettings, resolveAbsorbSettings, resolveCompress, resolveCompressPrompts, resolveCompressSurfaceDetailed, resolveRequestConfig } from "./compress-settings.js";
 import { dropCompressReasoning, type CompressReasoningConfig } from "./reasoning-drop.js";
 import type { CompressSettings, ProxyOptions } from "./config.js";
@@ -2727,28 +2727,26 @@ function diagNudge(turn: { nudge?: { shouldInject: boolean; reason: string; cont
 // still feeds 0 (nothing measured yet; nothing pending either), so
 // first-turn behavior is byte-identical to pre-#728.
 function effectiveTokenCount(session: Session, msgs: CoreMessage[], inboundImageTokens = 0): number {
-    if (session.stats.lastInputTokens > 0) return session.stats.lastInputTokens;
-    // The inbound upper bound carries the image term in BOTH zero-baseline
-    // regimes (#1119/#1137): the wire codecs move images out of
-    // CoreMessage.text into sidecars, so a text-only bound drops them.
-    // #1137: an anonymous prefix-affinity fork (#553) replays its FULL raw
-    // history — images included — in this one request, so this request's
-    // image mass IS the history's image mass; returning the text-only bound
-    // there left image-heavy forks reading single-digit usage % and nudging
-    // only at overflow.
+    // #1492: only usage-grade baselines are authoritative sizing inputs. An
+    // estimate-sourced value describes ONE turn's outbound — possibly the FULL
+    // raw history on an unfolded fallback turn — and pinning the nudge to it
+    // misreads a folded ~160K payload as 1.27M for every later failed turn.
+    // Fall through to the per-turn local measurements, which track the actual
+    // outbound view (post-fold normally, raw when the transform failed).
+    if (session.stats.lastInputTokens > 0 && session.stats.lastInputTokensSource === "usage") return session.stats.lastInputTokens;
     const raw = estimateCoreMessagesUpper(msgs) + inboundImageTokens;
     if (session.metadata.anonymousPrefixAffinity) return raw;
     const est = session.stats.localInputEstimate ?? 0;
     if (est <= 0) return 0;
-    // Cap by THIS request's inbound upper bound: the recorded estimate lags by
-    // one turn, so after a client-side shrink (native compaction echo, history
-    // edit) the previous turn's payload can be larger than what is in front of
-    // us now — never claim more context than the current request could hold.
-    // In steady state est <= raw bound always (the outbound fold is never
-    // larger than the inbound history), so this is a no-op there. A
-    // client-side shrink still shrinks the bound (fewer messages AND fewer
-    // images), preserving the stale-high invariant.
     return Math.min(est, raw);
+}
+
+/** #1492: secondary processTurn feeds (count-token previews, the codex
+ *  forged-compact handoff, the absorb view) must not light the kernel's
+ *  emergency bands on an estimate-grade poison — only a usage-grade baseline
+ *  describes real billing. 0 reads as "unknown" to the kernel. */
+function usageGradeInputBaseline(session: Session): number {
+    return session.stats.lastInputTokensSource === "usage" ? session.stats.lastInputTokens : 0;
 }
 
 // #1403: top-level prompt_cache_key is NOT part of the Anthropic Messages API.
@@ -3224,7 +3222,7 @@ async function prepareOpenai(
     rebuiltMessages = normalizeStrictEchoReasoning(rebuiltMessages, isStrictReasoningEcho(session, upstreamOrigin, modelIdOf(parsed)), log, sessionId);
     const rebuilt: OpenAIRequestBody = { ...parsed, messages: rebuiltMessages, tools: toolsOut as OpenAITool[] | undefined };
     warnReasoningPairs(rebuiltMessages, log, sessionId);
-    clampOutgoingOutput(rebuilt as Record<string, unknown>, typeof (parsed as Record<string, unknown>).max_completion_tokens === "number" ? "max_completion_tokens" : "max_tokens", { systemText: openaiSystemText, tools: toolsOut, processedMessages, lastInputTokens: session.stats.lastInputTokens, nativeWindow, imageTokens: imageTokensInParsedBody("openai", rebuilt, imageBillingFor(opts, billingUpstream ?? upstreamOrigin)) }, sessionId, log);
+    clampOutgoingOutput(rebuilt as Record<string, unknown>, typeof (parsed as Record<string, unknown>).max_completion_tokens === "number" ? "max_completion_tokens" : "max_tokens", { systemText: openaiSystemText, tools: toolsOut, processedMessages, lastInputTokens: session.stats.lastInputTokens, lastInputTokensSource: session.stats.lastInputTokensSource, nativeWindow, imageTokens: imageTokensInParsedBody("openai", rebuilt, imageBillingFor(opts, billingUpstream ?? upstreamOrigin)) }, sessionId, log);
     // prompt_cache_retention is an OpenAI-host-only cache directive; the dsh
     // launcher forces PI_CACHE_RETENTION=long (for the session-id
     // prompt_cache_key) which makes the client also emit it. Third-party
@@ -3421,7 +3419,7 @@ async function prepareGoogle(
     }
 
     const rebuilt: GoogleRequestBody = { ...parsed, contents: rebuiltContents, tools: toolsOut, systemInstruction };
-    clampOutgoingOutput(rebuilt as Record<string, unknown>, "generationConfig.maxOutputTokens", { systemText: googleClientSystem, tools: toolsOut, processedMessages, lastInputTokens: session.stats.lastInputTokens, nativeWindow, imageTokens: imageTokensInParsedBody("google", rebuilt) }, sessionId, log);
+    clampOutgoingOutput(rebuilt as Record<string, unknown>, "generationConfig.maxOutputTokens", { systemText: googleClientSystem, tools: toolsOut, processedMessages, lastInputTokens: session.stats.lastInputTokens, lastInputTokensSource: session.stats.lastInputTokensSource, nativeWindow, imageTokens: imageTokensInParsedBody("google", rebuilt) }, sessionId, log);
     // #532: title-gen side requests carry their own tiny system — skip them.
     if (!isTitleGen && googleOutboundSystem !== undefined) {
         session.metadata.systemPromptTokens = countSystemAndToolsTokens(googleOutboundSystem, toolsOut);
@@ -3447,7 +3445,7 @@ export function prepareGoogleCountTokens(
         const { msgs } = googleToCore(parsed);
         // Read-only preview: the store rides in so placeholder substitution is
         // counted, but nothing is adopted (state is discarded here too).
-        const turn = core.processTurn({ messages: msgs, state: session.state, config: ccrLoopConfig(session, config), tokenCount: session.stats.lastInputTokens, renderTags: "text-only", contentStore: contentStoreOf(session) });
+        const turn = core.processTurn({ messages: msgs, state: session.state, config: ccrLoopConfig(session, config), tokenCount: usageGradeInputBaseline(session), renderTags: "text-only", contentStore: contentStoreOf(session) });
         const stripped = stripKernelSummaries(turn.messages, turn.state);
         const rebuilt: GoogleRequestBody = { ...parsed, contents: coreToGoogle(stripped as BiliMessage[]) };
         log("info", `[${sessionId}] countTokens pruned: ${msgs.length} → ${stripped.length} msgs`);
@@ -3742,7 +3740,7 @@ async function prepareResponses(
     const rebuilt: ResponsesRequestBody = { ...parsed, input: rebuiltInput, tools: toolsOut };
     warnResponsesReasoningPairs(Array.isArray(rebuiltInput) ? rebuiltInput : [], log, sessionId);
     if (!isCompactionTrigger) {
-        clampOutgoingOutput(rebuilt as Record<string, unknown>, "max_output_tokens", { systemText: (responsesProjection?.systemParts ?? []).join("\n"), tools: toolsOut, processedMessages, lastInputTokens: session.stats.lastInputTokens, nativeWindow, imageTokens: imageTokensInParsedBody("responses", rebuilt, imageBillingFor(opts, billingUpstream ?? upstreamOrigin)) }, sessionId, log);
+        clampOutgoingOutput(rebuilt as Record<string, unknown>, "max_output_tokens", { systemText: (responsesProjection?.systemParts ?? []).join("\n"), tools: toolsOut, processedMessages, lastInputTokens: session.stats.lastInputTokens, lastInputTokensSource: session.stats.lastInputTokensSource, nativeWindow, imageTokens: imageTokensInParsedBody("responses", rebuilt, imageBillingFor(opts, billingUpstream ?? upstreamOrigin)) }, sessionId, log);
     }
     // Route with the upstream THIS request goes to — session.meta.upstreamOrigin
     // is first-wins and would keep injecting pck toward a relay we switched
@@ -3840,7 +3838,7 @@ export function prepareCountTokens(
     try {
         const { msgs, cacheControls } = anthropicToCore(parsed);
         // Read-only preview: same policy as the google twin above.
-        const turn = core.processTurn({ messages: msgs, state: session.state, config: ccrLoopConfig(session, config), tokenCount: session.stats.lastInputTokens, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
+        const turn = core.processTurn({ messages: msgs, state: session.state, config: ccrLoopConfig(session, config), tokenCount: usageGradeInputBaseline(session), renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
         const stripped = stripKernelSummaries(turn.messages as BiliMessage[], turn.state);
         const rebuiltMessages = coreToAnthropic(stripped, cacheControls);
         log("info", `[${sessionId}] count_tokens pruned: ${msgs.length} → ${stripped.length} msgs`);
@@ -3922,7 +3920,7 @@ function prepareResponsesCompact(
         // no [ACP absorb] instruction bakes into the forged history, and run
         // the absorb view so absorbed pairs stay hidden in it (wire parity).
         const compactConfig = ccrLoopConfig(session, { ...config, absorb: undefined });
-        const turn = core.processTurn({ messages: projection.msgs, state: session.state, config: compactConfig, tokenCount: session.stats.lastInputTokens, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
+        const turn = core.processTurn({ messages: projection.msgs, state: session.state, config: compactConfig, tokenCount: usageGradeInputBaseline(session), renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
         transformOk = true;
@@ -3932,7 +3930,7 @@ function prepareResponsesCompact(
             session.contentStoreDirty = prevStoreDirty;
             return base;
         }
-        const viewed = applyAbsorbView(turn.messages, turn.state, compactConfig, session.stats.lastInputTokens);
+        const viewed = applyAbsorbView(turn.messages, turn.state, compactConfig, usageGradeInputBaseline(session));
         const processed = repairResponsesAssistantOrdering(stripKernelSummaries(viewed, turn.state), projection.msgs);
         let output = patchResponsesInput(projection, processed);
         if (typeof output === "string") {
@@ -4367,9 +4365,20 @@ async function preflightCompressIfNeeded(
     // 0-baseline means a genuinely new conversation or a post-native-compaction
     // replay, both small enough to self-heal via the learned-window path.
     const unknownBaseline = anonymous && session.stats.lastInputTokens <= 0;
+    // #1492: floor the trigger on the baseline only while it is authoritative
+    // for THIS payload. A usage-grade baseline measures what upstream billed
+    // (it can legitimately exceed every local estimate — invisible thinking/
+    // cache components), and ANY baseline is the best signal when the current
+    // payload is unmeasured (kernel transform failed → the outbound IS the raw
+    // body). An estimate-sourced baseline on a measured (folded) payload
+    // describes a different view and must not pull preflight into multi-minute
+    // runs over a payload whose own post-fold estimate fits the window.
+    const baselineFloor = prepared.processedMessages.length > 0
+        ? (session.stats.lastInputTokensSource === "usage" ? session.stats.lastInputTokens : 0)
+        : session.stats.lastInputTokens;
     const tokenCount = unknownBaseline
         ? estimateCoreMessagesUpper(prepared.processedMessages) + overheadEstimate + imageTokens
-        : Math.max(session.stats.lastInputTokens, payloadEstimate);
+        : Math.max(baselineFloor, payloadEstimate);
     if (limit <= 0 || !model || tokenCount < compressionTarget) return prepared;
     const payloadFitsWindow = (unknownBaseline ? tokenCount : payloadEstimate) < limit;
     // #496 forward-once-then-learn: the default image cost (base64/4) matches byte
@@ -4592,7 +4601,9 @@ function armFailureShrink(prepared: Prepared, log: (level: string, msg: string) 
     let est: number;
     try {
         const text = typeof prepared.body === "string" ? prepared.body : prepared.body.toString("utf8");
-        est = estimateTokensFast(text);
+        // #1492: CJK-aware lower bound — chars/4 understated CJK by up to 4×,
+        // silently breaking the documented "lower bound → never later" contract.
+        est = defaultCountTokens(text);
     } catch {
         return; // non-text body — nothing to estimate
     }
@@ -4975,7 +4986,8 @@ async function forward(
             const declared = typeof s.metadata.effectiveContextLimit === "number" ? s.metadata.effectiveContextLimit : 0;
             let est = 0;
             try {
-                est = estimateTokensFast(rawBody ?? "");
+                // #1492: same CJK-aware lower bound as armFailureShrink.
+                est = defaultCountTokens(rawBody ?? "");
             } catch { est = 0; }
             const arm = Math.max(0, Math.min(declared, Number.isFinite(est) ? est : declared));
             if (arm > 0) {
