@@ -309,10 +309,13 @@ export function parseCompressInput(input: unknown, callId?: string) {
     }
     if (!parsed.diagnostics.ok && parsed.diagnostics.kind !== "ok") {
         loggerLog("warn", `[acp-compress-input] rejected: kind=${parsed.diagnostics.kind} invalidItems=${parsed.diagnostics.invalidItems}${parsed.diagnostics.keys ? ` keys=[${parsed.diagnostics.keys.join(",")}]` : ""}${parsed.diagnostics.length !== undefined ? ` len=${parsed.diagnostics.length}` : ""}${parsed.diagnostics.invalidReasons && parsed.diagnostics.invalidReasons.length > 0 ? ` reasons=[${parsed.diagnostics.invalidReasons.join(" | ")}]` : ""}`);
-    } else if (parsed.diagnostics.invalidItems > 0) {
+    } else if (parsed.diagnostics.invalidItems > 0 || parsed.diagnostics.kind === "truncated") {
         // #1494: partial drop — at least one range survived, so the old
         // condition above never fired and the rejection was invisible on both
-        // the server log and the model-facing receipt.
+        // the server log and the model-facing receipt. #1495: kind="truncated"
+        // (gateway-stringified + cut content array) salvages the complete
+        // leading entries and reports the same way — often with invalidItems=0,
+        // so it needs the explicit kind arm.
         loggerLog("warn", `[acp-compress-input] partial: ${parsed.ranges.length} range(s) applied, ${parsed.diagnostics.invalidItems} rejected (kind=${parsed.diagnostics.kind}) reasons=[${(parsed.diagnostics.invalidReasons ?? []).join(" | ")}]`);
     }
     return { ranges: parsed.ranges, diagnostics: parsed.diagnostics };
