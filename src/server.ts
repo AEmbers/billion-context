@@ -10,7 +10,7 @@ import type { CompressSettings, ProxyOptions } from "./config.js";
 import { loadOptions, loadRoutes } from "./config.js";
 import { resetProxyCache } from "./upstream-proxy.js";
 import { FALLBACK_EFFECTIVE_WINDOW_FLOOR, findRoute, lookupContextLimit, resolveConfiguredContextLimit, resolveConfiguredOutputLimit, resolveCompressProtocol } from "./config.js";
-import { contextFromRegistry, loadRegistry, peekRegistryContext, peekRegistryOutputLimit } from "./registry.js";
+import { contextFromRegistry, loadRegistry, peekRegistryContext, peekRegistryOutputLimit, peekRegistryPriceProfile } from "./registry.js";
 import { codexAlignedWindow } from "./codex-models.js";
 import { fetchWithTimeout, MAX_REQUEST_BYTES, upstreamTimeoutMs } from "./fetch-util.js";
 import { formatUpstreamError, getUpstreamConnectionStatus, recordUpstreamConnection, resolveProxy, resolveProxyDecision, proxyDispatcher, type UpstreamProxyDecision } from "./upstream-proxy.js";
@@ -65,6 +65,7 @@ import { applyAbsorbView, absorbEnabled, absorbToolName, storeEffectiveAbsorb } 
 import { adoptContentStore, ccrEnabled, ccrLoopConfig, ccrPluginWireOk, commitRetrievals, contentStoreOf, dropRetrievals, executeRetrieve, flushRetrievalNotes, pruneExpiredRetrievals, reconcileReloadedRetrievals, retrieveToolName, snapshotPendingRetrievals, storeEffectiveCcr, type CcrSettings } from "./store.js";
 import { applyImageCompressionPass, imageCompressionEnabled, imageFullTrailingNote, storeEffectiveImageCompression, type ImageCompressionSettings } from "./image-compress.js";
 import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
+import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
 import { buildSessionCacheReport } from "./cache-ledger.js";
@@ -1328,6 +1329,10 @@ async function handle(
     // every view / injection / execution site reads one value.
     let resolvedCcrCfg: CcrSettings | undefined;
     let resolvedImageCompressionCfg: ImageCompressionSettings | undefined;
+    // [#1336] host-only plan-aware search flag for this request scope (three-
+    // level merge); stamped onto the session below like the other per-request
+    // policies. Off unless compress.search.planAware=true at some level.
+    let resolvedSearchPlanAware = false;
     let reqModelId: string | undefined;
     if (parsed && typeof parsed === "object") {
         // Gemini's model lives in the request path, every other wire carries it
@@ -1437,6 +1442,7 @@ async function handle(
             // some config level, after local verification.
             resolvedCcrCfg = compressCfg.ccr;
         resolvedImageCompressionCfg = compressCfg.imageCompression;
+            resolvedSearchPlanAware = compressCfg.search?.planAware === true;
             reqPrompts = resolveCompressPrompts(compressCfg);
             const surfaceRes = resolveCompressSurfaceDetailed(compressCfg);
             reqSurface = surfaceRes.surface;
@@ -1960,6 +1966,10 @@ async function handle(
         // round-trip needs a tool channel on this wire; without one the model
         // could request originals it never gets back (silent-loss trap).
         storeEffectiveImageCompression(session, opts.compress.injectTool && !pluginMode && storeChannelOk && resolvedImageCompressionCfg?.enabled === true ? resolvedImageCompressionCfg : undefined);
+        // [#1336] no channel gating: search_context is already available on
+        // whichever mode served this session and the re-rank is pure output-
+        // side policy on its result — both proxy and plugin lanes apply it.
+        storeEffectiveSearchPlanAware(session, resolvedSearchPlanAware);
         // #546: restore a client-shrunk output budget BEFORE the side gate so a
         // tool-carrying main request re-enters the pipeline at full budget (see
         // restoreOutputBudget for the starvation mechanism).
@@ -2166,6 +2176,22 @@ async function handle(
             ): Promise<{ body: string | Buffer; prepared: Prepared | null } | null> => {
                 const runPrepare = async (): Promise<Prepared> => {
                     const cs = resolveCompress(opts.routes, route?.rewrittenUrl, requestModel, opts.compress);
+                    // #1279: stamp this request's effective cache-economics price
+                    // profile on the session so request-context-free report faces
+                    // (acp_cache / /acp-cache / __bili/cache-report) price folds
+                    // with the profile that governed this turn; unset clears it
+                    // (latest-wins, like activePack). User config at any level wins
+                    // wholesale; when no level configures one, fall back to the
+                    // model's models.dev price (absolute $/Mtok) so out-of-box
+                    // reports read in real money instead of Anthropic-ratio
+                    // guesses. Report-only — no trigger impact.
+                    if (cs.priceProfile !== undefined && Object.keys(cs.priceProfile).length > 0) session.metadata.cachePriceProfile = cs.priceProfile;
+                    else {
+                        const priceHost = (() => { try { return new URL(route?.rewrittenUrl ?? upstreamOrigin).host; } catch { return undefined; } })();
+                        const registryProfile = peekRegistryPriceProfile(requestModel, priceHost);
+                        if (registryProfile !== undefined) session.metadata.cachePriceProfile = registryProfile;
+                        else delete session.metadata.cachePriceProfile;
+                    }
                     const visibilityMarkers = cs.visibilityMarkers ?? true;
                     const reasoningCfg = cs.reasoning;
                     const keepRecent = cs.stripImagesKeepRecent ?? DEFAULT_STRIP_IMAGES_KEEP_RECENT;

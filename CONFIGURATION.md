@@ -388,6 +388,14 @@ For each request, the proxy resolves the settings by longest-URL-prefix match (t
   **Plugin-lane governance (#1345):** in plugin mode the whole `ccr` block follows the **base** config — sessions arm only on a base-level `enabled: true` and execute with the base `toolName` and thresholds, because the plugin manifest (the host's only declaration of the retrieve surface) is built from the base config alone. Provider/model-level `ccr.*` overrides therefore apply to proxy-mode sessions only (the proxy declares and dispatches per request under the merged block). Every divergent override is logged at config load as a `[acp-config] ccr override ignored in plugin sessions: …` warning naming the level, field, and the value plugin sessions actually use.
   The store persists as a single envelope file (`.content-store.json`) next to the session JSON, using the same at-rest codec as the session file when `BILI_ENCRYPTION_KEY` is set; entries are deduped by content hash and lazily loaded per session. Only the *content* inside a `tool` result shrinks — pairing with the assistant `tool_calls` is untouched. Scope gates: **opt-in on every lane** (#1207 owner decision — `compress.ccr.enabled: true` at any level after local verification): proxy mode arms once enabled, plus plugin mode on the anthropic + openai wires where the plugin manifest advertises `acp_retrieve` while CCR is explicitly enabled globally (#1271); responses marker/text-protocol routes, `ACP_NO_INJECT_TOOL`, and the responses/google wires in plugin mode have no proven request-only round-trip channel to execute the retrieve, so the store disarms itself there instead of losing content. Since v2 (#1179), folds are lossless too: when a compress fold lands, the covered originals are persisted into the store (first-write-wins, reasoning skipped), so `acp_retrieve("mNNNNN")` works for folded content as well; `decompress` accepts optional `startId`/`endId` message refs to restore just a span of a block (ephemeral injection, same channel as retrieves); `search_context` hits carry the covered ref span (`[m00044–m00097 · N msgs]`) alongside block metadata; and `acp_status` lists the block→ref linkage (`BLOCK SPANS`) plus a separate `range-restored` count on the STORE line. Design decision (#1282): **no cap and no eviction, ever** — the envelope grows with the unique originals held and shares the session's lifecycle; the footprint is visible in `acp_status`. Per-session stats (stored bytes, current wire bytes saved, retrieve rate) surface in `acp_status`; each retrieve logs a `[ccr] retrieve …` line.
 
+#### `search`
+
+- **Type:** `object` (`{ planAware? }`)
+- **Default:** *(off — unset resolves to `planAware: false`; the output stays byte-identical to plain lexical search)*
+- **Status:** ACTIVE (CCR v3 planning-aware retrieval, #1336 — default off until measured; proxy mode + plugin mode)
+- **Description:** Opt-in **planning-aware retrieval** for `search_context` (issue #1336). When enabled, if a query matches more blocks than `limit`, the candidates are re-ranked against the current plan state extracted from the in-context message view: the LAST tool call of each planning tool (built-in patterns `TodoWrite`, `todowrite`, `todo_list`, `update_plan`, `TaskCreate`, `TaskUpdate`, plus every `compress.protectedLatestTools` pattern — same latest-wins semantics as the kernel's snapshot protection) and the most recent user turn. Candidate topics/summaries are scored by weighted term overlap with that state; blocks scoring above zero sort first, ties keep the original lexical order. Two things happen only then: the returned subset can differ from the pure lexical cut, and a `[plan-aware]` steering section is appended with (a) `top fetch targets:` — the covered ref spans of the top-scoring returned blocks, and (b) a hint for any covered ref already retrieved ≥2 times this session, pointing at a one-shot `decompress({blockId, startId, endId})` range restore instead of repeat `acp_retrieve`. When the flag is off, when no plan state is in context, or when the match pool fits inside `limit`, the output is byte-identical to the pre-feature behavior. Ranking touches candidate order only — no store/fold/injection mechanics change, no new persistence, and foreign-session searches (`conversation_id`) stay read-only lexical. Every re-rank logs an `[acp-search-plan] …` line with the per-block scores. Companion stats: whole-block decompresses count up in `acp_status` under a `RETRIEVAL QUALITY` line (total, plus how many had a cheaper precise path available — i.e. the block carried a ref span and CCR was armed), so the retrieve-vs-decompress trade can be measured before/after enabling. Sub-fields (merged deepest-wins like every other CompressSettings field):
+  - `planAware: boolean` — master switch; anything other than `true` keeps the feature fully off.
+
 #### `imageCompression`
 
 - **Type:** `object` (`{ enabled?, minTokens?, maxDimension?, quality?, format? }`)
@@ -432,12 +440,31 @@ For each request, the proxy resolves the settings by longest-URL-prefix match (t
   - `markerText: string` — nudge text appended as a commentary message each continued round (default `"Continue thinking..."`).
   - `base: number` / `offset: number` — the lattice signature `tokens == base*n + offset` (defaults `518` / `-2`). Override if another model family truncates on a different lattice.
   - `debugLog: boolean` — verbose per-round logging (default `false`).
+   ```jsonc
+   // enable globally
+   { "compress": { "reasoningGuard": { "enabled": true } } }
+    // tune per provider (placement scopes it to that provider's traffic)
+    { "providers": { "https://your-relay.example": { "compress": { "reasoningGuard": { "enabled": true, "maxContinue": 2 } } } } }
+   ```
+
+#### `priceProfile`
+
+- **Type:** `object` (`{ w?, r?, q? }`, all non-negative numbers)
+- **Default:** *(unset — reports then price folds from the request model's models.dev price row in absolute $/Mtok; only models the registry cannot resolve fall back to the kernel's built-in relative ratios `{ w: 1, r: 0.1, q: 4 }`)*
+- **Status:** ACTIVE
+- **Description:** Price profile for the **cache-economics verdicts** in the session cache report (`acp_cache` tool / `/acp-cache` command / `GET /__bili/cache-report`, #800/#1279). The per-fold P&L fields (`oneTimeCostUnits`, `perTurnSavingUnits`, `breakevenTurns`, `paidBack`) are computed from three multipliers over the input-token unit: `w` (cache-write cost), `r` (cache-read cost), `q` (output cost). Two unit conventions coexist, both printed verbatim in the report header (`FOLD ECONOMICS (N folds @ w=.. r=.. q=..)`):
+  - **User config** uses **ratios normalized to the input price (p_in = 1)**: `w` = cacheWrite ÷ input, `r` = cacheRead ÷ input, `q` = output ÷ input. Sub-fields merge deepest-wins across the three levels like every other CompressSettings field (set `q` at provider level, refine one field at model level); fields left unset within a partial profile fall back to the kernel ratios `w: 1`, `r: 0.1`, `q: 4`.
+  - **Registry default** (no level sets the key): derived from the request model's models.dev price row — **absolute $/Mtok**, `w = cost.input`, `r = cost.cache_read ?? 0.1 × input`, `q = cost.output ?? 1.5 × input` (convention fallbacks for rows without those fields). Direct-to-provider traffic gets that host's own listing; unknown relays get the first matching listing across hosts (with a one-time warning when listings conflict). Live registry wins when reachable, bundled snapshot is the offline floor (#282).
+  User config wins wholesale — a profile set at any level is never mixed field-by-field with the registry row. The last request's effective value is stamped onto the session, so every report face prices folds with the profile that governed that session's most recent turn. **Report-only**: the profile never affects compression triggers, cadence, or any wire behavior. User-config examples (override the registry row, e.g. for relays with custom markup):
   ```jsonc
-  // enable globally
-  { "compress": { "reasoningGuard": { "enabled": true } } }
-   // tune per provider (placement scopes it to that provider's traffic)
-   { "providers": { "https://your-relay.example": { "compress": { "reasoningGuard": { "enabled": true, "maxContinue": 2 } } } } }
+  // DeepSeek-V3 ≈ low output multiple
+  { "providers": { "https://api.deepseek.com": { "compress": { "priceProfile": { "w": 1, "r": 0.1, "q": 1.5 } } } } }
+  // OpenAI GPT-4o/o-series: 50% cached-read discount, flat writes, 4× output
+  { "providers": { "https://api.openai.com": { "compress": { "priceProfile": { "w": 1, "r": 0.5, "q": 4 } } } } }
+  // Self-hosted / free tier: everything costs zero tokens of your budget
+  { "compress": { "priceProfile": { "w": 0, "r": 0, "q": 0 } } }
   ```
+  Use list prices relative to the same model's normal input price; relays with custom markup should use their effective rates.
 
 #### `outputSteering`
 
