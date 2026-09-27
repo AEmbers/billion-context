@@ -96,7 +96,7 @@ export interface WebOverview {
     hiddenEmpty: number;
     hitPct: number | null;
     blocks: number;
-    byProtocol: Array<{ protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number; hitPct: number | null }>;
+    byProtocol: Array<{ protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number; hitPct: number | null; missDropNew?: number; missDropComp?: number; missDropTtl?: number }>;
     recent: WebSessionSummary[];
 }
 
@@ -290,7 +290,7 @@ export async function buildOverview(): Promise<WebOverview> {
     let requests = 0, input = 0, cached = 0, output = 0, saved = 0, savedEstimated = 0, blocks = 0, live = 0;
     let grossSavedTotal = 0, netSavedTotal = 0, repayTotal = 0, summaryCostTotal = 0, hasFoldData = false;
     let missNewTotal = 0, missCompTotal = 0, missTtlTotal = 0, missInputTotal = 0;
-    const protoMap = new Map<string, { protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number }>();
+    const protoMap = new Map<string, { protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number; missNew: number; missComp: number; missTtl: number; missInput: number }>();
     for (const s of all) {
         requests += s.requests;
         input += s.inputTokens;
@@ -304,7 +304,7 @@ export async function buildOverview(): Promise<WebOverview> {
         // tokensSaved is a local estimate (upstream never reports it); flag
         // the share coming from sessions without usage samples (ledger).
         const key = s.protocol ?? "unknown";
-        const row = protoMap.get(key) ?? { protocol: key, sessions: 0, requests: 0, inputTokens: 0, cachedTokens: 0, savedNet: 0, folds: 0 };
+        const row = protoMap.get(key) ?? { protocol: key, sessions: 0, requests: 0, inputTokens: 0, cachedTokens: 0, savedNet: 0, folds: 0, missNew: 0, missComp: 0, missTtl: 0, missInput: 0 };
         row.sessions += 1;
         row.requests += s.requests;
         row.inputTokens += s.inputTokens;
@@ -318,6 +318,10 @@ export async function buildOverview(): Promise<WebOverview> {
             missCompTotal += s.compRepay ?? 0;
             missTtlTotal += s.ttlRepay ?? 0;
             missInputTotal += s.inputTokens;
+            row.missNew += s.newContent ?? 0;
+            row.missComp += s.compRepay ?? 0;
+            row.missTtl += s.ttlRepay ?? 0;
+            row.missInput += s.inputTokens;
         }
         if (s.hasLedger && s.grossSaved != null) {
             hasFoldData = true;
@@ -350,7 +354,21 @@ export async function buildOverview(): Promise<WebOverview> {
         missInputTotal,
         hitPct: hitPct(input, cached),
         blocks,
-        byProtocol: [...protoMap.values()].map((r) => ({ ...r, hitPct: hitPct(r.inputTokens, r.cachedTokens) })),
+        byProtocol: [...protoMap.values()].map((r) => {
+            const base = r.missInput || 0;
+            const drop = (v: number) => Math.round((v / base) * 1000) / 10;
+            return {
+                protocol: r.protocol,
+                sessions: r.sessions,
+                requests: r.requests,
+                inputTokens: r.inputTokens,
+                cachedTokens: r.cachedTokens,
+                savedNet: r.savedNet,
+                folds: r.folds,
+                hitPct: hitPct(r.inputTokens, r.cachedTokens),
+                ...(base > 0 ? { missDropNew: drop(r.missNew), missDropComp: drop(r.missComp), missDropTtl: drop(r.missTtl) } : {}),
+            };
+        }),
         recent: all.slice(0, 8),
         hiddenEmpty: allAll.length - all.length,
     };
