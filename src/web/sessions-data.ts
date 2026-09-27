@@ -47,6 +47,11 @@ export interface WebSessionSummary {
     newContent?: number;
     compRepay?: number;
     ttlRepay?: number;
+    /** Hit-rate cost of each missed-token class, in percentage points of input
+     *  (e.g. ttlRepay/input × 100 — how much the TTL class alone drags the hit rate). */
+    missDropNew?: number;
+    missDropComp?: number;
+    missDropTtl?: number;
     /** Σ (S−σ)×requestsAfter across ledger folds — input tokens not billed thanks to
      *  compression (acp-kernel EconomicsSummary.grossSaved semantics). */
     grossSaved?: number;
@@ -85,6 +90,8 @@ export interface WebOverview {
     missCompTotal: number;
     /** Σ upstream-TTL-expiry / other-prefix-invalidation missed tokens across ledger sessions. */
     missTtlTotal: number;
+    /** Σ input tokens across ledger sessions (denominator for the per-class hit-rate cost). */
+    missInputTotal: number;
     hitPct: number | null;
     blocks: number;
     byProtocol: Array<{ protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number; hitPct: number | null }>;
@@ -233,6 +240,13 @@ function summaryOf(s: Session, live: boolean): WebSessionSummary {
         ...(firstBlockHint ? { firstBlockHint } : {}),
         ...(hasFolds ? { grossSaved, netSaved, repayCost, summaryCost, foldCount } : {}),
         ...(hasLedger ? { newContent: agg?.agg?.nc ?? 0, compRepay: agg?.agg?.cr ?? 0, ttlRepay: agg?.agg?.tr ?? 0 } : {}),
+        ...(typeof agg?.agg?.input === "number" && agg.agg.input > 0
+            ? {
+                  missDropNew: Math.round(((agg.agg.nc ?? 0) / agg.agg.input) * 1000) / 10,
+                  missDropComp: Math.round(((agg.agg.cr ?? 0) / agg.agg.input) * 1000) / 10,
+                  missDropTtl: Math.round(((agg.agg.tr ?? 0) / agg.agg.input) * 1000) / 10,
+              }
+            : {}),
         ...(clientHint ? { clientHint } : {}),
     };
 }
@@ -253,7 +267,7 @@ export async function buildOverview(): Promise<WebOverview> {
     const all = await buildSessionList();
     let requests = 0, input = 0, cached = 0, output = 0, saved = 0, savedEstimated = 0, blocks = 0, live = 0;
     let grossSavedTotal = 0, netSavedTotal = 0, repayTotal = 0, summaryCostTotal = 0, hasFoldData = false;
-    let missNewTotal = 0, missCompTotal = 0, missTtlTotal = 0;
+    let missNewTotal = 0, missCompTotal = 0, missTtlTotal = 0, missInputTotal = 0;
     const protoMap = new Map<string, { protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number }>();
     for (const s of all) {
         requests += s.requests;
@@ -281,6 +295,7 @@ export async function buildOverview(): Promise<WebOverview> {
             missNewTotal += s.newContent ?? 0;
             missCompTotal += s.compRepay ?? 0;
             missTtlTotal += s.ttlRepay ?? 0;
+            missInputTotal += s.inputTokens;
         }
         if (s.hasLedger && s.grossSaved != null) {
             hasFoldData = true;
@@ -310,6 +325,7 @@ export async function buildOverview(): Promise<WebOverview> {
         missNewTotal,
         missCompTotal,
         missTtlTotal,
+        missInputTotal,
         hitPct: hitPct(input, cached),
         blocks,
         byProtocol: [...protoMap.values()].map((r) => ({ ...r, hitPct: hitPct(r.inputTokens, r.cachedTokens) })),

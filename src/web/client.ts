@@ -134,7 +134,7 @@ export const WEB_CLIENT = `(function () {
         if (compact) {
             tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + protoBadge(s.protocol) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td>' + savedTd(s) + '<td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         } else {
-            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td class="mono dim small">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + '<td class="num">' + (s.cacheHitPct == null ? t("common.none") : s.cacheHitPct.toFixed(1) + "%") + '</td><td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
+            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td class="mono dim small">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + '<td class="num">' + (s.cacheHitPct == null ? t("common.none") : s.cacheHitPct.toFixed(1) + "%" + ((s.missDropNew != null || s.missDropComp != null || s.missDropTtl != null) ? '<br><span class="dim small" style="white-space:nowrap" title="' + escapeHtml(t("ses.drop_ph")) + '">' + t("ses.drop_split", { a: s.missDropNew, b: s.missDropComp, x: s.missDropTtl }) + "</span>" : "")) + '</td><td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         }
         tr.addEventListener("click", () => { location.hash = "#/session/" + encodeURIComponent(s.id); });
         return tr;
@@ -160,7 +160,9 @@ export const WEB_CLIENT = `(function () {
             const hs = $("st-hit-split");
             if (hs) {
                 const missSum = (o.missNewTotal || 0) + (o.missCompTotal || 0) + (o.missTtlTotal || 0);
-                hs.textContent = missSum > 0 ? t("ov.miss_split", { n: fmtW(o.missNewTotal || 0), c: fmtW(o.missCompTotal || 0), x: fmtW(o.missTtlTotal || 0) }) : t("common.none");
+                const mi = o.missInputTotal || 0;
+                const f = (v) => fmtW(v) + (mi > 0 ? " (−" + ((v / mi) * 100).toFixed(1) + "pp)" : "");
+                hs.textContent = missSum > 0 ? t("ov.miss_split", { n: f(o.missNewTotal || 0), c: f(o.missCompTotal || 0), x: f(o.missTtlTotal || 0) }) : t("common.none");
             }
             $("st-input").textContent = o.inputTokens ? fmtW(o.inputTokens) : t("common.none");
             $("st-cached").textContent = o.cachedTokens ? fmtW(o.cachedTokens) : t("common.none");
@@ -494,6 +496,8 @@ export const WEB_CLIENT = `(function () {
         mini(parts, t("ov.tokens_saved"), dSavedV ? fmtW(dSavedV) : null, dSavedV > 0);
         mini(parts, t("det.last_input"), (d.lastInputTokens || 0) > 0 ? fmtW(d.lastInputTokens) : null);
         parts.push("</div>");
+        const mt = d.ledger && d.ledger.totals;
+        if (mt && mt.input > 0) parts.push('<div class="dim small" style="margin-top:8px">' + t("det.miss_split_line", { n: fmtW(mt.newContent || 0), c: fmtW(mt.compRepay || 0), x: fmtW(mt.ttlRepay || 0), pn: (((mt.newContent || 0) / mt.input) * 100).toFixed(1), pc: (((mt.compRepay || 0) / mt.input) * 100).toFixed(1), px: (((mt.ttlRepay || 0) / mt.input) * 100).toFixed(1) }) + "</div>");
         if (d.contextWindow && d.contextWindow > 0) {
             const pct = Math.min(100, Math.round((d.contextTokens / d.contextWindow) * 100));
             const cls = pct >= 90 ? "bar-fill danger" : pct >= 70 ? "bar-fill warn" : "bar-fill";
@@ -539,19 +543,13 @@ export const WEB_CLIENT = `(function () {
         parts.push('<div class="section-label" style="margin-top:14px">' + t("det.folds") + "</div>");
         if (!folds.length) parts.push('<div class="dim small">' + t("det.folds_empty") + "</div>");
         else {
-            // Numeric headers align with their columns; long fold lists stay scannable by
-            // showing the first 10; the rest stay behind an expander in a scrollable panel.
+            // All folds in one scrollable panel (same pattern as the compression blocks):
+            // numeric headers align with their columns; long lists just scroll.
             const foldHead = '<tr><th class="num">#</th><th>' + t("det.fold_time") + '</th><th class="num">' + t("det.fold_s") + '</th><th class="num">' + t("det.fold_sigma") + '</th><th class="num">' + t("det.fold_h") + '</th><th class="num">' + t("det.fold_t") + "</th></tr>";
             const foldRow = (f, i) => '<tr><td class="num">' + (f.seq != null ? f.seq : i + 1) + '</td><td class="num">' + (f.at ? fmtDT(f.at) : t("common.none")) + '</td><td class="num">' + fmtW(f.S) + '</td><td class="num">' + fmtW(f.sigma) + '</td><td class="num">' + (f.hPct == null ? t("common.none") : f.hPct.toFixed(1) + "%") + '</td><td class="num">' + fmtW(f.T) + "</td></tr>";
-            const FOLD_CAP = 10;
-            parts.push('<table class="data"><thead>' + foldHead + '</thead><tbody>');
-            folds.slice(0, FOLD_CAP).forEach((f, i) => parts.push(foldRow(f, i)));
-            parts.push("</tbody></table>");
-            if (folds.length > FOLD_CAP) {
-                parts.push('<details style="margin-top:8px"><summary class="dim small" style="cursor:pointer">' + t("det.folds_more", { n: folds.length - FOLD_CAP }) + '</summary><div class="fold-scroll"><table class="data"><thead>' + foldHead + '</thead><tbody>');
-                folds.slice(FOLD_CAP).forEach((f, i) => parts.push(foldRow(f, i + FOLD_CAP)));
-                parts.push("</tbody></table></div></details>");
-            }
+            parts.push('<div class="fold-scroll"><table class="data"><thead>' + foldHead + '</thead><tbody>');
+            folds.forEach((f, i) => parts.push(foldRow(f, i)));
+            parts.push("</tbody></table></div>");
         }
         parts.push("</div></div>");
         const blocks = d.blockDetails || [];
