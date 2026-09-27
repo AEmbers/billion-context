@@ -161,7 +161,7 @@ export const WEB_CLIENT = `(function () {
             if (hs) {
                 const missSum = (o.missNewTotal || 0) + (o.missCompTotal || 0) + (o.missTtlTotal || 0);
                 const mi = o.missInputTotal || 0;
-                const f = (v) => fmtW(v) + (mi > 0 ? " (−" + ((v / mi) * 100).toFixed(1) + "pp)" : "");
+                const f = (v) => fmtW(v) + (mi > 0 ? " (−" + ((v / mi) * 100).toFixed(1) + "%)" : "");
                 hs.textContent = missSum > 0 ? t("ov.miss_split", { n: f(o.missNewTotal || 0), c: f(o.missCompTotal || 0), x: f(o.missTtlTotal || 0) }) : t("common.none");
             }
             $("st-input").textContent = o.inputTokens ? fmtW(o.inputTokens) : t("common.none");
@@ -789,7 +789,8 @@ export const WEB_CLIENT = `(function () {
     async function loadConfig() {
         try {
             const cfg = await json("/__bili/config");
-            $("cfg-file").textContent = cfg.path || t("common.empty");
+            const cfgPathEl = $("cfg-path");
+            if (cfgPathEl) cfgPathEl.textContent = cfg.path || t("common.empty");
             const fileBtn = $("copy-cfg-file");
             if (fileBtn && cfg.path) fileBtn.setAttribute("data-copy", cfg.path);
             const errBox = $("cfg-parse-error");
@@ -802,15 +803,21 @@ export const WEB_CLIENT = `(function () {
                 errBox.classList.remove("show");
                 errBox.textContent = "";
             }
-            // #1426: provider routes go back to being editable — the read-only rendering was a
-            // regression from the web UI rewrite; the API already accepted PUT {providers}
-            const providers = cfg.providers && typeof cfg.providers === "object" && !Array.isArray(cfg.providers) ? cfg.providers : {};
-            $("providers-json").value = JSON.stringify(providers, null, 2);
+            // #1426: one raw config-file editor replaced the per-section JSON boxes
+            const fe = $("cfg-file-edit");
+            if (fe) {
+                let val = typeof cfg.raw === "string" && cfg.raw.trim() ? cfg.raw : "";
+                if (!val) {
+                    const o = {};
+                    if (cfg.providers && typeof cfg.providers === "object" && Object.keys(cfg.providers).length) o.providers = cfg.providers;
+                    if (cfg.upstreamProxyMode || cfg.upstreamProxy) { o.upstreamProxyMode = cfg.upstreamProxyMode || "auto"; if (cfg.upstreamProxy) o.upstreamProxy = cfg.upstreamProxy; }
+                    if (cfg.compress && typeof cfg.compress === "object" && Object.keys(cfg.compress).length) o.compress = cfg.compress;
+                    val = JSON.stringify(o, null, 2);
+                }
+                fe.value = val;
+            }
             const broken = Boolean(cfg.parseError);
-            ["providers-json", "compress-json"].forEach((id) => { const el = $(id); if (el) el.disabled = broken; });
-            ["save-providers", "save-compress", "save-upstream"].forEach((id) => { const el = $(id); if (el) el.disabled = broken; });
-            const compressObj = cfg.compress && typeof cfg.compress === "object" && !Array.isArray(cfg.compress) ? cfg.compress : {};
-            $("compress-json").value = Object.keys(compressObj).length ? JSON.stringify(compressObj, null, 2) : "";
+            ["cfg-file-edit", "save-file", "save-upstream"].forEach((id) => { const el = $(id); if (el) el.disabled = broken; });
             const ptState = $("pt-state");
             const ptSource = $("pt-source");
             const clearPt = $("clear-passthrough");
@@ -938,8 +945,8 @@ export const WEB_CLIENT = `(function () {
                 // #1426: an HTTP >= 400 answer still proves the network path works — auth is the
                 // client's job, so report reachability instead of a flat failure
                 const st = $("up-state");
-                st.className = r.status >= 400 ? "badge warn" : "badge ok";
-                st.textContent = "HTTP " + r.status;
+                st.className = "badge ok";
+                st.textContent = t("cfg.state_reached", { status: r.status });
                 toast(r.status >= 400 ? t("toast.upstream_reachable", { status: r.status }) : t("toast.connect_ok", { status: r.status }), "ok");
             } catch (e) {
                 toast(t("toast.failed", { msg: e.message }), "err");
@@ -959,24 +966,15 @@ export const WEB_CLIENT = `(function () {
             const val = pu ? pu.value.trim() : "";
             await putCfg(su, { upstreamProxyMode: mode, upstreamProxy: val || null });
         });
-        const sp = $("save-providers");
-        if (sp) sp.addEventListener("click", async () => {
-            const el = $("providers-json");
-            const raw = el ? el.value.trim() : "";
-            if (!raw) { await putCfg(sp, { providers: {} }); return; }
+        // #1426: single raw config-file editor — the server validates every known field
+        const sf = $("save-file");
+        if (sf) sf.addEventListener("click", async () => {
+            const el = $("cfg-file-edit");
+            const raw = el ? el.value : "";
             let parsed;
-            try { parsed = JSON.parse(raw); } catch (e) { toast(t("cfg.invalid_json"), "err"); return; }
+            try { parsed = JSON.parse(raw || "{}"); } catch (e) { toast(t("cfg.invalid_json"), "err"); return; }
             if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) { toast(t("cfg.invalid_json"), "err"); return; }
-            await putCfg(sp, { providers: parsed });
-        });
-        const sc = $("save-compress");
-        if (sc) sc.addEventListener("click", async () => {
-            const el = $("compress-json");
-            const raw = el ? el.value.trim() : "";
-            if (!raw) { await putCfg(sc, { compress: null }); return; }
-            let parsed;
-            try { parsed = JSON.parse(raw); } catch (e) { toast(t("cfg.invalid_json"), "err"); return; }
-            await putCfg(sc, { compress: parsed });
+            await putCfg(sf, { file: raw });
         });
         const cp = $("clear-passthrough");
         if (cp) cp.addEventListener("click", async () => {
@@ -1004,9 +1002,11 @@ export const WEB_CLIENT = `(function () {
             }
             if (!text) return;
             const span = btn.querySelector("span");
-            const orig = span ? span.textContent : "";
+            const getText = () => (span ? span.textContent : btn.textContent);
+            const setText = (v) => { if (span) span.textContent = v; else btn.textContent = v; };
+            const orig = getText();
             const done = () => {
-                if (span) { span.textContent = t("common.copied"); setTimeout(() => { span.textContent = orig || t("common.copy"); }, 1200); }
+                setText(t("common.copied")); setTimeout(() => { setText(orig || t("common.copy")); }, 1200);
             };
             const fallback = () => {
                 const ta = document.createElement("textarea");

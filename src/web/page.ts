@@ -60,13 +60,13 @@ export function renderPage(origin: string, version: string): string {
 <section id="page-config" class="page" hidden>
 <div class="page-head"><div><h1 data-i18n="cfg.title">${zh("cfg.title")}</h1><div class="sub" data-i18n="cfg.sub">${zh("cfg.sub")}</div></div></div>
 <div id="cfg-parse-error" class="banner err" hidden></div>
-<div class="card"><div class="card-h"><span data-i18n="cfg.file">${zh("cfg.file")}</span></div><div class="card-b"><div class="copy-row"><pre class="codebox" id="cfg-file"></pre><button class="btn sm copy-btn" id="copy-cfg-file" data-copy=""><span data-i18n="common.copy">${zh("common.copy")}</span></button></div></div></div>
-<div class="grid cols-2" style="margin-top:16px">
-<div class="card"><div class="card-h"><span data-i18n="cfg.providers">${zh("cfg.providers")}</span></div><div class="card-b">
-<p class="dim small" style="margin:0 0 8px" data-i18n="cfg.providers_edit_hint">${zh("cfg.providers_edit_hint")}</p>
-<textarea id="providers-json" class="editor mono" spellcheck="false"></textarea>
-<div style="margin-top:10px"><button id="save-providers" class="btn"><span data-i18n="cfg.save">${zh("cfg.save")}</span></button></div>
+<div class="card"><div class="card-h"><span data-i18n="cfg.file">${zh("cfg.file")}</span></div><div class="card-b">
+<p class="dim small" style="margin:0 0 8px" data-i18n="cfg.file_desc">${zh("cfg.file_desc")}</p>
+<dl class="kv"><div class="k" data-i18n="dt.config_file">${zh("dt.config_file")}</div><div class="v" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span id="cfg-path" class="mono dim small"></span><button id="copy-cfg-file" class="btn sm copy-btn" data-copy=""><span data-i18n="common.copy">${zh("common.copy")}</span></button></div></dl>
+<textarea id="cfg-file-edit" class="editor mono codebox" spellcheck="false"></textarea>
+<div style="margin-top:10px"><button id="save-file" class="btn"><span data-i18n="cfg.save">${zh("cfg.save")}</span></button></div>
 </div></div>
+<div class="grid cols-2" style="margin-top:16px">
 <div class="card"><div class="card-h"><span data-i18n="cfg.upstream_net">${zh("cfg.upstream_net")}</span></div><div class="card-b">
 <div class="modes">
 <label><input type="radio" name="proxy-mode" value="auto" checked><span data-i18n="cfg.up_auto">${zh("cfg.up_auto")}</span></label>
@@ -81,9 +81,6 @@ export function renderPage(origin: string, version: string): string {
 </div></div>
 </div>
 <div class="grid cols-2" style="margin-top:16px">
-<div class="card"><div class="card-h"><span data-i18n="cfg.compress">${zh("cfg.compress")}</span></div><div class="card-b"><p class="dim small" style="margin:0 0 8px" data-i18n="cfg.compress_desc">${zh("cfg.compress_desc")}</p><textarea id="compress-json" class="editor mono" spellcheck="false"></textarea>
-<div style="margin-top:10px"><button id="save-compress" class="btn"><span data-i18n="cfg.save">${zh("cfg.save")}</span></button></div>
-</div></div>
 <div class="card"><div class="card-h"><span data-i18n="cfg.passthrough">${zh("cfg.passthrough")}</span></div><div class="card-b"><p class="dim small" style="margin:0 0 10px" data-i18n="cfg.passthrough_desc">${zh("cfg.passthrough_desc")}</p><div class="pt-row"><span id="pt-state" class="badge disk">—</span><span id="pt-source" class="dim small"></span></div><div style="margin-top:10px"><button id="clear-passthrough" class="btn sm" hidden><span data-i18n="cfg.pt_clear">${zh("cfg.pt_clear")}</span></button></div></div></div>
 </div>
 </section>
