@@ -32,6 +32,16 @@ export function upstreamTimeoutMs(): number {
     return Number.isInteger(raw) && raw > 0 ? raw : UPSTREAM_TIMEOUT_MS;
 }
 
+/** Streaming-phase stall budget (#1452): armed only AFTER the first upstream
+ *  body byte arrives, re-armed on every subsequent byte. Catches a wedged
+ *  mid-stream upstream (a stream that goes silent forever) long before the
+ *  12-minute TTFB/idle budget, WITHOUT touching the prefill/TTFB budget that
+ *  #551 deliberately kept long. 0 = off (default; zero behavior change). */
+export function streamStallMs(): number {
+    const raw = Number(process.env.BILI_STREAM_STALL_MS);
+    return Number.isInteger(raw) && raw > 0 ? raw : 0;
+}
+
 // Direct (non-proxied) requests go through Node's hidden global agent, whose
 // undici headersTimeout/bodyTimeout defaults are both 300s — that cap silently
 // killed long prefills before this watchdog ever got a chance (#551). Inject an
@@ -111,6 +121,25 @@ export async function fetchWithTimeout(
         liveUpstreamTimers.delete(timer);
         timer = armTimer();
     };
+    const stallBudget = streamStallMs();
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearStallTimer = () => {
+        if (stallTimer === null) return;
+        clearTimeout(stallTimer);
+        liveUpstreamTimers.delete(stallTimer);
+        stallTimer = null;
+    };
+    const armStallTimer = () => {
+        if (stallBudget <= 0 || cleared) return;
+        clearStallTimer();
+        const t = setTimeout(() => {
+            liveUpstreamTimers.delete(t);
+            if (stallTimer === t) stallTimer = null;
+            controller.abort(new DOMException(`upstream stalled: no bytes for ${stallBudget}ms after first byte (#1452 stall guard)`, "AbortError"));
+        }, stallBudget);
+        stallTimer = t;
+        liveUpstreamTimers.add(t);
+    };
     let onExternalAbort: (() => void) | null = null;
     if (externalSignal) {
         if (externalSignal.aborted) controller.abort();
@@ -126,6 +155,7 @@ export async function fetchWithTimeout(
         cleared = true;
         clearTimeout(timer);
         liveUpstreamTimers.delete(timer);
+        clearStallTimer();
     };
     const cleanup = () => {
         stopIdleTimer();
@@ -153,7 +183,14 @@ export async function fetchWithTimeout(
         if (raw.body) {
             // Wrap the body so each chunk re-arms the timer (idle timeout); carry
             // status/headers onto a fresh Response so callers see an identical shape.
-            const wrapped = armIdleBody(raw.body, rearm);
+            const onChunk = () => {
+                rearm();
+                // First body byte flips the watchdog into streaming mode; every
+                // byte re-arms both budgets. Never armed pre-first-byte, so
+                // TTFB/prefill stays under the long idle budget only (#551).
+                armStallTimer();
+            };
+            const wrapped = armIdleBody(raw.body, onChunk);
             return {
                 response: new Response(wrapped, {
                     status: raw.status,
