@@ -116,16 +116,30 @@ export const WEB_CLIENT = `(function () {
         const named = Boolean(s.title || s.label || s.firstBlockHint);
         const name = s.title || s.label || s.firstBlockHint || t("ses.no_title");
         const live = s.live && !s.restored;
+        // Only actively running sessions get a status tag; disk/restored rows carry none.
         return '<span class="row-title clip w-title' + (named ? "" : " faint") + '">' + escapeHtml(name) + "</span>"
-            + ' <span class="badge ' + (live ? "live" : "disk") + '" title="' + escapeHtml(live ? t("ses.badge_live_tip") : t("ses.badge_disk_tip")) + '">' + (live ? t("common.live") : t("common.disk")) + "</span>"
-            + (s.restored ? ' <span class="dim small" title="' + escapeHtml(t("ses.badge_restored_tip")) + '">' + t("common.restored") + "</span>" : "")
+            + (live ? ' <span class="badge live" title="' + escapeHtml(t("ses.badge_live_tip")) + '">' + t("common.live") + "</span>" : "")
             + '<span class="row-id">' + escapeHtml(s.id) + "</span>";
     }
     // SAVED column prefers ledger-derived net savings; pre-tagging sessions fall back
     // to the local tokensSaved estimate; neither present => honest dash, never fake 0.
     function savedTd(x) {
         const v = x.netSaved != null ? x.netSaved : (x.tokensSaved || 0);
-        return v > 0 ? '<td class="num good-num">' + fmtW(v) + "</td>" : (v ? '<td class="num">' + fmtW(v) + "</td>" : '<td class="num dim">' + t("common.none") + "</td>");
+        if (v > 0) return '<td class="num good-num">' + fmtW(v) + "</td>";
+        if (v) return '<td class="num" title="' + escapeHtml(t("ov.saved_neg_tip")) + '">' + fmtW(v) + "</td>";
+        return '<td class="num dim">' + t("common.none") + "</td>";
+    }
+    // Compact single-line hit cell: (97.0%/−1.3%/−0.9%/−1.1%) = hit/new/compress/TTL.
+    function hitTd(s) {
+        if (s.cacheHitPct == null) return '<td class="num dim">' + t("common.none") + "</td>";
+        const main = s.cacheHitPct.toFixed(1) + "%";
+        if (s.missDropNew == null && s.missDropComp == null && s.missDropTtl == null) return '<td class="num">' + main + "</td>";
+        const parts = [main];
+        ["missDropNew", "missDropComp", "missDropTtl"].forEach((k) => {
+            const v = s[k];
+            parts.push(v == null ? "−" : (v === 0 ? "0%" : "−" + v + "%"));
+        });
+        return '<td class="num"><span class="hitc" title="' + escapeHtml(t("ses.drop_ph")) + '">(' + parts.join("/") + ")</span></td>";
     }
 
     function sessionRow(s, compact) {
@@ -134,9 +148,18 @@ export const WEB_CLIENT = `(function () {
         if (compact) {
             tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + protoBadge(s.protocol) + '</span></td><td class="num">' + fmtW(s.contextTokens) + '</td>' + savedTd(s) + '<td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         } else {
-            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td><span class="mono dim small clip w-up">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + '<td class="num">' + (s.cacheHitPct == null ? t("common.none") : s.cacheHitPct.toFixed(1) + "%" + ((s.missDropNew != null || s.missDropComp != null || s.missDropTtl != null) ? '<br><span class="dim small" title="' + escapeHtml(t("ses.drop_ph")) + '">' + t("ses.drop_split", { a: s.missDropNew, b: s.missDropComp, x: s.missDropTtl }) + "</span>" : "")) + '</td><td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
+            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td><span class="mono dim small clip w-up">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + hitTd(s) + '<td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         }
-        tr.addEventListener("click", () => { location.hash = "#/session/" + encodeURIComponent(s.id); });
+        let navTimer = null;
+        tr.addEventListener("click", (ev) => {
+            if (ev.target.closest && ev.target.closest("button,a,input,textarea,.copy-btn,.qmark")) return;
+            if (window.getSelection && String(window.getSelection()).length > 0) return;
+            clearTimeout(navTimer);
+            navTimer = setTimeout(() => {
+                if (!window.getSelection || String(window.getSelection()).length === 0) location.hash = "#/session/" + encodeURIComponent(s.id);
+            }, 250);
+        });
+        tr.addEventListener("dblclick", () => clearTimeout(navTimer));
         return tr;
     }
 
@@ -173,7 +196,7 @@ export const WEB_CLIENT = `(function () {
             if (!rows.length) pb.innerHTML = '<tr><td colspan="8" class="dim">' + t("common.empty") + "</td></tr>";
             rows.forEach((r) => {
                 const tr = document.createElement("tr");
-                tr.innerHTML = '<td>' + protoBadge(r.protocol) + '</td><td class="num">' + r.sessions + '</td><td class="num">' + (r.requests ? fmtW(r.requests) : t("common.none")) + '</td><td class="num">' + (r.inputTokens ? fmtW(r.inputTokens) : t("common.none")) + '</td><td class="num">' + (r.cachedTokens ? fmtW(r.cachedTokens) : t("common.none")) + '</td><td class="num">' + (r.hitPct == null ? t("common.none") : r.hitPct + "%") + '</td><td class="' + (r.savedNet > 0 ? "num good-num" : "num") + '">' + (r.savedNet ? fmtW(r.savedNet) : t("common.none")) + '</td><td class="num">' + (r.folds ? fmtW(r.folds) : t("common.none")) + "</td>";
+                tr.innerHTML = '<td>' + protoBadge(r.protocol) + '</td><td class="num">' + r.sessions + '</td><td class="num">' + (r.requests ? fmtW(r.requests) : t("common.none")) + '</td><td class="num">' + (r.inputTokens ? fmtW(r.inputTokens) : t("common.none")) + '</td><td class="num">' + (r.cachedTokens ? fmtW(r.cachedTokens) : t("common.none")) + '</td><td class="num">' + (r.hitPct == null ? t("common.none") : r.hitPct + "%") + '</td><td class="' + (r.savedNet > 0 ? "num good-num" : "num") + '"' + (r.savedNet < 0 ? ' title="' + escapeHtml(t("ov.saved_neg_tip")) + '"' : "") + '">' + (r.savedNet ? fmtW(r.savedNet) : t("common.none")) + '</td><td class="num">' + (r.folds ? fmtW(r.folds) : t("common.none")) + "</td>";
                 pb.appendChild(tr);
             });
             $("sys-version").textContent = d.version || "?";
@@ -400,9 +423,9 @@ export const WEB_CLIENT = `(function () {
     }
     function detailBadges(d) {
         const live = d.live && !d.restored;
-        let html = '<span class="badge ' + (live ? "live" : "disk") + '" title="' + escapeHtml(live ? t("ses.badge_live_tip") : t("ses.badge_disk_tip")) + '">' + (live ? t("common.live") : t("common.disk")) + "</span>";
-        if (d.protocol) html += " " + protoBadge(d.protocol);
-        if (d.restored) html += ' <span class="dim small" title="' + escapeHtml(t("ses.badge_restored_tip")) + '">' + t("common.restored") + "</span>";
+        let html = "";
+        if (live) html = '<span class="badge live" title="' + escapeHtml(t("ses.badge_live_tip")) + '">' + t("common.live") + "</span>";
+        if (d.protocol) html += (html ? " " : "") + protoBadge(d.protocol);
         return html;
     }
     // #1426: structured handoff rendering — per-role blocks with separated thinking,

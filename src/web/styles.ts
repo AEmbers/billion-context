@@ -301,7 +301,8 @@ pre.tool-args, pre.tool-out { margin: 6px 0 0; padding: 8px; background: var(--b
 .qtip { position: fixed; z-index: 60; max-width: 380px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15); padding: 10px 12px; font-size: 12.5px; line-height: 1.55; color: var(--text-muted); }
 .twrap { overflow-x: auto; }
 .tproc table.data { min-width: 520px; }
-.twide table.data { min-width: 940px; }
+.twide table.data { min-width: 940px; table-layout: fixed; }
+.hitc { font-size: 11px; letter-spacing: -0.2px; }
 .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .w-title { display: inline-block; max-width: 230px; vertical-align: bottom; }
 .w-up { display: inline-block; max-width: 128px; vertical-align: bottom; }
