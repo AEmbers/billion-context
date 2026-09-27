@@ -568,14 +568,19 @@ export async function* runCompressLoop(
                 // the client can see. Gate keeps calls.length === 0 — a round
                 // with tool-call fragments falls through to the plain
                 // truncation error, since their semantics only survive a
-                // completed stream. OpenAI wire only: visible text means the
-                // stateful wires' identity framing (message_start /
-                // response.created) already reached the client, and a
-                // re-fetched response would duplicate it.
+                // completed stream. OpenAI and Anthropic wires only: openai
+                // has no per-message identity frame to duplicate, and
+                // anthropic's two re-fetch hazards are neutralized by the
+                // adapter — state-keyed message_start suppression (at most one
+                // start frame per logical response) and close-at-resume of
+                // the dead attempt's dangling blocks, with block indices
+                // continuing upward (#1455/#1464; #1470). responses/google
+                // stay excluded: their item-lifecycle identity frames have no
+                // dedup equivalent (#440 single-created invariant).
                 if (
                     (!sawDone || truncatedDone) &&
                     forwardedVisible &&
-                    ctx.protocol === "openai" &&
+                    (ctx.protocol === "openai" || ctx.protocol === "anthropic") &&
                     !ctx.textProtocol &&
                     assistantText.length > 0 &&
                     calls.length === 0 &&
