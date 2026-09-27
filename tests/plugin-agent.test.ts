@@ -9,7 +9,7 @@ import test from "node:test";
 
 process.env.NODE_ENV = "test";
 
-import { proxyBaseFromUrl, proxyBaseFromEnv, detectProxyBase, fetchManifest, forwardTool, fetchStatus } from "../src/agent/shared.ts";
+import { proxyBaseFromUrl, proxyBaseFromEnv, detectProxyBase, fetchManifest, forwardTool, fetchStatus, destinationRoutedThroughProxy } from "../src/agent/shared.ts";
 import { wrapCacheReport, wrapRuleReport } from "../src/acp-panel.ts";
 import biliPlugin, { createBiliPlugin } from "../src/agent/pi.ts";
 import ompPlugin from "../src/agent/omp.ts";
@@ -532,6 +532,16 @@ test("#1392: non-http(s) provider rides bili only when opted in AND carried", as
             createBiliPlugin("pi")(pi as never);
             const handler = pi.events.get("session_before_compact")!;
             assert.equal(await handler({ reason: "threshold" }, bridgeCtx), undefined, "allowlist naming a different provider does not opt this one in");
+        });
+
+        // (E) [#1392 Phase A guard] Opt-in widens ONLY the compaction-ownership candidate
+        // set — it must never widen wire-side routing: a non-http baseUrl stays outside
+        // destinationRoutedThroughProxy (no /bili/ rewrites, no stamped cache keys, no MITM
+        // candidacy), whatever BILI_NON_HTTP_PROVIDERS says. Guards Phase B against
+        // accidentally wiring the flag into stamp eligibility.
+        await withEnv({ BILLION_CONTEXT_PROXY: knownProxy.origin, BILI_NON_HTTP_PROVIDERS: "claude-bridge" }, async () => {
+            assert.equal(destinationRoutedThroughProxy("claude-bridge"), false, "opt-in must not route a non-http baseUrl through the proxy wire surface");
+            assert.equal(destinationRoutedThroughProxy("claude-bridge://x"), false, "opaque scheme never parses as routable");
         });
     } finally {
         await unknownProxy.close();

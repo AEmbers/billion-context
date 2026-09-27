@@ -394,8 +394,9 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
         // AND a request routed through the proxy), or omp's identity register
         // succeeded; (2) remote — the proxy confirms it carries the
         // conversation id (/__bili/plugin/status ok). A non-http(s) baseUrl
-        // vetoes outright: such providers' traffic cannot reach the proxy by
-        // construction. Hosts exposing no stable session id keep the
+        // vetoes by default (opt-in via BILI_NON_HTTP_PROVIDERS below only
+        // widens the candidate set; carriage evidence still decides). Hosts
+        // exposing no stable session id keep the
         // historical cancel (the proxy may carry them under a derived
         // content-hash identity, where avoiding double compression still
         // wins). Probe failure (proxy down/hung) means NO evidence → defer to
