@@ -6,7 +6,7 @@ import test from "node:test";
 process.env.NODE_ENV = "test";
 
 import { defaultConfig } from "acp-kernel";
-import { startServer, type ProxyOptions } from "../src/server.ts";
+import { getUnrecognizedPathStats, startServer, type ProxyOptions } from "../src/server.ts";
 import { _setStoreForTest, SessionStore } from "../src/persist.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 import { listSessions } from "../src/session.ts";
@@ -225,6 +225,20 @@ test("#1295: declaration drives classification for known families (declared → 
         await r2.text();
         const s2 = listSessions().find((s) => s.id === "undeclared-path");
         assert.ok(!s2 || s2.stats.lastInputTokens === undefined, "undeclared path is relayed, never classified");
+        // review F6: an undeclared path warns as unrecognized, but a probe
+        // (GET / empty-body POST) against a DECLARED endpoint never does —
+        // the user asked for that URL, it is not misrouted traffic.
+        const t0 = getUnrecognizedPathStats().total;
+        // A GET probe against the DECLARED endpoint must NOT be flagged
+        // ("unrecognized path" for a URL the user declared is pure noise).
+        const probeGet = await fetch(`http://127.0.0.1:${proxy.address().port}/bili/http://127.0.0.1:${upstreamPort}/custom/complete`);
+        await probeGet.text();
+        assert.equal(getUnrecognizedPathStats().total, t0, "declared-endpoint probe did NOT add an unrecognized-path entry");
+        // A fresh UNDECLARED path still warns — the F6 carve-out is scoped to
+        // declared endpoints only.
+        const undeclared = await fetch(`http://127.0.0.1:${proxy.address().port}/bili/http://127.0.0.1:${upstreamPort}/other/probe-path`, { method: "POST", headers: { "content-type": "application/json", "x-acp-session": "f6-undeclared-probe" }, body });
+        await undeclared.text();
+        assert.ok(getUnrecognizedPathStats().total > t0, "undeclared path still counted as unrecognized");
     } finally {
         proxy.close();
         await once(proxy, "close");

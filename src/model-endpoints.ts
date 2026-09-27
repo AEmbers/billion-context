@@ -33,6 +33,11 @@ function normalizeMatch(raw: unknown): string | undefined {
     if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
     if (!u.hostname) return undefined;
     if (u.search || u.hash) return undefined;
+    // Userinfo is rejected, not stripped: https://u:p@host/x would silently
+    // mint a credentials-less origin claim that never matches the real
+    // request URL (which carries its userinfo to the matcher) — a typo'd
+    // declaration must fail loudly at startup like search/hash above.
+    if (u.username || u.password) return undefined;
     return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
 }
 
@@ -112,6 +117,10 @@ export async function loadDeclaredModelEndpoints(): Promise<ModelEndpointPattern
     } catch {
         if (!loadWarned) {
             loadWarned = true;
+            // console.error is deliberate here: this loader runs inside HOST
+            // processes (the agent-side fetch interceptor), where the proxy's
+            // loggerLog has no meaningful sink — stderr is the only channel the
+            // host user will ever see. Same policy as the agent-side modules.
             console.error(`bili-native: could not resolve modelEndpointPatterns from ${configFile()}; declared endpoints stay unclaimed until the host restarts with a readable config`);
         }
         return [];

@@ -1149,6 +1149,9 @@ async function handle(
         if (req.method !== "POST" || bodyBuffer.length === 0) {
             protocol = null;
         } else if (route?.explicitProtocol !== undefined) {
+            if (declared !== undefined && route.explicitProtocol !== (declared.wire === "commandcode" ? "openai" : declared.wire)) {
+                loggerLog("warn", `modelEndpointPatterns declares ${declared.match} as ${declared.wire} but provider config pins explicitProtocol ${route.explicitProtocol}; the explicit pin wins — check for a stale provider entry`);
+            }
             protocol = route.explicitProtocol;
         } else if (declared !== undefined) {
             if (declared.wire === "commandcode") {
@@ -2455,7 +2458,17 @@ async function handle(
     }
     if (!prepared && !forwarded) {
         if (protocol === null && !opts.passthrough && !routePassthrough && !isModelDiscoveryPath(urlPath)) {
-            logUnrecognizedPath(log, req.url ?? "");
+            // A declared model endpoint (src/model-endpoints.ts) is by definition
+            // a recognized URL — GET/HEAD probes or empty-body POSTs against it
+            // are health checks, not misrouted model traffic; "unrecognized
+            // path" warnings here would be pure noise (#1295 review F6). This
+            // mirrors buildForwardTarget's URL derivation exactly.
+            const rawUrl = req.url ?? "";
+            const probeTarget = (route ? route.rewrittenUrl : /^https?:\/\//i.test(rawUrl) ? rawUrl : `${opts.upstream}${urlPath}`)
+                .replace(/^mitm:\/\//, "https://");
+            if (!matchModelEndpoint(opts.modelEndpoints, probeTarget)) {
+                logUnrecognizedPath(log, req.url ?? "");
+            }
         }
         await forward(req, res, opts, scrubAnthropicPck(protocol, bodyBuffer, log), null, core, reqConfig, log, route, instanceId, undefined);
     }

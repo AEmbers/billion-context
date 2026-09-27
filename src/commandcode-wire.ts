@@ -18,7 +18,6 @@ export interface CommandcodeEnvelopeMeta {
     hadSystem: boolean;
     maxTokens?: number;
     temperature?: number;
-    reasoningEffort?: string;
     /** Unknown params.* keys, passed through both directions. */
     extraParams: Record<string, unknown>;
     /** Assistant tool-call id → name, for tool-result rewrap fidelity. */
@@ -185,7 +184,6 @@ export function unwrapCommandcodeBody(parsed: Record<string, unknown>): { body: 
         hadSystem: typeof params.system === "string",
         maxTokens: typeof params.max_tokens === "number" ? params.max_tokens : undefined,
         temperature: typeof params.temperature === "number" ? params.temperature : undefined,
-        reasoningEffort: typeof params.reasoning_effort === "string" ? params.reasoning_effort : undefined,
         extraParams,
         toolNames,
         errorResultIds,
@@ -222,7 +220,20 @@ export function rewrapCommandcodeBody(flat: Record<string, unknown>, meta: Comma
             continue;
         }
         if (role === "user") {
-            const text = typeof m.content === "string" ? m.content : "";
+            let text: string;
+            if (typeof m.content === "string") {
+                text = m.content;
+            } else if (Array.isArray(m.content)) {
+                // Mirror unwrap's text-part join: a flat body whose user message
+                // carries block content must not be silently blanked mid-forward (WC-2).
+                const parts: string[] = [];
+                for (const b of m.content) {
+                    if (isObj(b) && b.type === "text" && typeof b.text === "string") parts.push(b.text as string);
+                }
+                text = parts.join("\n");
+            } else {
+                text = "";
+            }
             cc.push({ role: "user", content: [{ type: "text", text }] });
             continue;
         }
