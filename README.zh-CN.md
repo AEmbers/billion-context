@@ -546,7 +546,7 @@ Windows 下会自动发现常见 Clash/Mihomo 静态系统代理;Web UI 会显�
 - **开头相同的新任务不会继承**另一个会话的 block 或受保护区:它拿到全新会话,历史一旦分叉就彻底独立(分叉血缘会被记录以便调试)。
 - 完全没有任何可用信号时,请求会被显式 400 拒绝,而不是静默与他人状态碰撞。
 
-设计记录与威胁模型:[SESSION-IDENTITY.md](SESSION-IDENTITY.md)。
+设计记录与威胁模型:[SESSION-IDENTITY.md](SESSION-IDENTITY.md)。消息粒度的对偶文档(为什么身份由内容派生、而非指派 id)是 [MESSAGE-IDENTITY.zh-CN.md](MESSAGE-IDENTITY.zh-CN.md)。
 
 上游粘性路由方面,代理只转发客户端本来就提供的身份值(例如 body 里的 `session_id` 会以 `x-session-id` 上送),绝不自行合成一个。
 
