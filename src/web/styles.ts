@@ -290,4 +290,5 @@ pre.tool-args, pre.tool-out { margin: 6px 0 0; padding: 8px; background: var(--b
 .twrap { overflow-x: auto; }
 .tproc table.data { min-width: 660px; }
 .twide table.data { min-width: 1020px; }
+.logbox { font-family: var(--mono); font-size: 11.5px; line-height: 1.5; padding: 12px 14px; max-height: 72vh; overflow: auto; white-space: pre-wrap; word-break: break-word; background: var(--bg-muted); border-radius: 0 0 8px 8px; margin: 0; color: var(--text); }
 `;

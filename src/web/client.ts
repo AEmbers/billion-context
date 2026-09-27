@@ -105,7 +105,7 @@ export const WEB_CLIENT = `(function () {
         if (tog) tog.textContent = locale === "zh-CN" ? "English" : "中文";
     }
 
-    const PAGES = ["overview", "sessions", "config", "connect"];
+    const PAGES = ["overview", "sessions", "config", "connect", "logs"];
     let current = "overview";
     let sessionsCache = [];
 
@@ -492,6 +492,7 @@ export const WEB_CLIENT = `(function () {
         kv(parts, t("det.client_hint"), d.clientHint || null, true);
         kv(parts, t("common.upstream"), hostOf(d.upstreamOrigin) || null, true);
         kv(parts, t("det.active_pack"), d.activePack || null, true);
+        parts.push('<div class="k">' + t("det.log") + '</div><div class="v"><a href="#/logs?q=' + encodeURIComponent(d.id) + '">' + t("det.log_view") + "</a></div>");
         parts.push("</dl></div></div>");
         parts.push('<div class="card" style="margin-top:16px"><div class="card-h"><span>' + t("det.usage") + '</span></div><div class="card-b">');
         parts.push('<div class="grid cols-4">');
@@ -810,13 +811,36 @@ export const WEB_CLIENT = `(function () {
         else { st.className = "badge disk"; st.textContent = t("cfg.untested"); }
     }
 
+    function applyLogFilter(hq) {
+        const m = hq.match(/^(?:[?&])?q=([\\s\\S]*)$/);
+        const q = m ? decodeURIComponent(m[1]) : "";
+        const el = $("log-search");
+        if (el && el.value !== q) el.value = q;
+    }
+    async function loadLogs() {
+        const qEl = $("log-search");
+        if (!qEl || !$("log-body")) return;
+        const q = (qEl.value || "").trim();
+        try {
+            const d = await json("/__bili/logs?q=" + encodeURIComponent(q) + "&lines=" + ((($("log-lines")) ? $("log-lines").value : "500")));
+            $("log-path").textContent = d.path || t("logs.empty");
+            $("copy-log-path").dataset.copy = d.path || "";
+            $("log-count").textContent = d.total > 0 ? t("logs.count", { n: (d.lines || []).length, total: d.total }) : "";
+            $("log-body").textContent = d.lines && d.lines.length ? d.lines.join("\\n") : t("logs.empty");
+        } catch (e) { /* the log endpoint is best-effort; stay quiet */ }
+    }
+
     function route() {
         const hash = location.hash || "#/overview";
+        const qi = hash.indexOf("?");
+        const hbase = qi < 0 ? hash : hash.slice(0, qi);
+        const hq = qi < 0 ? "" : hash.slice(qi + 1);
         let name = "overview";
         let detailId = null;
-        const top = hash.match(new RegExp("^#/(overview|config|connect)$"));
+        const top = hbase.match(new RegExp("^#/(overview|config|connect|logs)$"));
         if (top) {
             name = top[1];
+            if (name === "logs" && hq) applyLogFilter(hq);
         } else {
             const ses = hash.match(new RegExp("^#/sessions(?:/(.+))?$")) || hash.match(new RegExp("^#/session/(.+)$"));
             if (ses) {
@@ -833,6 +857,7 @@ export const WEB_CLIENT = `(function () {
         if (name === "overview") loadOverview();
         else if (name === "sessions") loadSessions(detailId);
         else if (name === "config") loadConfig();
+        else if (name === "logs") loadLogs();
     }
     window.addEventListener("hashchange", route);
 
@@ -845,6 +870,31 @@ export const WEB_CLIENT = `(function () {
         });
         const search = $("ses-search");
         if (search) search.addEventListener("input", renderSessionTable);
+        let logTimer = null;
+        const lsearch = $("log-search");
+        if (lsearch) lsearch.addEventListener("input", () => { clearTimeout(logTimer); logTimer = setTimeout(loadLogs, 400); });
+        const llines = $("log-lines");
+        if (llines) llines.addEventListener("change", loadLogs);
+        const ldl = $("log-dl");
+        if (ldl) ldl.addEventListener("click", async () => {
+            busy(ldl, true);
+            try {
+                const q = ($("log-search").value || "").trim();
+                const r = await fetch("/__bili/logs?raw=1&q=" + encodeURIComponent(q) + "&lines=2000");
+                const blob = await r.blob();
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = "billion-context-log.txt";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+            } catch (e) {
+                toast(t("toast.failed", { msg: e.message }), "err");
+            } finally {
+                busy(ldl, false);
+            }
+        });
         const testBtn = $("test-upstream");
         if (testBtn) testBtn.addEventListener("click", async () => {
             busy(testBtn, true);
@@ -945,5 +995,6 @@ export const WEB_CLIENT = `(function () {
         if (document.hidden) return;
         if (current === "overview") loadOverview();
         else if (current === "sessions" && $("session-detail-view").hidden) refreshSessions(false);
+        else if (current === "logs") loadLogs();
     }, 5000);
 })();`;

@@ -17,7 +17,7 @@ export function renderPage(origin: string, version: string): string {
     const caPathEsc = escapeHtml(caPath);
     const caReady = existsSync(caPath);
     return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>billion-context</title><style>${WEB_STYLES}</style></head><body>
-<header class="topbar"><div class="brand"><span class="logo">∞</span>billion-context<span class="ver">v${version}</span></div><nav class="nav"><a href="#/overview" data-nav="overview" class="active" data-i18n="nav.overview">${zh("nav.overview")}</a><a href="#/sessions" data-nav="sessions" data-i18n="nav.sessions">${zh("nav.sessions")}</a><a href="#/config" data-nav="config" data-i18n="nav.config">${zh("nav.config")}</a><a href="#/connect" data-nav="connect" data-i18n="nav.connect">${zh("nav.connect")}</a></nav><div class="actions"><a class="fork-link" href="https://github.com/ranxianglei/billion-context" target="_blank" rel="noopener" data-i18n="fork.label">${zh("fork.label")}</a><button id="language-toggle" class="lang-btn">English</button></div></header>
+<header class="topbar"><div class="brand"><span class="logo">∞</span>billion-context<span class="ver">v${version}</span></div><nav class="nav"><a href="#/overview" data-nav="overview" class="active" data-i18n="nav.overview">${zh("nav.overview")}</a><a href="#/sessions" data-nav="sessions" data-i18n="nav.sessions">${zh("nav.sessions")}</a><a href="#/config" data-nav="config" data-i18n="nav.config">${zh("nav.config")}</a><a href="#/connect" data-nav="connect" data-i18n="nav.connect">${zh("nav.connect")}</a><a href="#/logs" data-nav="logs" data-i18n="nav.logs">${zh("nav.logs")}</a></nav><div class="actions"><a class="fork-link" href="https://github.com/ranxianglei/billion-context" target="_blank" rel="noopener" data-i18n="fork.label">${zh("fork.label")}</a><button id="language-toggle" class="lang-btn">English</button></div></header>
 <div id="passthrough-banner" class="banner warn" hidden></div>
 <div id="stale-banner" class="banner warn" hidden></div>
 <div id="conflicts-banner" class="banner warn" hidden></div>
@@ -86,6 +86,19 @@ export function renderPage(origin: string, version: string): string {
 </div></div>
 <div class="card"><div class="card-h"><span data-i18n="cfg.passthrough">${zh("cfg.passthrough")}</span></div><div class="card-b"><div class="pt-row"><span id="pt-state" class="badge disk">—</span><span id="pt-source" class="dim small"></span></div><div style="margin-top:10px"><button id="clear-passthrough" class="btn sm" hidden><span data-i18n="cfg.pt_clear">${zh("cfg.pt_clear")}</span></button></div></div></div>
 </div>
+</section>
+<section id="page-logs" class="page" hidden>
+<div class="page-head"><div><h1 data-i18n="logs.title">${zh("logs.title")}</h1><div class="sub" data-i18n="logs.sub">${zh("logs.sub")}</div></div></div>
+<div class="card"><div class="card-b">
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+<input id="log-search" type="search" class="search" placeholder="${zh("logs.filter_ph")}" data-i18n-ph="logs.filter_ph">
+<select id="log-lines" style="border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;background:var(--bg-muted)"><option value="200">200</option><option value="500" selected>500</option><option value="1000">1000</option><option value="2000">2000</option></select>
+<span id="log-count" class="dim small"></span>
+<button id="log-dl" class="btn sm" data-i18n="logs.dl">${zh("logs.dl")}</button>
+</div>
+<dl class="kv"><div class="k" data-i18n="logs.path">${zh("logs.path")}</div><div class="v" style="display:flex;gap:8px;align-items:center"><span id="log-path" class="mono dim small"></span><button id="copy-log-path" class="btn sm copy-btn" data-copy="" data-i18n="common.copy">${zh("common.copy")}</button></div></dl>
+</div></div>
+<div class="card" style="margin-top:16px"><div class="card-b flush"><pre id="log-body" class="logbox"></pre></div></div>
 </section>
 <section id="page-connect" class="page" hidden>
 <div class="page-head"><div><h1 data-i18n="con.title">${zh("con.title")}</h1><div class="sub" data-i18n="con.sub">${zh("con.sub")}</div></div></div>

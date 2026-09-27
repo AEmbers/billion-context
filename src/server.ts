@@ -883,6 +883,7 @@ async function handle(
     if (req.method === "GET" && req.url === "/__bili/status") return sendStatus(res, opts);
     if (req.method === "GET" && req.url === "/__bili/overview") return sendOverview(res, opts);
     if (req.method === "GET" && req.url === "/__bili/sessions") return sendWebSessions(res);
+    if (req.method === "GET" && req.url?.startsWith("/__bili/logs")) return sendWebLogs(res, req);
     if (req.method === "GET" && req.url?.startsWith("/__bili/sessions/") && req.url.endsWith("/detail")) return sendWebSessionDetail(res, req.url);
     if (req.method === "GET" && req.url === "/") {
         // Browser visits root → redirect to the web UI. curl / health probes
@@ -5761,6 +5762,42 @@ async function sendWebSessions(res: http.ServerResponse): Promise<void> {
     const sessions = await buildSessionList();
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ sessions, hiddenEmpty: hiddenEmptyCount() }, null, 2));
+}
+
+/** #1426 web UI run-log viewer: tail of the rotated logger files (bili.log.old
+ *  + bili.log), optionally filtered by a case-insensitive substring (?q=).
+ *  ?lines= caps the tail at 2000; ?raw=1 streams the same tail as a .txt download. */
+async function sendWebLogs(res: http.ServerResponse, req: http.IncomingMessage): Promise<void> {
+    const u = new URL(req.url ?? "/__bili/logs", "http://localhost");
+    const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
+    let n = Number(u.searchParams.get("lines") ?? "500");
+    if (!Number.isFinite(n) || n <= 0) n = 500;
+    n = Math.min(Math.floor(n), 2000);
+    const logFile = getLogPath() ?? defaultLogFile();
+    const dir = logFile && logFile.includes("/") ? logFile.slice(0, logFile.lastIndexOf("/") + 1) : "";
+    const candidates = [dir + "bili.log.old", dir + "bili.log"];
+    const existing = candidates.filter((f) => {
+        try { return fs.statSync(f).isFile(); } catch { return false; }
+    });
+    let all: string[] = [];
+    for (const f of existing) {
+        let text: string;
+        try { text = fs.readFileSync(f, "utf8"); } catch { continue; }
+        const ls = text.split("\n").filter((l) => l.length > 0);
+        all = all.concat(q ? ls.filter((l) => l.toLowerCase().includes(q)) : ls);
+    }
+    const total = all.length;
+    const tail = all.slice(-n);
+    if (u.searchParams.get("raw") === "1") {
+        res.writeHead(200, {
+            "content-type": "text/plain; charset=utf-8",
+            "content-disposition": 'attachment; filename="billion-context-log.txt"',
+        });
+        res.end(tail.join("\n"));
+        return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ path: logFile, total, lines: tail }, null, 2));
 }
 
 async function sendWebSessionDetail(res: http.ServerResponse, url: string): Promise<void> {
