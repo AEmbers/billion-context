@@ -1,6 +1,8 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import net from "node:net";
+import tls from "node:tls";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { createCore, type CompressionCore, type CompressionState, type Config, type AbsorbConfig, type CoreMessage, type NudgeDecision, type Prompts, type PackSurface, type ToolPrompts, applyAcpToolOverrides, defaultPrompts, defaultCountTokens, renderNudgeText, deactivateBlock, viableRanges, resolveOutputSteeringConfig } from "acp-kernel";
@@ -103,7 +105,7 @@ import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
 import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, takePendingPluginRegister } from "./plugin.js";
-import { setupMitm, readMitmUpstream, getBlindTunnelStats } from "./mitm.js";
+import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
 import { evaluateChain, extractChainCarriers, stampOutbound } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "./util.js";
@@ -409,6 +411,11 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     void loadRegistry();
     const server = http.createServer(async (req, res) => {
         armRequestWatchdog(req, res, log);
+        const connRec = connRecords.get(req.socket);
+        if (connRec) {
+            connRec.requests++;
+            res.on("finish", () => { connRec.lastResponseEndAt = Date.now(); });
+        }
         try {
             await handle(req, res, opts, core, config, log, instanceId, instanceStartedAt, proxyWatchers, initialWatcherPid);
         } catch (err) {
@@ -451,6 +458,110 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
                 body,
         );
     });
+    // #1452: explicit keep-alive idle budget. Node's implicit default is
+    // 5000ms; the default here matches it exactly (zero behavior change), but
+    // the knob exists so pooled clients can deliberately extend or shorten the
+    // reuse window instead of guessing at Node internals.
+    const katRaw = Number(process.env.BILI_KEEP_ALIVE_TIMEOUT_MS);
+    const keepAliveTimeoutMs = Number.isInteger(katRaw) && katRaw > 0 ? katRaw : 5000;
+    server.keepAliveTimeout = keepAliveTimeoutMs;
+    log("info", `[conn] keepAliveTimeout=${keepAliveTimeoutMs}ms`);
+    // #1452: per-connection lifecycle ledger — turns "which side closed this
+    // socket, and why" from forensic inference into one debug line per
+    // connection (zero payload content). reason=destroyed means nobody ended
+    // the socket deliberately: every intentional destroy path carries its own
+    // dedicated log marker to correlate against.
+    interface ConnRecord {
+        id: number;
+        kind: "tls" | "tcp";
+        openedAt: number;
+        requests: number;
+        lastResponseEndAt: number | null;
+        errored: string | null;
+        serverEndAt: number | null;
+        peerFinAt: number | null;
+    }
+    const connRecords = new Map<net.Socket, ConnRecord>();
+    let connSeq = 0;
+    server.on("connection", (socket) => {
+        const rec: ConnRecord = {
+            id: ++connSeq,
+            kind: socket instanceof tls.TLSSocket ? "tls" : "tcp",
+            openedAt: Date.now(),
+            requests: 0,
+            lastResponseEndAt: null,
+            errored: null,
+            serverEndAt: null,
+            peerFinAt: null,
+        };
+        connRecords.set(socket, rec);
+        // prefinish fires when end() fully flushes — never on destroy(). That
+        // makes it the reliable "server-initiated close" marker without patching
+        // the socket object. performance.now() (µs) rather than Date.now():
+        // both sides routinely close within the same millisecond — the receiver
+        // of a FIN reacts by ending its own side — so only sub-ms resolution
+        // preserves the causal order that decides who initiated (#1452).
+        socket.on("prefinish", () => { rec.serverEndAt = performance.now(); });
+        socket.on("end", () => { rec.peerFinAt = performance.now(); });
+        socket.on("error", (err) => {
+            const code = (err as NodeJS.ErrnoException).code;
+            rec.errored = code ?? err.message;
+        });
+        socket.on("close", () => {
+            connRecords.delete(socket);
+            const now = Date.now();
+            // Node's keep-alive reaper destroys() idle sockets — no prefinish,
+            // no end (measured on v22: the server side sees only close, the
+            // peer gets a clean FIN). So idle-timeout keys off the response
+            // budget rather than the end marker; the requests>0 guard keeps
+            // request-less closes out (the reaper only arms post-response).
+            const idleForBudget = rec.requests > 0 && rec.lastResponseEndAt !== null && now - rec.lastResponseEndAt >= keepAliveTimeoutMs;
+            const reason = rec.errored
+                ? `error(${rec.errored})`
+                : rec.peerFinAt !== null && (rec.serverEndAt === null || rec.peerFinAt < rec.serverEndAt)
+                    ? "peer-fin"
+                    : idleForBudget
+                        ? "idle-timeout"
+                        : rec.serverEndAt !== null
+                            ? "server-end"
+                            : "destroyed";
+            log("debug", `[conn#${rec.id}] ${rec.kind} closed reason=${reason} age=${now - rec.openedAt}ms reqs=${rec.requests}`);
+        });
+    });
+    // #1452: Node's default client-error disposition (no listener) destroys
+    // the socket. Depending on residual kernel recv-buffer state that makes
+    // the OS answer RST (peer reads ECONNRESET — the #1452 incident
+    // signature) or leave the peer's pooled connection hanging with neither
+    // FIN nor RST ever (verified behavior matrix). Drain whatever is left,
+    // then end cleanly — never destroy a data-bearing socket. One handler
+    // covers both plain TCP and MITM TLS legs: the MITM socket enters through
+    // this same server instance.
+    server.on("clientError", (err, socket) => {
+        if (socket.destroyed) return;
+        log("warn", `[conn] clientError: ${err.message} — draining then closing`);
+        socket.on("error", () => {});
+        socket.resume();
+        socket.once("end", () => socket.end());
+        const bail = setTimeout(() => {
+            if (!socket.destroyed && !socket.writableEnded) socket.end();
+        }, 300);
+        bail.unref?.();
+    });
+    // #1452: long-lived-process exposure telemetry — both incidents died
+    // inside one 36.7h process while fresh processes stayed clean under
+    // higher load; fd/connection-table drift was unfalsifiable without
+    // periodic ground truth. One info line per interval, zero payload.
+    const exposureRaw = Number(process.env.BILI_EXPOSURE_LOG_INTERVAL_MS);
+    const exposureIntervalMs = Number.isInteger(exposureRaw) ? Math.max(0, exposureRaw) : 3_600_000;
+    if (exposureIntervalMs > 0) {
+        const exposureStartedAt = Date.now();
+        const exposureTimer = setInterval(() => {
+            const handles = process.getActiveResourcesInfo();
+            const tcpHandles = handles.reduce((n, h) => n + (h === "TCPWrap" || h === "TLSSocket" ? 1 : 0), 0);
+            log("info", `[exposure] uptime=${Math.round(((Date.now() - exposureStartedAt) / 3_600_000) * 10) / 10}h liveConns=${connRecords.size} tcpHandles=${tcpHandles} handles=${handles.length} sessions=${listSessions().length} blindTunnels=${liveBlindTunnels()} inFlight=${totalInFlight()}`);
+        }, exposureIntervalMs);
+        exposureTimer.unref?.();
+    }
     setMaskHostsEnabled(opts.maskHosts ?? true);
     if (opts.mitm.enabled) {
         // Non-loopback bind (--host 0.0.0.0 / LAN IP) opts into serving
@@ -647,7 +758,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
         // Hard fallback: if connections hang (client never closes), don't
         // block shutdown forever — force-exit after a grace window.
         setTimeout(() => {
-            log("warn", "shutdown grace window elapsed; forcing exit");
+            log("warn", `shutdown grace window elapsed; forcing exit (liveConns=${connRecords.size})`);
             flushConversations();
             void flushAllSessions().finally(finishShutdown);
         }, 10_000).unref?.();
