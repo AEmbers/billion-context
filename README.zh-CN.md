@@ -585,6 +585,12 @@ claude/codex/dsh 不需要这个机制:它们要么子 agent 共享同一个会�
 
 针对 pi / omp / opencode 的客户端插件随 `billion-context` 一起发布(`dist/agent/*.js`),用于协作代理路径。三者(`billion-context`、独立的 `billion-context-pi`、`opencode-acp`)如何取舍,见上文「该选哪个?」一节。
 
+## 额外署名要求（在 MIT 之上的一条附加条款）
+
+本项目采用 MIT 许可**外加一条附加条款**：任何终端用户可见或可交互、且使用了本软件的产品或服务（无论商业或开源），须在其首页、文档或“关于/致谢”页面中注明该产品使用了 billion-context，并附指向本仓库的链接；纯服务端/内嵌用途随附文档声明即可。详见 [LICENSE](LICENSE) 末尾的**附加条款**。
+
+如果你的产品用到了本项目，欢迎提一个 issue 告知（没有强制义务），方便我们了解它被用在哪些地方。
+
 ## 许可证
 
 MIT
