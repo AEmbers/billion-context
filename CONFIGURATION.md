@@ -150,6 +150,8 @@ Top-level keys that control how the proxy listens and behaves globally.
 
 The `providers` block maps **upstream URLs** to per-provider configuration. Each key is a URL prefix; each value can declare model context windows, a per-provider proxy, a compression protocol, compression overrides, an image billing mode, and a per-route passthrough.
 
+Keys can also be **provider names** (any non-URL string). A named entry binds onto the URL lane that name resolves to in the launched client's own config (#1462): under `bili pi` / `bili omp` / … the launcher hands the proxy a name→URL map (`BILI_LAUNCHER_NAME_ROUTES`, automatic) and the entry's fields apply to that upstream exactly like a URL-keyed entry — including three-level compress. On conflict the explicit URL-keyed entry wins; the named entry fills gaps. Without a mapping (plain `bili start`) a named entry is inert for routing — it only carries agent-side fields like `compactionOptIn` (#1392).
+
 ```jsonc
 {
   "providers": {
@@ -160,7 +162,10 @@ The `providers` block maps **upstream URLs** to per-provider configuration. Each
       "proxy": "http://10.0.0.1:7890",
       "compressProtocol": "tools",
       "compress": { "maxContextLimit": "70%" }
-    }
+    },
+    // Named alias for the same upstream as configured in the client (e.g. pi
+    // models.json provider id "main") — fields merge onto its URL lane:
+    "main": { "compress": { "absorb": { "enabled": true } } }
   }
 }
 ```

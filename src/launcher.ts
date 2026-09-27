@@ -58,7 +58,7 @@ function selfDistFile(name: string): string {
     return path.join(selfPackageRoot(), "dist", name);
 }
 import { nonEmpty, resolvePiHome, resolveOmpHome, resolveDshHome, resolveCodexHome, loadClientConfig, collectModelWindows, collectModelMaxOutputs, type ClientConfig, type CodexConfig, resolveOpencodeConfigFile, readOpencodeConfigRoot, opencodePluginBaseDir, type OpencodeConfig, type OpencodeProvider, type HermesConfig, type HermesProvider, qoderIsCnSite, QODER_DEFAULT_MODEL_HOSTS, resolveTraeHome, readTraeConfig, TRAE_DEFAULT_MODEL_HOSTS, JCODE_DEFAULT_MODEL_HOSTS, type TraeConfig, resolveKimiHome, readKimiConfig, parseKimiToml, KIMI_DEFAULT_MODEL_HOSTS, QWEN_DEFAULT_MODEL_HOSTS, type KimiConfig, type KimiProvider, readOpencodeProjectLayer, type OpencodeProjectLayer, readMcodeConfig, resolveMcodeInstallDir, MCODE_DEFAULT_MODEL_HOSTS, type McodeConfig, discoverAiderArgUrls, AIDER_DEFAULT_MODEL_HOSTS, COPILOT_DEFAULT_MODEL_HOSTS, AMP_DEFAULT_MODEL_HOSTS, resolveGooseDirs, readGooseConfig, type GooseConfig, type GooseDirs } from "./client-config.js";
-import { loadRoutes, resolveConfiguredContextLimit, lookupContextLimit, resolveNativeAttachExternal, resolveMitmDomains, resolveNonHttpProviders, type ProviderRoutes } from "./config.js";
+import { loadRoutes, resolveConfiguredContextLimit, lookupContextLimit, resolveNativeAttachExternal, resolveMitmDomains, resolveNonHttpProviders, NAME_ROUTES_ENV, type ProviderRoutes } from "./config.js";
 import { discoverMitmDomains } from "./discover.js";
 import { contextFromRegistry } from "./registry.js";
 
@@ -189,6 +189,13 @@ export interface LaunchOptions {
      *  modelWindows. Handed to the spawned proxy via
      *  BILI_LAUNCHER_MODEL_MAX_OUTPUTS for the output-headroom reservation. */
     modelMaxOutputs?: Record<string, number>;
+    /** #1462: provider NAME → upstream URL map discovered from the client's
+     *  own config (the same sources BILI_PROVIDER_REWRITES is built from).
+     *  Handed to the spawned proxy via BILI_LAUNCHER_NAME_ROUTES so
+     *  name-keyed providers entries in the bili config bind onto the URL
+     *  lane the client actually talks to — three-level compress for named
+     *  providers without any wire change. */
+    nameRoutes?: Record<string, string>;
     /** Pin opts.port: an EADDRINUSE at bind fails loud (child exits 1)
      * instead of the launcher default of port-hopping +1 (#964 — the claude
      * native posture dials a STATIC url baked into settings.json; a proxy
@@ -335,6 +342,23 @@ export function extractDomains(upstreams: string[]): string[] {
         if (!host || seen.has(host)) continue;
         seen.add(host);
         out.push(host);
+    }
+    return out;
+}
+
+/** #1462: name → upstream-URL map from the client's own provider config —
+ *  exactly the pairs BILI_PROVIDER_REWRITES is built from, minus the
+ *  wrapping. Only http(s) targets survive (that is all the proxy can route). */
+export function collectNameRoutes(routes: DiscoveredRoutes): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const r of [...routes.httpRewrites, ...routes.httpsRewrites]) {
+        if (r.key.length === 0 || r.realUpstream.length === 0) continue;
+        try {
+            const u = new URL(r.realUpstream);
+            out[r.key] = `${u.protocol}//${u.host}`;
+        } catch {
+            // malformed upstream — the rewrite lane skips it too
+        }
     }
     return out;
 }
@@ -2892,6 +2916,9 @@ export async function ensureProxyRunning(
                         ...(opts.modelMaxOutputs && Object.keys(opts.modelMaxOutputs).length > 0
                             ? { BILI_LAUNCHER_MODEL_MAX_OUTPUTS: JSON.stringify(opts.modelMaxOutputs) }
                             : {}),
+                        ...(opts.nameRoutes && Object.keys(opts.nameRoutes).length > 0
+                            ? { [NAME_ROUTES_ENV]: JSON.stringify(opts.nameRoutes) }
+                            : {}),
                         ...(opts.strictPort ? { BILI_STRICT_PORT: "1" } : {}),
                     },
                 },
@@ -3246,7 +3273,7 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
         ? dedupeInOrder([...DEFAULT_MITM_DOMAINS, ...resolveMitmDomains(childMitmEnv), ...domains, ...discoverMitmDomains(discoveryEnv)])
         : [];
     const extNonHttpProviders = base === "pi" || base === "omp" ? resolveNonHttpProviders(process.env) : [];
-    const handle = await ensureProxyRunning({ host, port, passthrough, debug, lane: base, mitmDomains: domains, modelWindows: collectModelWindows(config, base), modelMaxOutputs: collectModelMaxOutputs(config, base) }, deps);
+    const handle = await ensureProxyRunning({ host, port, passthrough, debug, lane: base, mitmDomains: domains, modelWindows: collectModelWindows(config, base), modelMaxOutputs: collectModelMaxOutputs(config, base), nameRoutes: collectNameRoutes(routes) }, deps);
     console.error(
         `bili: started proxy at ${handle.origin} (MITM domains: ${domains.length ? domains.join(", ") : "defaults"})` +
             ((base !== "kimi" && base !== "mcode" && base !== "aider" && routes.httpRewrites.length > 0) ? ` (HTTP /bili/ rewrites: ${routes.httpRewrites.length})` : "") +
@@ -3749,11 +3776,12 @@ export async function runTestPi(params: RunTestPiParams, deps: LauncherDeps = {}
     const debug = params.overrides.ACP_DEBUG === "1";
 
     const config = loadClientConfig(process.env, process.cwd());
+    const piDiscovered = discoverRoutes("pi", config);
     const domains = dedupeInOrder([
-        ...discoverDomains("pi", config),
+        ...piDiscovered.httpsDomains,
         ...(params.mitmDomains ?? []),
     ]);
-    const handle = await ensureProxyRunning({ host, port, passthrough, debug, lane: "pi", mitmDomains: domains, modelWindows: collectModelWindows(config, "pi"), modelMaxOutputs: collectModelMaxOutputs(config, "pi") }, deps);
+    const handle = await ensureProxyRunning({ host, port, passthrough, debug, lane: "pi", mitmDomains: domains, modelWindows: collectModelWindows(config, "pi"), modelMaxOutputs: collectModelMaxOutputs(config, "pi"), nameRoutes: collectNameRoutes(piDiscovered) }, deps);
     console.error(
         `bili: started proxy at ${handle.origin} (MITM domains: ${domains.length ? domains.join(", ") : "defaults"})`,
     );

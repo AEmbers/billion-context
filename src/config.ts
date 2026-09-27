@@ -645,6 +645,71 @@ export type ProxyOptions = {
  *  socket is already bound), so those stay as they were at startup. Mirrors the
  *  exact precedence of loadOptions: external ACP_PROVIDERS path > inline
  *  providers in the config file. */
+/** #1462: env name→upstream-URL map exported by `bili <client>` launchers
+ *  (BILI_LAUNCHER_NAME_ROUTES) so the proxy can bind name-keyed providers
+ *  entries onto the URL lane the client actually talks to. */
+export const NAME_ROUTES_ENV = "BILI_LAUNCHER_NAME_ROUTES";
+
+export function parseLauncherNameRoutes(env: NodeJS.ProcessEnv): Record<string, string> {
+    const raw = env[NAME_ROUTES_ENV];
+    if (!raw) return {};
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return {};
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof v === "string" && v.length > 0) out[k] = v;
+    }
+    return out;
+}
+
+/** Deep-merge `add` into `base` with `base` winning every conflict — the
+ *  explicit URL-keyed entry is the more specific authorial statement, the
+ *  named entry only fills gaps (#1462). Plain objects recurse; arrays and
+ *  scalars take `base` when present. Agent-side-only fields (e.g.
+ *  compactionOptIn, #1392) never get here — parseRouteEntry whitelists
+ *  routing-relevant fields only. */
+function deepMergeRoute(base: ProviderRoute, add: ProviderRoute): ProviderRoute {
+    const out: Record<string, unknown> = { ...base };
+    for (const [k, v] of Object.entries(add)) {
+        const b = (base as Record<string, unknown>)[k];
+        if (b !== undefined && v !== undefined && typeof b === "object" && typeof v === "object" && !Array.isArray(b) && !Array.isArray(v)) {
+            out[k] = deepMergeRoute(b as ProviderRoute, v as ProviderRoute);
+        } else if (b === undefined) {
+            out[k] = v;
+        }
+    }
+    return out as ProviderRoute;
+}
+
+/** #1462: flatten name-keyed providers entries onto their URL lanes. For each
+ *  name the launcher mapped (name → upstream URL), a `providers.<name>` entry
+ *  binds exactly like a URL-keyed entry for that upstream: three-level
+ *  compress (global → provider → model) resolves through the existing
+ *  machinery with zero wire changes. Names without a mapping stay inert
+ *  (plain `bili start` has no client context to resolve them). */
+export function flattenNamedRoutes(routes: ProviderRoutes, nameRoutes: Record<string, string>): ProviderRoutes {
+    const out: ProviderRoutes = { ...routes };
+    for (const [name, target] of Object.entries(nameRoutes)) {
+        const named = routes[name];
+        if (!named) continue;
+        let u: URL;
+        try {
+            u = new URL(target);
+        } catch {
+            continue;
+        }
+        if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+        const key = normalizeUrlKey(`${u.protocol}//${u.host}`);
+        out[key] = out[key] ? deepMergeRoute(out[key]!, named) : named;
+    }
+    return out;
+}
+
 export function loadRoutes(env: NodeJS.ProcessEnv = process.env): ProviderRoutes {
     const fileConfig = loadConfigFile();
     const routes: ProviderRoutes = {};
@@ -666,7 +731,7 @@ export function loadRoutes(env: NodeJS.ProcessEnv = process.env): ProviderRoutes
             if (route && !routes[normalizeUrlKey(k)]) routes[normalizeUrlKey(k)] = route;
         }
     }
-    return routes;
+    return flattenNamedRoutes(routes, parseLauncherNameRoutes(env));
 }
 
 /** Resolved passthrough state shared by loadOptions and the web config API
