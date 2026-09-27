@@ -221,24 +221,52 @@ test("folds stamped after the current sample wait for the next one", () => {
     assert.equal(after.foldSeq, 1);
 });
 
-test("ring eviction keeps aggregates exact", () => {
+test("ledger retains every sample past the old 512 cap (#1489)", () => {
     const session = makeSession();
     let input = 1000;
-    for (let i = 0; i < 520; i++) {
+    for (let i = 0; i < 600; i++) {
         recordCacheSample(session, { at: T0 + 1000 + i * 60_000, input, cached: Math.floor(input * 0.9), output: 100 });
         input += 100;
     }
     const led = (session.metadata as Record<string, { lines: unknown[]; sampleSeq: number; agg: { requests: number; input: number } }> & object)["cacheLedger"]!;
-    assert.equal(led.sampleSeq, 520);
-    assert.equal(led.lines.length, 512);
-    assert.equal(led.agg.requests, 520);
-    const expectedInput = Array.from({ length: 520 }, (_, i) => 1000 + i * 100).reduce((a, b) => a + b, 0);
+    assert.equal(led.sampleSeq, 600);
+    assert.equal(led.lines.length, 600);
+    assert.equal(led.agg.requests, 600);
+    const expectedInput = Array.from({ length: 600 }, (_, i) => 1000 + i * 100).reduce((a, b) => a + b, 0);
     assert.equal(led.agg.input, expectedInput);
     const r = buildSessionCacheReport(session);
-    assert.equal(r.linesOmitted, 8);
-    assert.equal(r.lines[0]!.seq, 9);
-    assert.equal(r.totals.requests, 520);
+    assert.equal(r.linesOmitted, 0);
+    assert.equal(r.lines[0]!.seq, 1);
+    assert.equal(r.lines[r.lines.length - 1]!.seq, 600);
+    assert.equal(r.totals.requests, 600);
     assert.equal(r.totals.balanced, true);
+});
+
+test("ledger retains every fold past the old 256 cap (#1489)", () => {
+    const session = makeSession();
+    for (let i = 1; i <= 260; i++) {
+        recordCacheFoldsFromBlocks(session, [block(`b${i}`, T0 + i * 1000, 1000, 400)]);
+    }
+    const led = (session.metadata as Record<string, { folds: unknown[] }> & object)["cacheLedger"]!;
+    assert.equal(led.folds.length, 260);
+    const r = buildSessionCacheReport(session);
+    assert.equal(r.folds.length, 260);
+    assert.equal(r.folds[0]!.seq, 1);
+    assert.equal(r.economics.folds, 260);
+});
+
+test("handleAcpCache full detail windows the text view past 512 lines (#1489)", () => {
+    const session = makeSession();
+    for (let i = 0; i < 600; i++) {
+        recordCacheSample(session, { at: T0 + 1000 * i, input: 100000, cached: 99000 });
+    }
+    const full = handleAcpCache(session, { detail: "full" });
+    assert.match(full, /LINE ITEMS \(last 512 of 600\):/);
+    const rows = full.split("\n").filter((l) => /\s+99\.0%\s/.test(l));
+    assert.equal(rows.length, 512);
+    const r = buildSessionCacheReport(session);
+    assert.equal(r.lines.length, 600);
+    assert.equal(r.linesOmitted, 0);
 });
 
 test("handleAcpCache renders the grand ledger with a closing identity", () => {
