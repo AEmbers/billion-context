@@ -112,7 +112,7 @@ Top-level keys that control how the proxy listens and behaves globally.
 - **Type:** `boolean`
 - **Default:** `false`
 - **Status:** ACTIVE
-- **Description:** `#1392` — opt a **non-http(s) baseUrl provider** (e.g. pi-claude-bridge's literal `"claude-bridge"`) into bili's compaction-ownership consideration. The entry's KEY is the provider id — a non-URL key is inert for routing (longest-prefix matching never hits it), it only feeds the launcher-exported `BILI_NON_HTTP_PROVIDERS` allowlist the pi/omp plugin consults when it would otherwise veto a non-http baseUrl outright (#1383). Opt-in only widens the candidate set: compaction is still cancelled only on positive carriage evidence (the plugin stamped the session, or `/__bili/plugin/status` confirms the proxy carries it). Env equivalent: `BILI_NON_HTTP_PROVIDERS=a,b` (union with the file, deduped). Only meaningful under `bili pi` / `bili omp` launchers or a directly-installed plugin.
+- **Description:** `#1392` — opt a **non-http(s) baseUrl provider** (e.g. pi-claude-bridge's literal `"claude-bridge"`) into bili's compaction-ownership consideration. The entry's KEY is the provider id — a non-URL key is routing-inert on its own (give it [`bind`](#named-provider-entries-bind) to make it a real lane), and only feeds the launcher-exported `BILI_NON_HTTP_PROVIDERS` allowlist the pi/omp plugin consults when it would otherwise veto a non-http baseUrl outright (#1383). Opt-in only widens the candidate set: compaction is still cancelled only on positive carriage evidence (the plugin stamped the session, or `/__bili/plugin/status` confirms the proxy carries it). Env equivalent: `BILI_NON_HTTP_PROVIDERS=a,b` (union with the file, deduped). Only meaningful under `bili pi` / `bili omp` launchers or a directly-installed plugin.
 
   ```jsonc
   {
@@ -174,7 +174,7 @@ Top-level keys that control how the proxy listens and behaves globally.
 
 ## Providers
 
-The `providers` block maps **upstream URLs** to per-provider configuration. Each key is a URL prefix; each value can declare model context windows, a per-provider proxy, a compression protocol, compression overrides, an image billing mode, and a per-route passthrough.
+The `providers` block maps **upstream URLs** to per-provider configuration. Each key is a URL prefix; each value can declare model context windows, a per-provider proxy, a compression protocol, compression overrides, an image billing mode, and a per-route passthrough. Non-URL **named** keys are also allowed: they are routing-inert on their own, and become real lanes via [`bind`](#named-provider-entries-bind).
 
 ```jsonc
 {
@@ -218,6 +218,27 @@ So you can give ZCode its own upstream proxy without affecting API-key clients:
 ```
 
 The two schemes never overlap: a `mitm://` key targets only MITM (login-client) traffic of that host, a plain `https://` key only `/bili/` (API-key) traffic.
+
+### Named provider entries (`bind`)
+
+A key that is not a URL (e.g. `"claude-bridge"`) is a **named** entry. On its own it is routing-inert — longest-prefix match never hits it — and carries only agent-side identity such as [`compactionOptIn`](#compactionoptin). With a `bind` field it becomes a pure **alias** of another lane:
+
+- **Type:** `string` — the http(s) base URL of the lane to alias.
+- Resolution happens **purely at config-load time**: the entry's routing fields (`compress`, `models`, `proxy`, `passthrough`, `compressProtocol`, `compat`, `imageBilling`) are deep-merged onto the bound URL's route and apply exactly as if written under that URL key. The name itself never appears in the request path or on the wire; the proxy keeps its single URL-prefix routing.
+- **Precedence (per field):** an explicit URL-key entry beats any alias field; between sources the external `ACP_PROVIDERS` file beats inline config at every level (aliases fold in source order, first-set wins). Objects merge per key; arrays/scalars are taken wholesale from the winner — no element-wise merging.
+- A named key without `bind` that still carries routing fields is dead config: bili logs a startup warning naming the key and the inert fields ("add `bind`, or move these under the URL entry") instead of silently ignoring them. Invalid `bind` values (non-string, non-http(s) URL) warn and leave the entry inert; `bind` on a URL key warns and is ignored (the key is already a lane).
+
+```jsonc
+{
+  "providers": {
+    "claude-bridge": {
+      "bind": "https://api.anthropic.com",
+      "compactionOptIn": true,
+      "compress": { "maxContextLimitPct": 0.75 }
+    }
+  }
+}
+```
 
 ### `models`
 

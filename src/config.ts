@@ -661,33 +661,145 @@ export type ProxyOptions = {
     stableSystemAnchor?: boolean;
 };
 
+/** The routing fields a provider entry can carry — exactly what
+ *  {@link parseRouteEntry} consumes per route. When they sit on a non-URL key
+ *  WITHOUT `bind` they are inert (longest-prefix matching never hits a name),
+ *  so loadRoutes warns loudly instead of letting them sit dead (#1469). */
+const NAMED_PROVIDER_ROUTING_FIELDS = ["compress", "models", "proxy", "passthrough", "compressProtocol", "compat", "imageBilling"] as const;
+
+// Once-per-signature dedup so hot-reload / repeated launcher loads don't spam
+// the same named-provider warning (same pattern as the absorb warnings below).
+const seenNamedProviderWarnings = new Set<string>();
+
+function warnNamedProviderOnce(signature: string, message: string): void {
+    if (seenNamedProviderWarnings.has(signature)) return;
+    seenNamedProviderWarnings.add(signature);
+    loggerLog("warn", `[acp-config] ${message}`);
+}
+
+function warnInertRoutingFields(key: string, obj: Record<string, unknown> | null): void {
+    if (!obj) return;
+    const inert = NAMED_PROVIDER_ROUTING_FIELDS.filter((f) => f in obj && obj[f] !== undefined);
+    if (inert.length === 0) return;
+    warnNamedProviderOnce(
+        `inert:${key}:${inert.join(",")}`,
+        `providers."${key}" carries routing fields without "bind" [${inert.join(", ")}] — they are inert (add "bind": "<upstream base URL>" to apply them, or move them under the URL entry)`,
+    );
+}
+
+/** True when the providers-map key is itself a URL lane (http/https/mitm
+ *  scheme — mitm:// is the README-documented lookup key for MITM traffic).
+ *  Anything else is a NAMED key (provider id): routing-inert on its own,
+ *  meaningful via `compactionOptIn` (#1392) and/or `bind` (#1469). */
+function isUrlLikeKey(key: string): boolean {
+    return /^(https?|mitm):\/\//i.test(key.trim());
+}
+
+/** Normalize a `bind` value to its route-table key. Only http(s) base URLs
+ *  are valid targets — the bound lane must be reachable by the request path's
+ *  URL-prefix matching. Returns undefined for anything else. */
+function normalizeBindTarget(raw: string): string | undefined {
+    try {
+        const u = new URL(raw.trim());
+        if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
+        return normalizeUrlKey(u.href);
+    } catch {
+        return undefined;
+    }
+}
+
+function cloneJsonValue(value: unknown): unknown {
+    if (!value || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map(cloneJsonValue);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = cloneJsonValue(v);
+    return out;
+}
+
+/** Deep-merge two route shapes where `winner` beats `filler` field-by-field:
+ *  when both sides hold a plain object under one key the merge recurses into
+ *  it; every other case (scalar vs scalar, array vs anything, object vs
+ *  scalar) takes the winner's value wholesale — arrays are never element-
+ *  merged. The result is a fresh copy; inputs are never shared or mutated.
+ *  Used by loadRoutes to fold a named provider's `bind` alias into its URL
+ *  lane (#1469). */
+function fillRouteGaps(winner: unknown, filler: unknown): unknown {
+    const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+    const fillerObj = isObj(filler) ? filler : null;
+    if (!fillerObj) return cloneJsonValue(winner);
+    const winnerObj = isObj(winner) ? winner : null;
+    if (!winnerObj) return cloneJsonValue(filler);
+    const out: Record<string, unknown> = {};
+    for (const [k, fv] of Object.entries(fillerObj)) out[k] = cloneJsonValue(fv);
+    for (const [k, wv] of Object.entries(winnerObj)) {
+        const fv = k in out ? out[k] : undefined;
+        out[k] = isObj(wv) && isObj(fv) ? fillRouteGaps(wv, fv) : cloneJsonValue(wv);
+    }
+    return out;
+}
+
 /** Re-read ONLY the routes from the current config sources, returning a fresh
  *  ProviderRoutes object. Used by the web UI's "Apply" (hot-reload) button so
  *  provider/route changes take effect without restarting bili. Only routes are
  *  re-read — port/host/upstream can't change on a running server (the listen
  *  socket is already bound), so those stay as they were at startup. Mirrors the
  *  exact precedence of loadOptions: external ACP_PROVIDERS path > inline
- *  providers in the config file. */
+ *  providers in the config file.
+ *
+ *  Named provider entries (#1469): a non-URL key carrying `bind` is a pure
+ *  ALIAS for the bound URL lane — resolved HERE at config-load time only, so
+ *  the request path keeps its single URL-prefix routing and names never appear
+ *  on the wire. Precedence per field: an explicit URL-key entry beats any
+ *  alias field; between sources the external ACP_PROVIDERS file beats inline
+ *  config at every level (aliases fold in source order, first-set wins). A
+ *  name key WITHOUT `bind` stays routing-inert (agent-side identity such as
+ *  `compactionOptIn` only); if it nevertheless carries routing fields, a
+ *  startup warning names the key and the inert fields instead of failing
+ *  silently. */
 export function loadRoutes(env: NodeJS.ProcessEnv = process.env): ProviderRoutes {
     const fileConfig = loadConfigFile();
     const routes: ProviderRoutes = {};
+    const aliases: Array<{ target: string; route: ProviderRoute }> = [];
+    // urlWins=true for the external ACP_PROVIDERS source (its entries replace
+    // inline ones wholesale, as before); false for inline fileConfig.providers
+    // (fills gaps only). Named entries with a valid `bind` never register under
+    // their own key — they are collected and folded onto their target lane
+    // AFTER both sources' URL keys are in place, so an explicit URL key always
+    // outranks alias fields regardless of which file either came from.
+    const ingest = (key: string, value: unknown, urlWins: boolean): void => {
+        rejectLegacyRoute(key, value);
+        const route = parseRouteEntry(value);
+        if (!route) return;
+        const obj = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+        const urlLike = isUrlLikeKey(key);
+        if (obj && "bind" in obj) {
+            const bind = obj.bind;
+            if (typeof bind !== "string") {
+                warnNamedProviderOnce(`bad-bind:${key}`, `providers."${key}".bind must be a string http(s) base URL — the entry stays routing-inert`);
+            } else if (urlLike) {
+                warnNamedProviderOnce(`bind-on-url:${key}`, `providers."${key}" has "bind" — ignored: URL keys are already lanes (remove "bind", or rename the key to make it a named entry)`);
+            } else if (bind.trim().length > 0) {
+                const target = normalizeBindTarget(bind);
+                if (target) { aliases.push({ target, route }); return; }
+                warnNamedProviderOnce(`bad-bind:${key}`, `providers."${key}".bind is not a valid http(s) base URL ("${bind}") — the entry stays routing-inert`);
+            }
+        }
+        if (!urlLike) warnInertRoutingFields(key, obj);
+        const normKey = normalizeUrlKey(key);
+        if (urlWins || !routes[normKey]) routes[normKey] = route;
+    };
     const routesPath = env.ACP_PROVIDERS ?? fileConfig.providersPath ?? "";
     if (routesPath) {
         const parsed = safeReadJson(routesPath);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-                rejectLegacyRoute(k, v);
-                const route = parseRouteEntry(v);
-                if (route) routes[normalizeUrlKey(k)] = route;
-            }
+            for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) ingest(k, v, true);
         }
     }
     if (fileConfig.providers) {
-        for (const [k, v] of Object.entries(fileConfig.providers)) {
-            rejectLegacyRoute(k, v);
-            const route = parseRouteEntry(v);
-            if (route && !routes[normalizeUrlKey(k)]) routes[normalizeUrlKey(k)] = route;
-        }
+        for (const [k, v] of Object.entries(fileConfig.providers)) ingest(k, v, false);
+    }
+    for (const { target, route } of aliases) {
+        routes[target] = fillRouteGaps(routes[target], route) as ProviderRoute;
     }
     return routes;
 }
@@ -1531,7 +1643,7 @@ export function parseCompressSettings(v: unknown): (CompressSettings & { injectT
     return out;
 }
 
-function rejectLegacyRoute(key: string, value: unknown): void {
+export function rejectLegacyRoute(key: string, value: unknown): void {
     if (typeof value !== "string") return;
     throw new Error(
         `[acp-config] legacy provider route \"${key}\": \"${value}\" is no longer valid; ` +
