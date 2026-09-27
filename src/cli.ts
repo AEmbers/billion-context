@@ -27,6 +27,7 @@ import { configFile as defaultConfigFile } from "./paths.js";
 import { log as loggerLog } from "./logger.js";
 import { createAutoRestartHandler } from "./restart.js";
 import { checkForUpdate, startAutoUpdate } from "./update.js";
+import { startAdvisoryWatcher, getAdvisoryState } from "./advisory.js";
 import { resolveProxy } from "./upstream-proxy.js";
 import { runMcpStdio } from "./mcp.js";
 import { PLUGIN_AGENTS, isPluginAgent, pluginInstall, pluginRemove, pluginStatusAll, pluginUpdate, type PluginAgent } from "./plugin-install.js";
@@ -585,6 +586,28 @@ export async function main(): Promise<void> {
             autoUpdate: true,
             resolveProxy: (url) => resolveProxy(opts.routes, opts.proxy, url, opts.proxyFallback),
             updateTag: opts.updateTag,
+            advisoryActive: () => getAdvisoryState().active !== undefined,
+            onStaleInstall: createAutoRestartHandler({
+                enabled: opts.autoRestartOnUpdate,
+                packageName: PACKAGE_NAME,
+                server,
+                host: opts.host,
+                portProvider: () => {
+                    const addr = server.address();
+                    return addr && typeof addr === "object" ? addr.port : opts.port;
+                },
+                log: loggerLog,
+            }),
+        });
+    }
+    // #1481: the advisory watcher runs independently of autoUpdate — its whole
+    // point is to reach installs whose auto-update is off.
+    if (opts.advisoryCheck) {
+        startAdvisoryWatcher({
+            packageName: PACKAGE_NAME,
+            currentVersion: VERSION,
+            advisoryUrl: opts.advisoryUrl,
+            resolveProxy: (url) => resolveProxy(opts.routes, opts.proxy, url, opts.proxyFallback),
             onStaleInstall: createAutoRestartHandler({
                 enabled: opts.autoRestartOnUpdate,
                 packageName: PACKAGE_NAME,

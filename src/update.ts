@@ -63,7 +63,7 @@ function checkIntervalMs(): number {
     const raw = Number(process.env.BILI_UPDATE_CHECK_INTERVAL_MS?.trim());
     return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_CHECK_INTERVAL_MS;
 }
-const CHECK_INTERVAL_MS = checkIntervalMs();
+export const CHECK_INTERVAL_MS = checkIntervalMs();
 const THROTTLE_FILE = path.join(cacheDir(), ".update-check");
 const LOCK_FILE = path.join(cacheDir(), ".update-lock");
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
@@ -279,7 +279,7 @@ export function hostManagedInstall(installDir: string, env: NodeJS.ProcessEnv = 
 }
 
 /** Read the version from the on-disk package.json (not the startup constant). */
-async function readDiskVersion(installDir: string): Promise<string | undefined> {
+export async function readDiskVersion(installDir: string): Promise<string | undefined> {
     try {
         const pkg = JSON.parse(await readFile(path.join(installDir, "package.json"), "utf-8"));
         return pkg.version;
@@ -494,6 +494,11 @@ export type UpdateOptions = {
     /** Dist-tag channel to follow (default "latest"), e.g. "dev", "stable".
      *  Publishing a PR (pr-N tag) never pulls a user on another channel. */
     updateTag?: string;
+    /** #1481: returns true while the advisory watcher holds an active
+     *  critical-bug advisory. The normal loop defers to it (its target version
+     *  wins over "follow latest"), otherwise the two loops would fight over
+     *  the install dir every cycle. A forced manual check still proceeds. */
+    advisoryActive?: () => boolean;
     /** Fired whenever this process detects the on-disk install is newer than
      *  the running code (#811): right after a successful in-place install and
      *  on every subsequent up-to-date check while the process stays stale.
@@ -614,6 +619,11 @@ export async function checkForUpdate(opts: UpdateOptions, force = false): Promis
         }
         await writeLastCheck(now);
         firstCheckDone = true;
+
+        if (!force && opts.advisoryActive?.()) {
+            loggerLog("info", "[update] deferring to the advisory loop (an active critical-bug advisory owns this install)");
+            return;
+        }
 
         // Source-checkout guard (#580): findInstallDir() walks up from the
         // running dist/ and lands on the repo root when bili runs from a git
@@ -961,6 +971,88 @@ export async function detectStaleInstall(
     }
     const diskVersion = await readDiskVersion(installDir);
     return { diskVersion, stale: staleInstallStatus(diskVersion, runningVersion) === "restart" };
+}
+
+/** Fetch one published version's registry doc (#1481): tarball URL plus
+ *  integrity/shasum for verification. Returns undefined when the version does
+ *  not exist or the fetch fails — callers treat that as "do nothing". */
+export async function fetchVersionDoc(
+    opts: Pick<UpdateOptions, "resolveProxy">,
+    packageName: string,
+    version: string,
+): Promise<{ tarball?: string; integrity?: string; shasum?: string } | undefined> {
+    const url = `${REGISTRY_BASE}/${encodeURIComponent(packageName)}/${encodeURIComponent(version)}`;
+    const dispatcher = egressDispatcher(opts, url);
+    try {
+        const res = await fetchWithEgress(url, {
+            signal: AbortSignal.timeout(5000),
+            headers: { Accept: "application/json" },
+            ...(dispatcher ? { dispatcher } : {}),
+        });
+        if (!res.ok) return undefined;
+        const data = (await res.json()) as { dist?: { tarball?: string; integrity?: string; shasum?: string } };
+        return data?.dist?.tarball ? data.dist : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/** Force-install a specific published version in place (#1481), regardless of
+ *  whether it is newer — the advisory watcher uses this to push users OUT of
+ *  an affected range, so the target may even be OLDER than the current
+ *  version (rollback semantics). Reuses the self-updater's full safety chain:
+ *  same cross-process lock, same backup/verify/rollback tarball install, same
+ *  #580 source-checkout and #991 single-writer guards (those refuse with an
+ *  actionable error instead of installing). Returns ok:false with a reason on
+ *  any refusal/failure; never throws. */
+export async function forceInstallVersion(
+    targetVersion: string,
+    installDir: string | undefined,
+    opts: UpdateOptions,
+    advisoryId: string,
+): Promise<{ ok: boolean; error?: string }> {
+    if (!installDir) {
+        return { ok: false, error: "cannot locate the install directory" };
+    }
+    const diskNow = await readDiskVersion(installDir);
+    if ((diskNow ?? opts.currentVersion) === targetVersion) {
+        // The advisory marks its own target as affected — a misconfiguration.
+        // Fail loudly instead of spinning on a no-op install every cycle.
+        return { ok: false, error: `advisory ${advisoryId} targets the current version ${targetVersion} (misconfigured advisory)` };
+    }
+    if (await isGitWorkingTree(installDir)) {
+        loggerLog("warn", `[update] advisory ${advisoryId}: running from a source checkout (${installDir}) — refusing self-update (#580); upgrade manually with npm install -g ${opts.packageName}@${targetVersion}`);
+        return { ok: false, error: "running from a source checkout — refusing self-update (#580)" };
+    }
+    const managed = hostManagedInstall(installDir);
+    if (managed) {
+        loggerLog("warn", `[update] advisory ${advisoryId}: install dir belongs to ${managed.owner} — no in-place overwrite (#991); update via ${managed.channel}`);
+        return { ok: false, error: `install dir is managed by ${managed.owner}; update via ${managed.channel}` };
+    }
+    const doc = await fetchVersionDoc(opts, opts.packageName, targetVersion);
+    if (!doc?.tarball) {
+        return { ok: false, error: `cannot resolve ${targetVersion} on the registry` };
+    }
+    const lock = await tryAcquireLock();
+    if (!lock) {
+        return { ok: false, error: "another process is updating, will retry next cycle" };
+    }
+    try {
+        // Re-check under the lock: another process may have finished the same
+        // install between the pre-lock read and lock acquisition.
+        const diskUnderLock = await readDiskVersion(installDir);
+        if (diskUnderLock === targetVersion) return { ok: true };
+        const result = await installViaTarball(targetVersion, doc.tarball, installDir, doc.integrity, doc.shasum, egressDispatcher(opts, doc.tarball));
+        if (result.ok) {
+            loggerLog("info", `[update] advisory ${advisoryId}: installed ${diskUnderLock ?? opts.currentVersion} → ${targetVersion}. Restart to finish.`);
+            await refreshDshProfileBundles(targetVersion, loggerLog);
+            notifyStaleInstall(opts, targetVersion);
+            return { ok: true };
+        }
+        return { ok: false, error: result.error };
+    } finally {
+        await lock.release();
+    }
 }
 
 export function startAutoUpdate(opts: UpdateOptions): void {
