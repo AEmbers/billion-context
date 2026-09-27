@@ -104,7 +104,7 @@ import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConver
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
-import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, takePendingPluginRegister } from "./plugin.js";
+import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
 import { evaluateChain, extractChainCarriers, stampOutbound } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
@@ -1574,10 +1574,18 @@ async function handle(
             const hasTierEvidence = betaWindow !== undefined || suffixWindow !== undefined;
             const pluginWindow = pluginHeadersMatchModel(req.headers, model) ? pluginReportedContextWindow(req.headers) : undefined;
             // Runtime-table fallback for the window (#955): only when this
-            // request's plugin sent no window header AND the agent's latest
+            // request's plugin sent no window header AND the latest
             // runtime-info entry matches THIS request's model — a stale
-            // post-switch entry must never size a different model.
-            const runtimeEntry = pluginRuntimeInfoFor(pluginAgentHeader(req.headers), model);
+            // post-switch entry must never size a different model. #1531:
+            // header-less plugin agents (omp native binds via identity
+            // register + prompt_cache_key stamping, never x-bili-plugin)
+            // resolve their report by conversation signal instead of the
+            // header — with the header present the agent table still wins
+            // exclusively (a plain client can only ever miss, not hit).
+            const runtimeAgent = pluginAgentHeader(req.headers);
+            const runtimeEntry = runtimeAgent !== undefined
+                ? pluginRuntimeInfoFor(runtimeAgent, model)
+                : pluginRuntimeInfoForConversation(runtimeConversationId(req.headers, parsed, opts.sessionHeader), model);
             const runtimeWindow = pluginWindow === undefined ? runtimeEntry?.contextWindow : undefined;
             const launcherWindow = launcherContextWindow(model);
             const configuredWindow = resolveConfiguredContextLimit(opts.routes, embeddedUrl, model);
@@ -2363,7 +2371,14 @@ async function handle(
                 // actually ask the upstream for. Still only a fallback: a
                 // max_tokens on the wire beat it above.
                 const fbModel0 = (parsed as { model?: string }).model;
-                const runtimeMax = (pluginHeadersMatchModel(req.headers, fbModel0) ? pluginReportedMaxOutput(req.headers) : undefined) ?? pluginRuntimeInfoFor(pluginAgentHeader(req.headers), fbModel0)?.maxOutput;
+                // #1531: same dual lookup as the window chain above — header
+                // agent wins exclusively, header-less agents resolve by
+                // conversation signal.
+                const fbAgent = pluginAgentHeader(req.headers);
+                const runtimeMax = (pluginHeadersMatchModel(req.headers, fbModel0) ? pluginReportedMaxOutput(req.headers) : undefined)
+                    ?? (fbAgent !== undefined
+                        ? pluginRuntimeInfoFor(fbAgent, fbModel0)?.maxOutput
+                        : pluginRuntimeInfoForConversation(runtimeConversationId(req.headers, parsed, opts.sessionHeader), fbModel0)?.maxOutput);
                 if (typeof runtimeMax === "number" && runtimeMax > 0) {
                     maxOutput = runtimeMax;
                     if (!headroomFallbackLogged.has(`${fbModel0 ?? "?"}|runtime-info`)) {

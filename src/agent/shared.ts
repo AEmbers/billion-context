@@ -182,6 +182,10 @@ export type RuntimeInfoReport = {
     contextWindow?: number;
     maxOutput?: number;
     baseURL?: string;
+    /** The conversation this report belongs to (#1531): lets the proxy keep
+     *  one session's entry isolated from sibling sessions in the same process
+     *  (main + subagents share the agent name but run different models). */
+    conversationId?: string;
     source?: string;
 };
 
@@ -198,20 +202,33 @@ export async function reportRuntimeInfo(proxyBase: string, info: RuntimeInfoRepo
     if (!ok) throw new Error(`runtime-info report failed (${status})`);
 }
 
-// Per-agent last report (model id): a stamp fires at most one POST per model
-// switch, not per request. Failed reports roll back so the next stamp retries.
+// Per-(agent, conversation) fingerprint of the last successfully reported
+// config: at most one POST per distinct config, not per request. #1531: the
+// old key was the bare model id, so a changed contextWindow/maxOutput/baseURL
+// was never re-reported, and sibling sessions sharing an agent name masked
+// each other. Keying by agent+conversation keeps interleaved sessions quiet
+// while any field change (including a proxy-origin switch) re-reports.
 const lastRuntimeReport = new Map<string, string>();
 
-/** Stamp-time runtime-info report (#955): no-op unless the agent's reported
- *  model changed (or this is the first stamp after proxy attach/spawn).
- *  Soft-fail — an unreachable proxy keeps wire mode exactly as before. */
-export function reportRuntimeInfoOnChange(proxyBase: string | undefined, info: RuntimeInfoReport): void {
+function runtimeReportFingerprint(proxyBase: string, info: RuntimeInfoReport): string {
+    return [proxyBase, info.agent, info.conversationId ?? "", info.model, String(info.contextWindow ?? ""), String(info.maxOutput ?? ""), info.baseURL ?? ""].join("\u0000");
+}
+
+/** Stamp-time runtime-info report (#955): no-op unless the reported config
+ *  changed since the last successful stamp (or this is the first stamp after
+ *  proxy attach/spawn). Soft-fail — an unreachable proxy keeps wire mode
+ *  exactly as before; a failed report rolls back so the next stamp retries. */
+export async function reportRuntimeInfoOnChange(proxyBase: string | undefined, info: RuntimeInfoReport): Promise<void> {
     if (proxyBase === undefined || proxyBase.length === 0) return;
-    if (lastRuntimeReport.get(info.agent) === info.model) return;
-    lastRuntimeReport.set(info.agent, info.model);
-    void reportRuntimeInfo(proxyBase, info).catch(() => {
-        lastRuntimeReport.delete(info.agent);
-    });
+    const key = `${info.agent}\u0000${info.conversationId ?? ""}`;
+    const fingerprint = runtimeReportFingerprint(proxyBase, info);
+    if (lastRuntimeReport.get(key) === fingerprint) return;
+    lastRuntimeReport.set(key, fingerprint);
+    try {
+        await reportRuntimeInfo(proxyBase, info);
+    } catch {
+        lastRuntimeReport.delete(key);
+    }
 }
 
 export async function forwardTool(proxyBase: string, conversationId: string, tool: string, args: unknown, signal?: AbortSignal): Promise<string> {

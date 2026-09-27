@@ -707,15 +707,28 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
         // omp never emits before_provider_headers — where pi stamps the
         // x-bili-plugin-* headers and reports runtime info (#955) — so omp's
         // report rides this per-request event instead: POST only, deduped per
-        // model switch, gated on toolsReady like pi's header path (ownership
-        // claim = ACP tools registered; round 1 rides wire mode).
-        function reportOmpRuntimeInfo(ctx: Ctx): void {
+        // config change, gated on toolsReady like pi's header path (ownership
+        // claim = ACP tools registered; round 1 rides wire mode). #1531: the
+        // report carries the session id as conversationId and is AWAITED
+        // before the request dispatches — omp sends no x-bili-plugin header,
+        // so the proxy resolves this report by the prompt_cache_key identity
+        // stamped below, and the first request must not outrun its own
+        // report. Worst hold = native-origin wait (bounded by the bootstrap
+        // readyTimeoutMs) + one POST (STATUS_TIMEOUT_MS) — well inside omp's
+        // handler timeout guardrail.
+        async function reportOmpRuntimeInfo(ctx: Ctx): Promise<void> {
             if (state.toolsReady !== true) return;
             const modelId = ctx.model?.id;
             if (typeof modelId !== "string" || modelId.length === 0) return;
+            // #1243 pattern: native bootstrap writes BILLION_CONTEXT_PROXY
+            // asynchronously — await the writer instead of racing it.
+            let proxyBase = proxyBaseForCtx(ctx);
+            if (proxyBase === undefined) proxyBase = await awaitNativeProxyOrigin();
+            if (proxyBase === undefined) return;
             const window = ctx.model?.contextWindow;
             const maxOut = (ctx.model as { maxTokens?: unknown } | undefined)?.maxTokens;
-            reportRuntimeInfoOnChange(proxyBaseForCtx(ctx), { agent, model: modelId, contextWindow: typeof window === "number" && window > 0 ? Math.floor(window) : undefined, maxOutput: typeof maxOut === "number" && maxOut > 0 ? Math.floor(maxOut) : undefined, baseURL: ctx.model?.baseUrl, source: "client-config" });
+            const sid = sessionIdOf(ctx);
+            await reportRuntimeInfoOnChange(proxyBase, { agent, model: modelId, contextWindow: typeof window === "number" && window > 0 ? Math.floor(window) : undefined, maxOutput: typeof maxOut === "number" && maxOut > 0 ? Math.floor(maxOut) : undefined, baseURL: ctx.model?.baseUrl, ...(sid !== undefined && sid.length > 0 ? { conversationId: sid } : {}), source: "client-config" });
         }
         pi.on("before_provider_request", async (event, ctx) => {
             // omp emits this per model request (but never before_provider_headers);
@@ -737,7 +750,15 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
             } catch (err) {
                 console.error(`bili-plugin(${agent}): tool registration failed (${err instanceof Error ? err.message : String(err)}) — riding wire mode for this request`);
             }
-            if (agent === "omp") reportOmpRuntimeInfo(ctx);
+            if (agent === "omp") {
+                // #1531: awaited so the report lands BEFORE this request's
+                // window resolution runs server-side; never throws (soft-fail).
+                try {
+                    await reportOmpRuntimeInfo(ctx);
+                } catch (err) {
+                    console.error(`bili-plugin(omp): runtime-info report failed (${err instanceof Error ? err.message : String(err)}) — riding legacy window resolution`);
+                }
+            }
             return stampPromptCacheKey(event, ctx, agent);
         });
         pi.on("session_start", (_event, ctx) => {
