@@ -39,14 +39,21 @@ export function isEligibleForLeanPack(sessionId: string, pct: number): boolean {
  *  session); every later call just reads the stamp. The assignment therefore
  *  never re-rolls when the knob moves: raising the pct admits not-yet-
  *  assigned sessions at their own hash, and rolling back to 0 stops NEW lean
- *  assignments without flipping any already-assigned session mid-life. */
+ *  assignments without flipping any already-assigned session mid-life.
+ *
+ *  The caller gates this on the session's FIRST request (stats.requests === 0):
+ *  only sessions born during/after the rollout can ever be assigned, so an
+ *  upgrade deploy or a removed explicit promptPack can never flip a live
+ *  conversation default→lean (#1408 review F1/F2). */
 export function resolveStickyPackAssignment(
     session: Pick<Session, "id" | "meta">,
     log: (level: string, msg: string) => void,
     env: NodeJS.ProcessEnv = process.env,
+    allowNewAssignment = true,
 ): "lean" | "default" {
     const stamped = session.meta.packCanary;
     if (stamped === "lean" || stamped === "default") return stamped;
+    if (!allowNewAssignment) return "default";
     const pct = promptPackCanaryPct(env);
     const pack: "lean" | "default" = isEligibleForLeanPack(session.id, pct) ? "lean" : "default";
     session.meta.packCanary = pack;

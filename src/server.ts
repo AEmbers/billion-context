@@ -1450,7 +1450,7 @@ async function handle(
             mergedCompressCfg = compressCfg;
             promptPackUnset = compressCfg.promptPack === undefined;
             resolvedCcrCfg = compressCfg.ccr;
-        resolvedImageCompressionCfg = compressCfg.imageCompression;
+            resolvedImageCompressionCfg = compressCfg.imageCompression;
             resolvedSearchPlanAware = compressCfg.search?.planAware === true;
             reqPrompts = resolveCompressPrompts(compressCfg);
             const surfaceRes = resolveCompressSurfaceDetailed(compressCfg);
@@ -1753,8 +1753,15 @@ async function handle(
         // "default", always wins and is never canaried). First such request
         // assigns the session a builtin pack by deterministic id-hash and stamps
         // it; later requests just read the stamp, so no re-roll ever happens.
+        // [review F1/F2] New assignments are birth-gated (only a session's
+        // VERY FIRST request may be assigned; stats.requests is incremented
+        // later in the pipeline). The STAMP read happens on every request —
+        // an assigned session keeps its pack forever regardless of the gate.
+        // Sessions that already ran (created before this rollout, or under an
+        // explicit promptPack the operator later removed) can never flip
+        // default→lean mid-conversation.
         if (promptPackUnset && mergedCompressCfg !== undefined) {
-            const assigned = resolveStickyPackAssignment(session, log);
+            const assigned = resolveStickyPackAssignment(session, log, process.env, session.stats.requests === 0);
             if (assigned === "lean") {
                 const canaryRes = resolveCompressSurfaceDetailed({ ...mergedCompressCfg, promptPack: "lean" });
                 reqSurface = canaryRes.surface;

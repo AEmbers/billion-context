@@ -305,6 +305,41 @@ function findSessionFile(dir: string, id: string): string | undefined {
     return undefined;
 }
 
+test("#1408 review F1/F2: a session that already ran is never canaried later (birth gate)", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bili-canary-store-"));
+    const store = new SessionStore({ dir, enabled: true, debounceMs: 0 });
+    const { eligible } = findIds("canary-t12", 10); // eligible at 10 ⊆ eligible at 100 (monotonic)
+    // Turn 1 under an EXPLICIT pack: no canary stamp is written, and
+    // stats.requests becomes 1 (the session has now "already run").
+    const h1 = await startHarness({ promptPack: "default" }, store);
+    try {
+        await sendChat(h1, eligible[0]);
+        await store.flushAll();
+    } finally {
+        await h1.close();
+    }
+    // Operator removes the explicit setting. pct=100 would assign lean to any
+    // UNASSIGNED session on hash alone — but this session already ran, so the
+    // birth gate (stats.requests === 0) must keep it on default: no live
+    // conversation ever flips default→lean on deploy or config removal.
+    const store2 = new SessionStore({ dir, enabled: true, debounceMs: 0 });
+    const h2 = await startHarness(undefined, store2);
+    try {
+        await withPct("100", async () => {
+            const body = await sendChat(h2, eligible[0]);
+            assert.equal(compressDescription(body), kernelDefaultCompressDescription(), "already-ran session stays default — no mid-conversation flip");
+        });
+        await store2.flushAll();
+        const file = findSessionFile(dir, eligible[0]);
+        assert.ok(file, "session file written");
+        const envelope = JSON.parse(readFileSync(file, "utf8"));
+        assert.equal(envelope.payload.meta.packCanary, undefined, "no canary stamp is ever written for an already-ran session");
+    } finally {
+        await h2.close();
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test("#1408: assignment survives a restart (disk round-trip)", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "bili-canary-store-"));
     const store = new SessionStore({ dir, enabled: true, debounceMs: 0 });
