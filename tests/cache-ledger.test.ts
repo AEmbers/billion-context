@@ -269,6 +269,25 @@ test("handleAcpCache full detail windows the text view past 512 lines (#1489)", 
     assert.equal(r.linesOmitted, 0);
 });
 
+test("legacy-trimmed sessions keep their historical deficit honest through the window (#1489)", () => {
+    const session = makeSession();
+    for (let i = 0; i < 600; i++) {
+        recordCacheSample(session, { at: T0 + 1000 * i, input: 100000, cached: 99000 });
+    }
+    const led = (session.metadata as Record<string, { lines: unknown[]; sampleSeq: number }> & object)["cacheLedger"]!;
+    led.lines.splice(0, 88);
+    assert.equal(led.lines.length, 512);
+    assert.equal(led.sampleSeq, 600);
+    for (let i = 0; i < 100; i++) {
+        recordCacheSample(session, { at: T0 + 1000 * (600 + i), input: 100000, cached: 99000 });
+    }
+    const r = buildSessionCacheReport(session);
+    assert.equal(r.lines.length, 612);
+    assert.equal(r.linesOmitted, 88);
+    const full = handleAcpCache(session, { detail: "full" });
+    assert.match(full, /LINE ITEMS \(last 512 of 700\):/);
+});
+
 test("handleAcpCache renders the grand ledger with a closing identity", () => {
     const session = makeSession();
     withView20(session);
