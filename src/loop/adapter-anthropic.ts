@@ -150,7 +150,7 @@ function buildTextDeltaEvent(index: number, text: string): Buffer {
     );
 }
 
-export function createAnthropicAdapter(requestBody: Record<string, unknown>, originalSystem?: AnthropicRequestBody["system"], notes?: string[]): CompressLoopAdapter {
+export function createAnthropicAdapter(requestBody: Record<string, unknown>, originalSystem?: AnthropicRequestBody["system"], notes?: string[], errorShape: "protocol" | "completion" = "protocol"): CompressLoopAdapter {
     const model = (requestBody.model as string) ?? undefined;
     let messageId: string | undefined;
     let clientIndex = 0;
@@ -305,7 +305,9 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
                         yield { kind: "meta", chunk: neutralizeStartUsage(eventStr), firstRoundOnly: true } as ParsedStreamEvent;
                     }
                 } else if (type === "ping") {
-                    yield { kind: "meta", chunk: rawBuf } as ParsedStreamEvent;
+                    // #1455: inert keep-alive — creates no client-side stream state, so it
+                    // must not bar the loop's zero-side-effect re-fetch (#413 gate).
+                    yield { kind: "meta", chunk: rawBuf, stateless: true } as ParsedStreamEvent;
                 } else if (type === "content_block_start") {
                     const upstreamIndex = (data.index as number) ?? 0;
                     const block = (data.content_block ?? {}) as Record<string, unknown>;
@@ -507,8 +509,23 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
             for (const index of openBlocks.splice(0)) {
                 parts.push(Buffer.from(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index })}\n\n`, "utf8"));
             }
-            parts.push(buildTextBlock(clientIndex++, `\n[acp-proxy: ${message}]\n`));
-            parts.push(buildTerminal("end_turn", 0, 0, 0));
+            // #1455: present the failure AS a failure. The legacy shape (error text block +
+            // end_turn + message_stop) looked like a normal completion — the incident's ZCode
+            // client consumed it as finishReason=stop and never spent one of its retry
+            // attempts, silently dropping the turn. Emit the protocol-native error event
+            // instead (same channel #721's plugin-mode pipe and #568's preflight path use):
+            // compliant SDKs throw on it, giving the client's own retry logic a chance. No
+            // terminal success frame after it — that would re-mask the failure.
+            // compat.streamErrorShape="completion" restores the legacy shape.
+            if (errorShape === "completion") {
+                parts.push(buildTextBlock(clientIndex++, `\n[acp-proxy: ${message}]\n`));
+                parts.push(buildTerminal("end_turn", 0, 0, 0));
+            } else {
+                parts.push(Buffer.from(
+                    `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "server_error", code: "upstream_error", message: `[acp-proxy: ${message}]` } })}\n\n`,
+                    "utf8",
+                ));
+            }
             return Buffer.concat(parts);
         },
     };
