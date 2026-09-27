@@ -465,7 +465,16 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     const katRaw = Number(process.env.BILI_KEEP_ALIVE_TIMEOUT_MS);
     const keepAliveTimeoutMs = Number.isInteger(katRaw) && katRaw > 0 ? katRaw : 5000;
     server.keepAliveTimeout = keepAliveTimeoutMs;
-    log("info", `[conn] keepAliveTimeout=${keepAliveTimeoutMs}ms`);
+    // #1529: terminal backstop for the clientError drain path. After the bail
+    // end(), a peer that never sends FIN holds the socket half-open on our
+    // side indefinitely (the kat reaper keys off completed responses; Node
+    // enables no SO_KEEPALIVE by default). Destroy after this much post-bail
+    // silence instead. Safe against the #1452 RST signature: resume() has
+    // drained the recv buffer for the whole window, so no unread residual
+    // bytes ride the destroy. 0 restores hold-until-peer-death (status quo).
+    const backstopRaw = Number(process.env.BILI_CLIENT_ERROR_BACKSTOP_MS);
+    const clientErrorBackstopMs = Number.isInteger(backstopRaw) ? Math.max(0, backstopRaw) : 30_000;
+    log("info", `[conn] keepAliveTimeout=${keepAliveTimeoutMs}ms clientErrorBackstop=${clientErrorBackstopMs}ms`);
     // #1452: per-connection lifecycle ledger — turns "which side closed this
     // socket, and why" from forensic inference into one debug line per
     // connection (zero payload content). reason=destroyed means nobody ended
@@ -480,6 +489,10 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
         errored: string | null;
         serverEndAt: number | null;
         peerFinAt: number | null;
+        /** #1529: the clientError drain disposition owns this socket (idempotence guard). */
+        drainArmed: boolean;
+        /** #1529: performance.now() when the post-bail backstop destroyed the socket (peer never FINned). */
+        backstopAt: number | null;
     }
     const connRecords = new Map<net.Socket, ConnRecord>();
     let connSeq = 0;
@@ -493,6 +506,8 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
             errored: null,
             serverEndAt: null,
             peerFinAt: null,
+            drainArmed: false,
+            backstopAt: null,
         };
         connRecords.set(socket, rec);
         // prefinish fires when end() fully flushes — never on destroy(). That
@@ -516,15 +531,17 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
             // budget rather than the end marker; the requests>0 guard keeps
             // request-less closes out (the reaper only arms post-response).
             const idleForBudget = rec.requests > 0 && rec.lastResponseEndAt !== null && now - rec.lastResponseEndAt >= keepAliveTimeoutMs;
-            const reason = rec.errored
-                ? `error(${rec.errored})`
-                : rec.peerFinAt !== null && (rec.serverEndAt === null || rec.peerFinAt < rec.serverEndAt)
-                    ? "peer-fin"
-                    : idleForBudget
-                        ? "idle-timeout"
-                        : rec.serverEndAt !== null
-                            ? "server-end"
-                            : "destroyed";
+            const reason = rec.backstopAt !== null
+                ? "clienterror-backstop"
+                : rec.errored
+                    ? `error(${rec.errored})`
+                    : rec.peerFinAt !== null && (rec.serverEndAt === null || rec.peerFinAt < rec.serverEndAt)
+                        ? "peer-fin"
+                        : idleForBudget
+                            ? "idle-timeout"
+                            : rec.serverEndAt !== null
+                                ? "server-end"
+                                : "destroyed";
             log("debug", `[conn#${rec.id}] ${rec.kind} closed reason=${reason} age=${now - rec.openedAt}ms reqs=${rec.requests}`);
         });
     });
@@ -542,12 +559,37 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     // legs: the MITM socket enters through this same server instance.
     server.on("clientError", (err, socket) => {
         if (socket.destroyed) return;
+        // Further parse failures on the same socket must not stack listeners
+        // or timers — the first disposition owns the socket (#1529).
+        const rec = socket instanceof net.Socket ? connRecords.get(socket) : undefined;
+        if (rec?.drainArmed) return;
+        if (rec) rec.drainArmed = true;
         log("warn", `[conn] clientError: ${err.message} — draining then closing`);
         socket.on("error", () => {});
         socket.resume();
         socket.once("end", () => socket.end());
         const bail = setTimeout(() => {
-            if (!socket.destroyed && !socket.writableEnded) socket.end();
+            if (socket.destroyed || socket.writableEnded) return;
+            socket.end();
+            // #1529: a peer that never FINs after our end() holds the socket
+            // half-open on our side indefinitely — the kat reaper keys off
+            // completed responses and Node enables no SO_KEEPALIVE. Terminal
+            // backstop: resume() has drained the recv buffer for the whole
+            // window, so the destroy carries no unread residual bytes and
+            // cannot surface as the #1452 RST signature.
+            if (clientErrorBackstopMs > 0) {
+                const backstop = setTimeout(() => {
+                    if (socket.destroyed || socket.readableEnded) return;
+                    if (rec) {
+                        rec.backstopAt = performance.now();
+                        log("warn", `[conn#${rec.id}] clientError backstop: no peer FIN ${clientErrorBackstopMs}ms after drain-end — destroying`);
+                    } else {
+                        log("warn", `[conn] clientError backstop: no peer FIN ${clientErrorBackstopMs}ms after drain-end — destroying`);
+                    }
+                    socket.destroy();
+                }, clientErrorBackstopMs);
+                backstop.unref?.();
+            }
         }, 300);
         bail.unref?.();
     });
