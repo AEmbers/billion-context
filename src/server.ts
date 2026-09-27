@@ -4314,6 +4314,40 @@ function beginPreflightHold(res: http.ServerResponse, prepared: Prepared, log: (
     return () => clearInterval(iv);
 }
 
+/** #1493: the OUTBOUND payload size (what would actually be sent upstream):
+ *  post-fold message content + wire overhead + images. Single source of truth —
+ *  BOTH preflightCompressIfNeeded (trigger floor + fit gates) and armFailureShrink
+ *  (no-usage arming) measure this, or they diverge (arming once counted the raw
+ *  JSON body → raw-history scale, firing preflight on a payload that fit).
+ *  Terms: #488 images are invisible to the kernel text model; #470 system+tools
+ *  ride the wire too; #767 images billed by resolved mode (buildForwardTarget fallback). */
+function outboundPayloadBreakdown(
+    prepared: Prepared,
+    opts: ProxyOptions,
+    route: ReturnType<typeof resolveUpstream>,
+    reqUrl: string,
+): { textEstimate: number; overheadEstimate: number; imageTokens: number; payloadEstimate: number; armEstimate: number } {
+    const billingUpstream = route?.rewrittenUrl ?? (/^https?:\/\//i.test(reqUrl) ? reqUrl : opts.upstream);
+    const imageTokens = imageTokensInRawBody(prepared.protocol, prepared.body, imageBillingFor(opts, billingUpstream));
+    // #1498-F2: a kernel-transform failure leaves processedMessages empty while
+    // the outbound IS the raw client body — measure that view instead of arming
+    // at wire overhead only (the mirror of localInputEstimate's fallback).
+    const msgs = prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages;
+    const textEstimate = estimateCoreMessages(msgs);
+    const overheadEstimate = estimateWireOverhead(prepared.protocol, prepared.body);
+    // #1498-F1: the arm value is not only a preflight floor — the kernel's
+    // tool-result truncation loop consumes it as its remaining-depth input, so
+    // an optimistic text estimate (chars/4 undercounts dense JSON/code by up to
+    // ~4x, #553) stops the loop one candidate early and re-breaks the #604
+    // relay rescue. The arming quantity is therefore floored by the text char
+    // bound, which never undershoots and deliberately does NOT count image
+    // base64 — image-heavy payloads keep the billing-accurate payloadEstimate
+    // (#1493) while text-dominated near-window payloads arm deep enough for the
+    // truncation loop to clear hidden upstream tolerances (#604).
+    const armEstimate = Math.max(textEstimate, estimateCoreMessagesUpper(msgs)) + overheadEstimate + imageTokens;
+    return { textEstimate, overheadEstimate, imageTokens, payloadEstimate: textEstimate + overheadEstimate + imageTokens, armEstimate };
+}
+
 async function preflightCompressIfNeeded(
     prepared: Prepared,
     runPrepare: () => Promise<Prepared>,
@@ -4340,19 +4374,11 @@ async function preflightCompressIfNeeded(
         : limit;
     // A fresh session (id rotated, e.g. after a model switch) has
     // lastInputTokens = 0 while still carrying a full raw history; size the
-    // trigger on the real post-fold payload too.
-    // #488: images are forwarded verbatim but invisible to the kernel's text model —
-    // add their cost to every size decision here (trigger, fit gates, self-heal).
-    // #767: bill them by the resolved mode (same upstream-URL fallback as buildForwardTarget).
-    const preflightReqUrl = req.url ?? "";
-    const billingUpstream = route?.rewrittenUrl ?? (/^https?:\/\//i.test(preflightReqUrl) ? preflightReqUrl : opts.upstream);
-    const imageTokens = imageTokensInRawBody(prepared.protocol, prepared.body, imageBillingFor(opts, billingUpstream));
-    const textEstimate = estimateCoreMessages(prepared.processedMessages);
-    // #470: system + tool definitions ride the wire too but are invisible to
-    // estimateCoreMessages — without them the trigger fires late (text alone
-    // under the window while the billed input already overflows it).
-    const overheadEstimate = estimateWireOverhead(prepared.protocol, prepared.body);
-    const payloadEstimate = textEstimate + overheadEstimate + imageTokens;
+    // trigger on the real post-fold payload too. outboundPayloadBreakdown is the
+    // single source of truth for that size (#1493) — armFailureShrink measures
+    // the same quantity so a no-usage failure can't arm lastInputTokens to raw-
+    // history scale and fire preflight on a payload that actually fits.
+    const { textEstimate, overheadEstimate, imageTokens, payloadEstimate } = outboundPayloadBreakdown(prepared, opts, route, req.url ?? "");
     // #553: anonymous requests resolve their session by prefix affinity. After
     // an ACP compression breaks the chain hash, the client's replay mints a NEW
     // session id (a fork) whose lastInputTokens is 0 — yet it carries the full
@@ -4445,7 +4471,7 @@ async function preflightCompressIfNeeded(
         // Headroom or a stale baseline can trigger preflight on a fitting payload.
         // Anonymous sessions need the conservative upper bound to prove that fit.
         if (payloadFitsWindow) {
-            log("warn", `[${session.id}] preflight target reached (~${tokenCount}) but the payload fits with no compressible ranges (~${payloadEstimate}/${limit}); forwarding as-is`);
+            log("info", `[${session.id}] preflight target reached (~${tokenCount}) but the payload fits with no compressible ranges (~${payloadEstimate}/${limit}); forwarding as-is`);
             return prepared;
         }
         if (unknownBaseline) {
@@ -4595,24 +4621,23 @@ async function preflightCompressIfNeeded(
  *  estimate RAISES the value only (a lower bound → compress earlier, never
  *  later), the kernel no-ops below its thresholds, and real usage overwrites
  *  it on success. markDirty is required because both call sites return before
- *  forward()'s trailing save — without it the arm is lost on restart. */
-function armFailureShrink(prepared: Prepared, log: (level: string, msg: string) => void, reason: string): void {
+ *  forward()'s trailing save — without it the arm is lost on restart.
+ *
+ *  #1493: `est` is now the OUTBOUND payload size (outboundPayloadBreakdown — post-
+ *  fold content + wire overhead + correctly-billed images), the SAME quantity the
+ *  preflight trigger/fit gate compare against. The old chars/4 count of the whole
+ *  JSON body over-counted base64 images and dense payloads to raw-history scale
+ *  (#857 tagged it "estimate" to shield evidence-grade consumers, but the preflight
+ *  floor + nudge baseline still consumed it). Measuring the real outbound size makes
+ *  the arm self-correcting: a payload that genuinely overflows the window still arms
+ *  high enough to break the deadlock; one that fits does not falsely cross the trigger. */
+function armFailureShrink(prepared: Prepared, log: (level: string, msg: string) => void, reason: string, est: number): void {
     const s = prepared.session;
-    let est: number;
-    try {
-        const text = typeof prepared.body === "string" ? prepared.body : prepared.body.toString("utf8");
-        // #1492: CJK-aware lower bound — chars/4 understated CJK by up to 4×,
-        // silently breaking the documented "lower bound → never later" contract.
-        est = defaultCountTokens(text);
-    } catch {
-        return; // non-text body — nothing to estimate
-    }
     if (!Number.isFinite(est) || est <= 0) return;
     if (est > s.stats.lastInputTokens) {
         s.stats.lastInputTokens = est;
-        // #857: the body includes base64 images, so this estimate carries the
-        // same b64/4 over-count as the preflight image floor — tag it so the
-        // evidence-grade consumers (self-heal, #496 gate, retraction) skip it.
+        // An estimate is not a usage report: tag it so evidence-grade consumers
+        // (self-heal, #496 gate, retraction) skip it.
         s.stats.lastInputTokensSource = "estimate";
         markDirty(s);
         log("warn", `[${s.id}] ${reason} with no usage report — armed emergency shrink with local estimate ${est} tokens`);
@@ -4847,7 +4872,7 @@ async function forward(
         recordUpstreamConnection(upstreamUrl, proxyUrl, error);
         // #604: a network-level failure (socket reset, timeout abort) also never
         // reports usage — arm the emergency shrink like the 5xx branch below.
-        if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure");
+        if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure", outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").armEstimate);
         // [#1343] no response means the attached full text never reached the model —
         // drop-and-log it (a corrective note surfaces on the next qualifying request).
         if (prepared && prepared.attachedRetrievals && prepared.attachedRetrievals.length > 0) dropRetrievals(prepared.session, prepared.attachedRetrievals.map((i) => i.ref), "upstream network failure");
@@ -5169,7 +5194,7 @@ async function forward(
         // inspectContextOverflow never matches 5xx (400/413 only), so the
         // overflow path above could not have handled this response.
         if (prepared?.session && upstream.status >= 500) {
-            armFailureShrink(prepared, log, `upstream ${upstream.status}`);
+            armFailureShrink(prepared, log, `upstream ${upstream.status}`, outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").armEstimate);
         }
         // #174: always log a non-2xx upstream response (status + request-id +
         // body snippet) — a 4xx/5xx with zero log trace is a diagnostic
