@@ -108,6 +108,14 @@ function compressArgs(refs) {
     return { content: [{ startId: start, endId: start, summary: "e2e fold: scripted compress round over the run-one filler message" }] };
 }
 
+// A chain-checkpoint carrier (<bili-chain ... /> #1421 step 3) rides as a
+// standalone trailing USER message on the openai wire. It is transport
+// metadata, not conversation: "last user message" semantics below (the
+// scripted directive queue source and the lastUserRef oracle) must skip it,
+// or the carrier masks the real prompt and the scripted compress never fires.
+const isChainCarrierMsg = (m) =>
+    m?.role === "user" && /^\s*\x3cbili-chain\s[\s\S]*\/\x3e\s*$/.test(String(flatContent(m.content)));
+
 function answerFor(convKey, firstUserText, body) {
     // Directives are parsed from the LAST user message: a `pi -p --continue`
     // follow-up run re-sends the whole history, and its fresh prompt must
@@ -118,7 +126,7 @@ function answerFor(convKey, firstUserText, body) {
     // the FIRST user message when the last one carries no markers — pi's
     // prompt always owns the last slot, so pi-lane behavior is unchanged.
     const messages = body.messages ?? [];
-    const users = messages.filter((x) => x?.role === "user");
+    const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x));
     // opencode fires a side-channel title-generation call (v1: separate
     // "Generate a title..." user message; v2: "You are a title generator"
     // system prompt) whose LAST user message is the real prompt — scripting
@@ -171,7 +179,7 @@ const server = http.createServer((req, res) => {
                 try { parsed = JSON.parse(raw || "{}"); } catch { /* noop */ }
                 if (process.env.FAKE_DUMP) { try { fs.appendFileSync(process.env.FAKE_DUMP, raw + "\n"); } catch { /* noop */ } }
                 const messages = parsed.messages ?? [];
-                const users = messages.filter((x) => x?.role === "user");
+                const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x));
                 const firstUserText = users.length > 0 ? flatContent(users[0].content) : "";
                 // ACP tag prefix of the LAST user message: lets suites cite the
                 // exact ref of a known message (e.g. run-one's filler) without
