@@ -102,7 +102,7 @@ async function postStreamResponses(proxyPort: number, upstreamPort: number): Pro
     });
 }
 
-const RUN_ITEM_TYPES = new Set(["reasoning", "function_call", "custom_tool_call", "function_call_output"]);
+const RUN_ITEM_TYPES = new Set(["reasoning", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"]);
 
 function isRunItem(it: Item): boolean {
     if (RUN_ITEM_TYPES.has(String(it.type))) return true;

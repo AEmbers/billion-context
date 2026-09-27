@@ -90,7 +90,7 @@ export function normalizeStrictEchoResponsesInput(
         const it = input[i] as { type?: unknown; role?: unknown } | undefined;
         const t = typeof it?.type === "string" ? it.type : undefined;
         // a call's output belongs to the same assistant turn as the call
-        const inRun = t === "reasoning" || t === "function_call" || t === "custom_tool_call" || t === "function_call_output" || (t === "message" && it?.role === "assistant");
+        const inRun = t === "reasoning" || t === "function_call" || t === "custom_tool_call" || t === "function_call_output" || t === "custom_tool_call_output" || (t === "message" && it?.role === "assistant");
         if (!inRun) { closeRun(); continue; }
         if (runStart < 0) runStart = i;
         if (t === "function_call" || t === "custom_tool_call") runCalls++;

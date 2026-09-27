@@ -251,6 +251,18 @@ describe("#1479 responses-wire strict-echo repair", () => {
         assert.equal(c.lines.length, 0);
     });
 
+    it("interleaved custom_tool_call_output stays in the run: no false orphan split (inRun completeness)", () => {
+        const input: Record<string, unknown>[] = [
+            { type: "reasoning", id: "rs-1", summary: [{ type: "summary_text", text: "t" }] },
+            { type: "function_call", id: "fc-1", call_id: "c1", name: "f", arguments: "{}" },
+            { type: "custom_tool_call_output", id: "co-1", call_id: "c1", output: "ok" },
+            { type: "function_call", id: "fc-2", call_id: "c2", name: "g", arguments: "{}" },
+        ];
+        const c = collector();
+        assert.equal(normalizeStrictEchoResponsesInput(input as never, true, c.log, "s1"), input);
+        assert.equal(c.lines.length, 0);
+    });
+
     it("orphaned run: injects exactly one blank reasoning at the run start, preserves everything else, no mutation", () => {
         const input = items();
         const c = collector();
