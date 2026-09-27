@@ -638,6 +638,19 @@ export async function checkForUpdate(opts: UpdateOptions, force = false): Promis
         firstCheckDone = true;
 
         if (!force && opts.advisoryActive?.()) {
+            // An active critical-bug advisory owns writable installs — its target
+            // version wins over "follow latest", otherwise the two loops fight
+            // over the install dir every cycle. Host-managed lanes are different:
+            // the advisory refuses to write them in place (#991), so their
+            // owner-channel self-heal (#1196) must keep running while deferred.
+            // A forced manual check still proceeds.
+            const dir = await findInstallDir(opts.packageName);
+            const managed = dir ? hostManagedInstall(dir) : undefined;
+            if (managed && dir) {
+                loggerLog("info", `[update] deferring to the advisory loop; ${managed.owner}-managed install keeps its owner-channel refresh (#991/#1196)`);
+                await refreshDshProfileCopy(dir, opts, process.env, loggerLog);
+                return;
+            }
             loggerLog("info", "[update] deferring to the advisory loop (an active critical-bug advisory owns this install)");
             return;
         }

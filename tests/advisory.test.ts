@@ -353,10 +353,17 @@ test("checkForUpdate: defers to an active advisory instead of fighting it", asyn
             await runAdvisoryCheck({ packageName: "billion-context", currentVersion: "1.2.3", advisoryUrl: "https://registry.test/billion-context-advisories/latest", installDir: fx.installDir }, true);
         });
         assert.notEqual(getAdvisoryState().active, undefined, "precondition: advisory is active");
-        const calls = await withFetch([], async () => {
-            await checkForUpdate({ packageName: "billion-context", currentVersion: "1.2.3", autoUpdate: true, advisoryActive: () => getAdvisoryState().active !== undefined }, false);
-        });
-        assert.equal(calls, 0, "normal loop must not touch the registry while the advisory owns the install");
+        const lines: string[] = [];
+        setLogCapture((_level, msg) => { lines.push(msg); });
+        try {
+            const calls = await withFetch([], async () => {
+                await checkForUpdate({ packageName: "billion-context", currentVersion: "1.2.3", autoUpdate: true, advisoryActive: () => getAdvisoryState().active !== undefined }, false);
+            });
+            assert.equal(calls, 0, "normal loop must not touch the registry while the advisory owns the install");
+        } finally {
+            setLogCapture(null);
+        }
+        assert.ok(lines.some((l) => l.includes("deferring to the advisory loop")), `must log the deferral decision itself, got: ${JSON.stringify(lines)}`);
     } finally {
         delete process.env.XDG_CACHE_HOME;
         _resetAdvisoryWatcherForTest();
