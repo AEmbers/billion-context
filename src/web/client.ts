@@ -497,7 +497,7 @@ export const WEB_CLIENT = `(function () {
         mini(parts, t("det.last_input"), (d.lastInputTokens || 0) > 0 ? fmtW(d.lastInputTokens) : null);
         parts.push("</div>");
         const mt = d.ledger && d.ledger.totals;
-        if (mt && mt.input > 0) parts.push('<div class="dim small" style="margin-top:8px">' + t("det.miss_split_line", { n: fmtW(mt.newContent || 0), c: fmtW(mt.compRepay || 0), x: fmtW(mt.ttlRepay || 0), pn: (((mt.newContent || 0) / mt.input) * 100).toFixed(1), pc: (((mt.compRepay || 0) / mt.input) * 100).toFixed(1), px: (((mt.ttlRepay || 0) / mt.input) * 100).toFixed(1) }) + "</div>");
+        if (mt && mt.input > 0) parts.push('<div style="margin-top:10px;font-size:12.5px;color:#57606a">' + t("det.miss_split_line", { n: fmtW(mt.newContent || 0), c: fmtW(mt.compRepay || 0), x: fmtW(mt.ttlRepay || 0), pn: (((mt.newContent || 0) / mt.input) * 100).toFixed(1), pc: (((mt.compRepay || 0) / mt.input) * 100).toFixed(1), px: (((mt.ttlRepay || 0) / mt.input) * 100).toFixed(1) }) + "</div>");
         if (d.contextWindow && d.contextWindow > 0) {
             const pct = Math.min(100, Math.round((d.contextTokens / d.contextWindow) * 100));
             const cls = pct >= 90 ? "bar-fill danger" : pct >= 70 ? "bar-fill warn" : "bar-fill";
