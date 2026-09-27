@@ -171,6 +171,7 @@ export type ParsedStreamEvent =
     | { kind: "usage"; inputTokens?: number; outputTokens?: number; cachedTokens?: number; creationTokens?: number }
     | { kind: "done"; finishReason?: string; suppressCompletion?: boolean; truncated?: boolean; thinking?: boolean }
     | { kind: "error"; message: string }
+| { kind: "diag"; level: "info" | "warn"; message: string }
     // #1455: stateless marks an inert keep-alive frame (anthropic ping) whose
     // forwarding creates no client-side stream state — a re-fetched response
     // may emit it again with no client-visible effect, so it must not bar the
@@ -473,8 +474,11 @@ export async function* runCompressLoop(
                         // A 200 SSE response can still carry a provider error.
                         // Preserve it as an error path; never let the absence of
                         // choices fall through to a synthetic successful stop.
-                        streamError = ev.message;
-                    } else if (ev.kind === "meta") {
+                    streamError = ev.message;
+                } else if (ev.kind === "diag") {
+                    ctx.log(ev.message);
+                    if (ev.level === "warn") loggerLog("warn", `[${ctx.session.id}] ${ev.message}`);
+                } else if (ev.kind === "meta") {
                         if (round === 1 || !ev.firstRoundOnly) {
                             yield fwd(ev.chunk, false, ev.stateless === true);
                         }
@@ -682,6 +686,14 @@ export async function* runCompressLoop(
             const proxyResults: { name: string; callId: string; result: string; arguments: string; signature?: string }[] = [];
 
             for (const call of allCalls) {
+                if (call.name.length === 0) {
+                    // #1484: upstream emitted a tool_call whose function.name never arrived. No
+                    // conforming client can render or execute a nameless call, and forwarding a
+                    // synthetic frame for it guarantees AI_InvalidResponseDataError at assembly.
+                    ctx.log(`[acp-loop] round ${round}: dropping nameless tool call (id=${call.callId || "-"}, argsLen=${call.arguments.length}) — upstream sent no function.name (#1484)`);
+                    loggerLog("warn", `[acp-loop] round ${round}: dropping nameless tool call (session ${ctx.session.id}, id=${call.callId || "-"}, argsLen=${call.arguments.length}) (#1484)`);
+                    continue;
+                }
                 if (isProxyToolFor(call.name, ctx.session, ctx.config)) {
                     let parsedArgs: Record<string, unknown>;
                     try {
