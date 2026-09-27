@@ -95,6 +95,27 @@ test("compaction archive: byRaw/byRef are pruned to live ids (stops the additive
     assert.ok(Object.keys(session.state.messageRefs.byRaw).length < before, "byRaw shrank after the boundary");
 });
 
+test("compaction archive: the boundary log reports the surviving raw-id count (#1513)", () => {
+    const { session, tail } = sessionWithActiveBlock();
+    const lines: string[] = [];
+    // Inline mirror of runShortenedTurn with a capturing logger (the helper
+    // applies the archive itself; a second apply finds no boundary left).
+    const activeBefore = new Set(session.state.blocks.filter((b) => b.active).map((b) => b.blockId));
+    markCompactionBoundary(session);
+    const core = createCore();
+    const config = defaultConfig(200000);
+    const turn = core.processTurn({ messages: tail, state: session.state, config, tokenCount: 9999, renderTags: "text-only" });
+    session.state = turn.state;
+    applyCompactionArchive(session, activeBefore, new Set(tail.map((m) => m.id)), (_level, msg) => lines.push(msg));
+    const boundary = lines.find((l) => l.includes("native compaction boundary"));
+    assert.ok(boundary, `boundary log emitted: ${JSON.stringify(lines)}`);
+    // prunedByRaw is a plain object — .length would render "undefined" (#1513)
+    assert.match(boundary!, /pruned ref maps to \d+ live raw id\(s\)/);
+    const live = Object.keys(session.state.messageRefs.byRaw).length;
+    assert.ok(boundary!.includes(`pruned ref maps to ${live} live raw id(s)`), `count matches survivors (${live}): ${boundary}`);
+    assert.ok(live > 0, "fixture keeps live refs so the count is meaningful");
+});
+
 test("compaction archive: decompress on an archived block gives an explicit reason, not silent/wrong content", () => {
     const { session, blockId, tail } = sessionWithActiveBlock();
     runShortenedTurn(session, tail, true);
