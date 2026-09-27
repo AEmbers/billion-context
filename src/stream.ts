@@ -277,15 +277,31 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
             rawReasons.length === 0 &&
             (diagnostics.kind === "empty-input" ||
                 (diagnostics.kind === "missing-content" && !(diagnostics.keys ?? []).includes("ranges")));
+        // #1502: a raw-string argument the lenient parser could not salvage
+        // (malformed-json/truncated; diag.length is set only for string inputs)
+        // used to arrive here pre-degraded to {} and inherit the empty-call
+        // verdict above. Name the real cause — syntax corruption, not emptiness —
+        // safe label: length only, no payload echo (#1454 pattern).
+        const argLen = diagnostics.length;
+        const argCorruption =
+            !isEmptyCall &&
+            argLen !== undefined &&
+            (diagnostics.kind === "malformed-json" || diagnostics.kind === "truncated");
         const guard = recordCompressFailure(
             ctx.session,
             `parse:${diagnostics.kind}:${diagnostics.invalidItems}:${rawReasons.slice(0, 3).join("|")}`,
             isEmptyCall
                 ? "An empty call fails identically on every retry — drop it instead of re-issuing."
-                : "Fix the argument shape against the format below instead of re-issuing the same malformed call.",
+                : argCorruption
+                    ? "Do not retry the same corrupt byte string — re-issue the call as one well-formed JSON object."
+                    : "Fix the argument shape against the format below instead of re-issuing the same malformed call.",
         );
         if (isEmptyCall) {
             return `[Compression FAILED: the call carried no content at all (kind=${diagnostics.kind}) — an empty compress() compresses nothing and can never succeed. Do NOT re-issue an empty call; if you meant to compress, put the non-empty 'content' array (elements {startId, endId, summary}) in that SAME single call.${guard}]`;
+        }
+        if (argCorruption) {
+            const truncNote = diagnostics.kind === "truncated" ? " (looks truncated)" : "";
+            return `[Compression FAILED: the call's arguments (${argLen} chars) were not parseable JSON${truncNote} — the intended content was lost and nothing was compressed. Re-issue the compress call as well-formed JSON: a single object with a non-empty 'content' array of {startId, endId, summary} elements.${guard}]`;
         }
         return `[Compression FAILED: no valid ranges parsed (kind=${diagnostics.kind}, dropped=${diagnostics.invalidItems}).${why} compress requires a non-empty 'content' array where each element is EITHER an object {startId, endId, summary} OR one line-form string whose first line is 'mNNNNN–mNNNNN optional topic' with the summary markdown on the following lines (a separate summary-only element right after a bare header line is also accepted). startId/endId are mNNNNN message refs from the conversation (call acp_status to see current refs).${compressibleSpanHint(ctx.session.state)} Re-issue the compress call with a valid content array.${guard}]`;
     }
