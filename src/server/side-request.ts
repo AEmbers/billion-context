@@ -205,6 +205,16 @@ export function extractWireTexts(protocol: WireProtocol, parsed: unknown): WireT
                         }
                     }
                     text = parts.join("\n");
+                } else if (c === null || c === undefined) {
+                    // [#1431 review F1] `content: null` is the canonical agent
+                    // shape for tool-calling assistant turns (our own e2e
+                    // fixtures send it; reasoning-only turns too). Treating it
+                    // as unrecognized abandoned the WHOLE view, so the anchor
+                    // was never recorded and auxiliary routing stayed silently
+                    // inert for exactly the sessions it targets. Mirror the
+                    // array branch: a message with no text parts contributes
+                    // an empty text (identity still rides role + position).
+                    text = "";
                 } else {
                     return undefined;
                 }

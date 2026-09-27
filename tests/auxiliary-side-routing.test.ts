@@ -285,6 +285,17 @@ test("#1309 e2e openai-wire: normal-budget auxiliary requests stay off the pipel
         sess = listSessions().find((s) => s.id === SID)!;
         assert.equal(maxRefNum(sess), 26, "overlapping short turn ran the pipeline and consumed one ref");
 
+        // [review F2] The ≤2 boundary itself, end-to-end: a TWO-message request
+        // carrying one recognized anchor message is a legitimate short turn —
+        // full pipeline, not side-passthrough (the ≤2 gate must not swallow it
+        // just because the latch is armed and no tools are present).
+        const shortTwo = [orig[23]!, { role: "user", content: "FOLLOWUP_two_message_boundary" }];
+        assert.equal(shortTwo.length, 2);
+        const rTwo = await post(openaiBody(shortTwo));
+        assert.equal(rTwo.status, 200);
+        sess = listSessions().find((s) => s.id === SID)!;
+        assert.equal(maxRefNum(sess), 27, "2-message overlapping turn ran the pipeline (boundary: overlap wins over the ≤2 gate)");
+
         // Full-history replay: original refs intact, exactly one new ref, no snowball.
         const replay = [...orig, tail, { role: "user", content: "MORE_99_payload" }];
         const r3 = await post(openaiBody(replay));
@@ -293,7 +304,7 @@ test("#1309 e2e openai-wire: normal-budget auxiliary requests stay off the pipel
         for (const [rawId, ref] of origRefs) {
             assert.equal(sess.state.messageRefs.byRaw[rawId], ref, `original ${ref} kept its ref across the aux storm`);
         }
-        assert.equal(maxRefNum(sess), 27, "replay assigns exactly one new ref — no snowball");
+        assert.equal(maxRefNum(sess), 28, "replay assigns exactly one new ref — no snowball");
         const refVals = Object.values(sess.state.messageRefs.byRef);
         assert.equal(new Set(refVals).size, refVals.length, "no duplicate refs");
         assert.ok(sess.state.blocks.some((b) => b.active), "turn-1 block still anchored after the replay");
