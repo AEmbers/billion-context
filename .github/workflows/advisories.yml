@@ -21,11 +21,14 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Install dependencies
+        run: npm ci
+
       - name: Validate advisory payload
-        working-directory: advisories
         run: |
           node -e "
-            const p = require('./package.json').billionContextAdvisories;
+            const semver = require('semver');
+            const p = require('./advisories/package.json').billionContextAdvisories;
             if (!p || p.schema !== 1 || !Array.isArray(p.advisories)) {
               console.error('invalid billionContextAdvisories payload (need schema:1 + advisories array)');
               process.exit(1);
@@ -33,6 +36,16 @@ jobs:
             for (const a of p.advisories) {
               if (!a.id || !a.affected || !a.target || !a.reason) {
                 console.error('advisory entry missing required fields:', JSON.stringify(a));
+                process.exit(1);
+              }
+              try {
+                new semver.Range(a.affected);
+              } catch {
+                console.error('advisory', a.id, ': invalid affected range', JSON.stringify(a.affected));
+                process.exit(1);
+              }
+              if (!semver.valid(a.target)) {
+                console.error('advisory', a.id, ': invalid target version', JSON.stringify(a.target));
                 process.exit(1);
               }
             }
@@ -45,7 +58,6 @@ jobs:
         run: |
           LATEST=$(npm view billion-context-advisories version 2>/dev/null || echo "0.0.0")
           LOCAL=$(node -p "require('./package.json').version")
-          BASE=$(node -e "console.log(process.argv[1] > process.argv[2] ? process.argv[1] : process.argv[2])" "$LOCAL" "$LATEST")
-          NEXT=$(node -e "const v=process.argv[1].split('.');v[2]=String(Number(v[2])+1);console.log(v.join('.'))" "$BASE")
+          NEXT=$(node -e "const s=require('semver');const base=s.gt(process.argv[1],process.argv[2])?process.argv[1]:process.argv[2];const v=base.split('.');v[2]=String(Number(v[2])+1);console.log(v.join('.'))" "$LOCAL" "$LATEST")
           npm version "$NEXT" --no-git-tag-version --allow-same-version
           npm publish --access public

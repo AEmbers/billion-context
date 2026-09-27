@@ -16,7 +16,7 @@ Machine-readable critical-defect advisories for [billion-context](https://github
    }
    ```
 
-2. Commit and push to `master`. CI (`.github/workflows/advisories.yml`) publishes a new patch version of this package to npm automatically.
+2. Commit and push to `master`. CI (`.github/workflows/advisories.yml`) validates the payload (schema, required fields, semver syntax of `affected`/`target`) and, when valid, publishes a new patch version of this package to npm automatically. An invalid document fails the build and is NOT published.
 
 ## Entry fields
 
@@ -37,3 +37,4 @@ Remove the entry (keep its id permanently retired) and publish again. Clients st
 - The document lives in the packument under the custom field `billionContextAdvisories`; clients validate `schema: 1` and fail open on anything they do not understand.
 - Trust domain: same npm registry as the tarballs bili already auto-installs. Publishing requires repo secret access (`NPM_TOKEN`) — only CI and maintainers can ship advisories.
 - This package must never contain code; it is data only.
+- When several entries match the local version, the FIRST listed entry applies (document order) — publish disjoint ranges or order entries by priority.
