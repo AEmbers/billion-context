@@ -626,6 +626,17 @@ export type ProxyOptions = {
      *  fully-present compression blocks instead of restarting at zero.
      *  Enable with `forkAdoption: true` or env BILI_FORK_ADOPTION=1. */
     forkAdoption?: boolean;
+    /** Resume-fork inheritance (#1486, default ON). Identified clients that
+     *  resume a conversation under a NEW client-provided session id (Claude
+     *  Code --resume forks a fresh UUID while replaying the full transcript)
+     *  would otherwise start at zero compression state and renumber refs from
+     *  m00001, so the model's stale citations mis-hit renumbered messages.
+     *  The proxy detects the resume by byte-exact full-history match against
+     *  tracked chains and inherits the parent's ref assignments, its
+     *  fully-present compression blocks (when forkAdoption is on), and the
+     *  derivedFrom lineage. Disable with `resumeInheritance: false` or env
+     *  BILI_RESUME_INHERITANCE=0. */
+    resumeInheritance?: boolean;
     /** Content detection of the bili→bili chain awareness: when an inbound
      *  request carries ACP artifacts (render tags / ACP tool-call history)
      *  but no x-bili-hop header and no local compression state for the
@@ -912,6 +923,7 @@ export function loadOptions(env: NodeJS.ProcessEnv = process.env): ProxyOptions 
         maskHosts: (env.BILI_LOG_MASK_HOSTS ?? (fileConfig.maskHosts === false ? "0" : "1")) !== "0",
         subagentSplit: (env.BILI_SUBAGENT_SPLIT ?? (fileConfig.subagentSplit === false ? "0" : "1")) !== "0",
         forkAdoption: (env.BILI_FORK_ADOPTION ?? (fileConfig.forkAdoption === true ? "1" : "0")) !== "0",
+        resumeInheritance: (env.BILI_RESUME_INHERITANCE ?? (fileConfig.resumeInheritance === false ? "0" : "1")) !== "0",
         chainContentDetection: (env.BILI_CHAIN_CONTENT ?? (fileConfig.chainContentDetection === false ? "0" : "1")) !== "0",
         stableSystemAnchor: (env.BILI_STABLE_SYSTEM_ANCHOR ?? (fileConfig.stableSystemAnchor === true ? "1" : "0")) !== "0",
     };
@@ -975,6 +987,9 @@ type FileConfig = {
      *  zero compression state. Default false; env BILI_FORK_ADOPTION=1/0
      *  wins over the file. */
     forkAdoption?: boolean;
+    /** Set `false` to disable resume-fork inheritance (#1486, default ON;
+     *  env BILI_RESUME_INHERITANCE=0 wins over the file). */
+    resumeInheritance?: boolean;
     /** Set `false` to disable the ACP-artifact content detection of the
      *  bili→bili chain awareness (#1086, advisory-only since #1357);
      *  x-bili-hop stays active either way.

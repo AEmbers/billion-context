@@ -45,7 +45,7 @@ import {
     subagentNamespace,
 } from "acp-kernel/wire";
 import { responsesToCoreWithToolImages as responsesToCore, patchResponsesInputWithToolImages as patchResponsesInput } from "./responses-tool-output.js";
-import { getSession, hasProcessedState, listSessions, type PendingRetrieval, type Session, initSessions, markDirty, flushAllSessions, acquireInFlight, releaseInFlight, totalInFlight, withSessionLock, markNativeCompactionBoundary, reconcileNativeCompactionBoundary, snapshotMessages, applyCompactionArchive, detectUnannouncedHistoryRewrite, markCompactionBoundary, ensureCanonicalId, storeEffectiveConfig, foldCoverage, REWRITE_MIN_INCOMING_TOTAL } from "./session.js";
+import { getSession, hasProcessedState, listSessions, peekSession, type PendingRetrieval, type Session, initSessions, markDirty, flushAllSessions, acquireInFlight, releaseInFlight, totalInFlight, withSessionLock, markNativeCompactionBoundary, reconcileNativeCompactionBoundary, snapshotMessages, applyCompactionArchive, detectUnannouncedHistoryRewrite, markCompactionBoundary, ensureCanonicalId, storeEffectiveConfig, foldCoverage, REWRITE_MIN_INCOMING_TOTAL } from "./session.js";
 import { detectStaleInstall } from "./update.js";
 import { PACKAGE_NAME, VERSION } from "./version.js";
 import {
@@ -100,7 +100,7 @@ import { observeResponsesTerminalState } from "./stream-terminal.js";
 import { emitPreflightError, emitStreamError } from "./stream-error.js";
 import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConversationHeader, codexTurnIdentity, instructionsFingerprintApplies, preferPromptCacheKeyIdentity, type ConversationIdentity } from "./session-id.js";
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
-import { maybeAdoptForkBlocks } from "./fork-adoption.js";
+import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
 import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats } from "./mitm.js";
@@ -1688,14 +1688,25 @@ async function handle(
         // upstream and credentials are mutable mid-conversation and MUST NOT
         // fork the session. Requests with no usable conversation signal
         // (empty / system-only) keep the explicit 400.
-        let anonAffinity: AnonymousAffinity | null = null;
-        if (!clientProvided) {
-            const anonMessages = protocol === "responses"
+        // #1486: the conversation message list for hashing — extracted lazily
+        // once per request and shared by the anonymous resolver below and the
+        // identified-session tracking / resume detection further down. Lazy on
+        // purpose: an unparseable body must not be touched on paths that never
+        // need it (the anonymous path keeps its exact historical behavior).
+        let affinityMessagesCache: unknown[] | null = null;
+        const affinityMessageList = (): unknown[] => {
+            if (affinityMessagesCache !== null) return affinityMessagesCache;
+            const raw = protocol === "responses"
                 ? ((parsed as { input?: unknown }).input ?? [])
                 : protocol === "google"
                   ? ((parsed as GoogleRequestBody).contents ?? [])
                   : ((parsed as { messages?: unknown }).messages ?? []);
-            anonAffinity = prefixAffinity.resolve(Array.isArray(anonMessages) ? anonMessages : []);
+            affinityMessagesCache = Array.isArray(raw) ? raw : [];
+            return affinityMessagesCache;
+        };
+        let anonAffinity: AnonymousAffinity | null = null;
+        if (!clientProvided) {
+            anonAffinity = prefixAffinity.resolve(affinityMessageList());
             if (!anonAffinity) {
                 log("warn", `400: no stable conversation identity on ${protocol} request → ${upstreamOrigin}; refusing to create a content-fingerprint session (#286)`);
                 res.writeHead(400, { "content-type": "application/json" });
@@ -1807,6 +1818,25 @@ async function handle(
                 via: anonAffinity.via,
                 ...(anonAffinity.lineage ? { lineage: anonAffinity.lineage } : {}),
             };
+        } else if (clientProvided) {
+            // #1486: track identified clients' chains too, so a resume that
+            // forks a NEW client id (cc --resume) can be matched back to its
+            // parent across requests and proxy restarts (the #499 snapshot
+            // carries these entries verbatim). Append-only discipline (#1075):
+            // side requests reuse the session id with FEWER messages — never
+            // shrink the tracked chain; a longer-or-equal payload extends or
+            // rewrites it (both are newer truth). A shrunken rewrite (native
+            // /compact echo) intentionally does NOT update the chain: that
+            // resume degrades to today's fresh-start behavior rather than
+            // risking a side-request clobber.
+            const fp = prefixAffinity.chainFingerprint(affinityMessageList());
+            if (fp) {
+                const tracked = prefixAffinity.peekChain(sessionId);
+                if (!tracked || fp.depth >= tracked.depth) {
+                    prefixAffinity.note(sessionId, fp.depth, fp.tailHash, fp.itemHashes, true);
+                    scheduleAffinityPersist();
+                }
+            }
         }
         // Fork block-adoption (#629): a fresh anonymous session born from a
         // mid-history fork inherits the parent's fully-present compression
@@ -1948,6 +1978,51 @@ async function handle(
             } catch (err) {
                 if (session.metadata.derivedLinkMissLogged !== true) session.metadata.derivedLinkMissLogged = true;
                 log("warn", `[${session.id}] [derived] parent link from ${derivedParent} failed (${String(err)}); continuing fresh (#1333)`);
+            }
+        }
+        // #1486: resume-fork inheritance for identified clients. Clients such
+        // as Claude Code fork a FRESH client-provided session id on --resume
+        // while replaying the full transcript; verbatim identity keying would
+        // start the resumed conversation at zero compression state and
+        // renumber refs from m00001, so the model's stale citations (its own
+        // earlier text cites old refs) either fail loudly or — worse —
+        // silently resolve onto DIFFERENT messages. Match the incoming history
+        // byte-exactly against tracked chains (head-anchored, survives proxy
+        // restarts via the persisted snapshot) and inherit: every ref
+        // assignment whose raw id is present (refs are content-addressed — a
+        // seeded ref always denotes the exact bytes the model saw), the
+        // fully-present blocks (forkAdoption-gated), and the derivedFrom
+        // lineage (decompress/search_context fall back to the parent chain).
+        // First request only: the state copy must land before processTurn
+        // assigns refs. A resolved explicit plugin-reported lineage above wins
+        // (gate on derivedFromSessionId); this content match is the fallback
+        // signal for clients that report no lineage.
+        if (clientProvided && !anonAffinity && session.stats.requests === 0 && session.metadata.derivedFromSessionId === undefined && opts.resumeInheritance !== false) {
+            const resume = prefixAffinity.findResumeParent(affinityMessageList(), sessionId);
+            if (resume) {
+                const resumeParent = peekSession(resume.sessionId) ?? getStore().loadSync(resume.sessionId, { protocol, upstreamOrigin }) ?? undefined;
+                if (resumeParent && resumeParent !== session) {
+                    session.metadata.derivedFrom = resumeParent.id;
+                    session.metadata.derivedFromSessionId = resumeParent.id;
+                    markDirty(session);
+                    log("info", `[${sessionId}] [resume-inheritance] ${resume.sharedDepth} msg(s) byte-exact prefix of ${resumeParent.id} — inheriting refs/blocks/lineage (#1486)`);
+                    try {
+                        maybeAdoptResume({
+                            session,
+                            parent: resumeParent,
+                            sharedDepth: resume.sharedDepth,
+                            protocol,
+                            parsed,
+                            upstreamOrigin,
+                            blocksEnabled: opts.forkAdoption === true,
+                            log,
+                        });
+                    } catch (err) {
+                        log("warn", `[resume-inheritance] failed (${String(err)}); continuing with fresh state (#1486)`);
+                    }
+                } else {
+                    log("info", `[${sessionId}] [resume-inheritance] matched tracked chain ${resume.sessionId} but the parent session is not loadable — starting fresh (#1486)`);
+                }
             }
         }
         // Responses, OpenAI-chat AND Anthropic-wire clients that send their
