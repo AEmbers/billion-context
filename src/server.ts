@@ -164,6 +164,16 @@ export function warnDroppedOpenaiParts(parsed: unknown, sessionId: string, log: 
 const NON_CONVERSATION_RELAY_WARN_CAP = 4096;
 const nonConversationRelayWarned = new Set<string>();
 
+// #1295 review F4: (declaration, URL-pinned protocol) pairs already warned
+// about a modelEndpointPatterns/explicitProtocol conflict — a misconfigured
+// client retries in tight loops, so one warn per pair per process suffices.
+// Bounded FIFO, same shape as nonConversationRelayWarned.
+const declPinConflictWarned = new Set<string>();
+
+export function getDeclPinConflictStats(): { total: number } {
+    return { total: declPinConflictWarned.size };
+}
+
 // #1073: a forward-proxy-style (absolute-form) request whose authority IS this
 // instance's own listening endpoint — e.g. a health prober configured with our
 // port as its http_proxy asking for http://127.0.0.1:<self-port>/__bili/health.
@@ -1150,7 +1160,14 @@ async function handle(
             protocol = null;
         } else if (route?.explicitProtocol !== undefined) {
             if (declared !== undefined && route.explicitProtocol !== (declared.wire === "commandcode" ? "openai" : declared.wire)) {
-                loggerLog("warn", `modelEndpointPatterns declares ${declared.match} as ${declared.wire} but provider config pins explicitProtocol ${route.explicitProtocol}; the explicit pin wins — check for a stale provider entry`);
+                const key = `${declared.match}|${route.explicitProtocol}`;
+                if (!declPinConflictWarned.has(key)) {
+                    declPinConflictWarned.add(key);
+                    if (declPinConflictWarned.size > NON_CONVERSATION_RELAY_WARN_CAP) {
+                        declPinConflictWarned.delete(declPinConflictWarned.values().next().value as string);
+                    }
+                    loggerLog("warn", `modelEndpointPatterns declares ${declared.match} as ${declared.wire} but the request URL pins explicit protocol ${route.explicitProtocol}; the URL pin wins — check for a stale declaration or a client baseUrl that pins the other family`);
+                }
             }
             protocol = route.explicitProtocol;
         } else if (declared !== undefined) {

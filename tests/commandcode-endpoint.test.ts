@@ -6,7 +6,7 @@ import test from "node:test";
 process.env.NODE_ENV = "test";
 
 import { defaultConfig } from "acp-kernel";
-import { getUnrecognizedPathStats, startServer, type ProxyOptions } from "../src/server.ts";
+import { getDeclPinConflictStats, getUnrecognizedPathStats, startServer, type ProxyOptions } from "../src/server.ts";
 import { _setStoreForTest, SessionStore } from "../src/persist.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 import { listSessions } from "../src/session.ts";
@@ -239,6 +239,16 @@ test("#1295: declaration drives classification for known families (declared → 
         const undeclared = await fetch(`http://127.0.0.1:${proxy.address().port}/bili/http://127.0.0.1:${upstreamPort}/other/probe-path`, { method: "POST", headers: { "content-type": "application/json", "x-acp-session": "f6-undeclared-probe" }, body });
         await undeclared.text();
         assert.ok(getUnrecognizedPathStats().total > t0, "undeclared path still counted as unrecognized");
+        // review F4: a request URL that pins an explicit protocol conflicting
+        // with the declaration warns ONCE per (declaration, pin) pair — a
+        // misconfigured client retries in tight loops and must not spam.
+        const c0 = getDeclPinConflictStats().total;
+        const pinnedBody = JSON.stringify({ model: MODEL, max_tokens: 64, stream: true, messages: [{ role: "user", content: "hi" }] });
+        for (const sess of ["f4-pin-1", "f4-pin-2"]) {
+            const rp = await fetch(`http://127.0.0.1:${proxy.address().port}/bili/anthropic/http://127.0.0.1:${upstreamPort}/custom/complete`, { method: "POST", headers: { "content-type": "application/json", "x-acp-session": sess }, body: pinnedBody });
+            await rp.text();
+        }
+        assert.equal(getDeclPinConflictStats().total, c0 + 1, "conflict warn fires once per pair, not per request");
     } finally {
         proxy.close();
         await once(proxy, "close");
