@@ -193,6 +193,18 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .block-item .topic { font-weight: 600; font-size: 13px; flex: 1; }
 .block-item .meta { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
 .block-item .body { padding: 0 16px 12px 78px; font-size: 12.5px; color: var(--text-muted); white-space: pre-wrap; }
+.block-item .body.md { white-space: normal; }
+.block-item .body.md p { margin: 6px 0; }
+.block-item .body.md h2, .block-item .body.md h3, .block-item .body.md h4 { margin: 12px 0 6px; line-height: 1.35; color: var(--text); }
+.block-item .body.md h2 { font-size: 13.5px; } .block-item .body.md h3 { font-size: 13px; } .block-item .body.md h4 { font-size: 12.5px; }
+.block-item .body.md ul, .block-item .body.md ol { margin: 6px 0; padding-left: 22px; }
+.block-item .body.md li { margin: 2px 0; }
+.block-item .body.md pre { background: var(--bg-muted); border: 1px solid var(--border-soft); border-radius: 8px; padding: 8px 10px; overflow-x: auto; font-size: 11.5px; white-space: pre; max-height: 320px; }
+.block-item .body.md code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-muted); padding: 1px 5px; border-radius: 5px; }
+.block-item .body.md pre code { background: none; padding: 0; }
+.block-item .body.md blockquote { margin: 6px 0; padding: 5px 10px; border-left: 3px solid var(--border); background: var(--bg-muted); border-radius: 0 8px 8px 0; }
+.block-item .body.md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.block-item .body.md strong { color: var(--text); }
 
 .handoff { font-size: 13.5px; line-height: 1.65; }
 .handoff h1, .handoff h2, .handoff h3, .handoff h4 { margin: 18px 0 8px; line-height: 1.3; }

@@ -446,6 +446,66 @@ export const WEB_CLIENT = `(function () {
         }
         return segs;
     }
+    function renderBlockMd(md) {
+        // #1426: render expanded compression-block summaries as markdown.
+        // No regex literals with backslashes allowed here (WEB_CLIENT template).
+        const lines = md.split("\\n");
+        const html = [];
+        let para = [], list = null, quote = [], pre = [];
+        function inline(s) {
+            let out = "", i = 0;
+            while (i < s.length) {
+                const ch = s[i];
+                if (ch === "\`") {
+                    const j = s.indexOf("\`", i + 1);
+                    if (j > -1) { out += "<code>" + escapeHtml(s.slice(i + 1, j)) + "</code>"; i = j + 1; continue; }
+                } else if (ch === "*" && s[i + 1] === "*") {
+                    const j = s.indexOf("**", i + 2);
+                    if (j > i + 1) { out += "<strong>" + escapeHtml(s.slice(i + 2, j)) + "</strong>"; i = j + 2; continue; }
+                }
+                out += escapeHtml(ch); i++;
+            }
+            return out;
+        }
+        function fP() { if (para.length) { html.push("<p>" + para.map(inline).join("<br>") + "</p>"); para = []; } }
+        function fL() { if (list) { html.push("</" + list + ">"); list = null; } }
+        function fQ() { if (quote.length) { html.push("<blockquote>" + quote.map(inline).join("<br>") + "</blockquote>"); quote = []; } }
+        function fPr() { if (pre.length) { html.push("<pre><code>" + escapeHtml(pre.join("\\n")) + "</code></pre>"); pre = []; } }
+        for (const raw0 of lines) {
+            let l = raw0;
+            while (l && (l[l.length - 1] === " " || l[l.length - 1] === "\\t")) l = l.slice(0, -1);
+            let indent = 0;
+            while (indent < l.length && (l[indent] === " " || l[indent] === "\\t")) indent++;
+            const l2 = l.slice(indent);
+            if (!l2) { fP(); fL(); fQ(); continue; }
+            if (indent >= 4) { fP(); fL(); fQ(); pre.push(l2); continue; }
+            if (l2.length >= 3 && l2.split("").every((c) => c === "-")) { fP(); fL(); fQ(); html.push("<hr>"); continue; }
+            if (l2[0] === "#" && l2.indexOf(" ") > -1) {
+                let n = 0; while (n < l2.length && l2[n] === "#") n++;
+                const lvl = Math.min(n, 4);
+                fP(); fL(); fQ();
+                html.push("<h" + lvl + ">" + inline(l2.slice(n).trimStart()) + "</h" + lvl + ">");
+                continue;
+            }
+            if (l2[0] === ">" && (l2.length === 1 || l2[1] === " ")) { fP(); fL(); quote.push(l2.slice(1).trimStart()); continue; }
+            if (l2[0] === "-" || l2[0] === "*") {
+                fP(); fQ();
+                if (list !== "ul") { fL(); html.push("<ul>"); list = "ul"; }
+                html.push("<li>" + inline(l2.slice(1).trimStart()) + "</li>");
+                continue;
+            }
+            const dot = l2.indexOf(". ");
+            if (dot > 0 && dot < 5 && l2.slice(0, dot).split("").every((c) => c >= "0" && c <= "9")) {
+                fP(); fQ();
+                if (list !== "ol") { fL(); html.push("<ol>"); list = "ol"; }
+                html.push("<li>" + inline(l2.slice(dot + 2)) + "</li>");
+                continue;
+            }
+            fL(); fQ(); para.push(l2);
+        }
+        fP(); fL(); fQ(); fPr();
+        return html.join("");
+    }
     function renderHandoffMd(md) {
         const lines = md.split("\\n");
         let start = 0;
@@ -576,7 +636,7 @@ export const WEB_CLIENT = `(function () {
                 const badge = b.active
                     ? '<span class="badge ok">' + t("det.block_active") + "</span>"
                     : '<span class="badge disk">' + t("det.block_inactive") + "</span>";
-                parts.push('<details class="block-item"><summary><span class="bid">' + escapeHtml(b.blockId) + '</span>' + badge + '<span class="topic">' + escapeHtml(blockTopic(b)) + '</span><span class="meta">T' + String(b.tier) + " · " + fmtW(b.compressedTokens) + " · " + timeAgo(b.createdAt) + (refRange ? " · " + escapeHtml(refRange) : "") + '</span><button class="btn sm blk-copy" data-bi="' + i + '" style="margin-left:auto">' + t("common.copy") + '</button></summary><div class="body">' + escapeHtml(b.summary) + "</div></details>");
+                parts.push('<details class="block-item"><summary><span class="bid">' + escapeHtml(b.blockId) + '</span>' + badge + '<span class="topic">' + escapeHtml(blockTopic(b)) + '</span><span class="meta">T' + String(b.tier) + " · " + fmtW(b.compressedTokens) + " · " + timeAgo(b.createdAt) + (refRange ? " · " + escapeHtml(refRange) : "") + '</span><button class="btn sm blk-copy" data-bi="' + i + '" style="margin-left:auto">' + t("common.copy") + '</button></summary><div class="body md">' + renderBlockMd(b.summary || "") + "</div></details>");
             });
         }
         parts.push("</div></div>");
