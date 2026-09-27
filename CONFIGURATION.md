@@ -107,6 +107,21 @@ Top-level keys that control how the proxy listens and behaves globally.
 - **Status:** ACTIVE
 - **Description:** Forward every request to the upstream **without** compression, tool injection, or nudging. Equivalent to `ACP_PASSTHROUGH=1`. Handy for A/B comparison against the uncompressed baseline.
 
+### `compactionOptIn`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** ACTIVE
+- **Description:** `#1392` — opt a **non-http(s) baseUrl provider** (e.g. pi-claude-bridge's literal `"claude-bridge"`) into bili's compaction-ownership consideration. The entry's KEY is the provider id — a non-URL key is inert for routing (longest-prefix matching never hits it), it only feeds the launcher-exported `BILI_NON_HTTP_PROVIDERS` allowlist the pi/omp plugin consults when it would otherwise veto a non-http baseUrl outright (#1383). Opt-in only widens the candidate set: compaction is still cancelled only on positive carriage evidence (the plugin stamped the session, or `/__bili/plugin/status` confirms the proxy carries it). Env equivalent: `BILI_NON_HTTP_PROVIDERS=a,b` (union with the file, deduped). Only meaningful under `bili pi` / `bili omp` launchers or a directly-installed plugin.
+
+  ```jsonc
+  {
+    "providers": {
+      "claude-bridge": { "compactionOptIn": true }
+    }
+  }
+  ```
+
 ### `compat`
 
 - **Type:** `{ roles?: Record<string, string> }`
@@ -896,7 +911,7 @@ Where upstreams are discovered from (read-only):
 
 The launcher prefers file-free injection (env vars > CLI flags/extension APIs > generated files; see TECHNICAL-NOTES.md, “Injection priority” section). Where a file is unavoidable it is a **copy** — the real config is never edited:
 
-- **pi / omp** — nothing is written (#535): provider baseUrls ride the `BILI_PROVIDER_REWRITES` env manifest consumed by the bili extension at load (`registerProvider`), and auto native compaction is cancelled in-extension (`session_before_compact`; omp distinguishes auto vs manual via the `auto_compaction_start` announcement, #851) — but only on positive evidence the proxy actually carries the conversation (the plugin stamped `x-bili-plugin-conversation` for this session id, or omp's identity register succeeded, or `/__bili/plugin/status?conversationId=` confirms it); non-http(s) provider baseUrls (e.g. pi-claude-bridge's literal `"claude-bridge"`) are never cancelled by default, so their own compaction takeover keeps working (#1382); a provider can be opted in via `plugin.nonHttpProviders` (config file) or `BILI_NON_HTTP_PROVIDERS` (env, comma-separated) — but opt-in only widens the candidate set, so even an opted-in provider is cancelled only on the same positive carriage evidence above (#1392) — manual `/compact` stays user-owned either way. The real `~/.pi` / `~/.omp` homes are untouched.
+- **pi / omp** — nothing is written (#535): provider baseUrls ride the `BILI_PROVIDER_REWRITES` env manifest consumed by the bili extension at load (`registerProvider`), and auto native compaction is cancelled in-extension (`session_before_compact`; omp distinguishes auto vs manual via the `auto_compaction_start` announcement, #851) — but only on positive evidence the proxy actually carries the conversation (the plugin stamped `x-bili-plugin-conversation` for this session id, or omp's identity register succeeded, or `/__bili/plugin/status?conversationId=` confirms it); non-http(s) provider baseUrls (e.g. pi-claude-bridge's literal `"claude-bridge"`) are never cancelled by default, so their own compaction takeover keeps working (#1382); a provider can be opted in via its entry in the `providers` table — key = the provider id (a non-URL key is inert for routing), field `"compactionOptIn": true` — or `BILI_NON_HTTP_PROVIDERS` (env, comma-separated) — but opt-in only widens the candidate set, so even an opted-in provider is cancelled only on the same positive carriage evidence above (#1392) — manual `/compact` stays user-owned either way. The real `~/.pi` / `~/.omp` homes are untouched.
 - **opencode** — a temp `opencode.json` pointed at by `OPENCODE_CONFIG` (removed when the client exits), with `/bili/`-rewritten plaintext baseURLs **plus the thin plugin appended** (`/acp` + `/acp-cache` commands). On OpenCode 1.x the `opencode-acp` entries are stripped from the clone (the host must not load it armed) and the thin plugin imports that same package as a library instead, gated on legacy sessions; the first stripped spec rides along via `BILI_OPENCODE_ACP_SPEC` so the bridge imports the exact copy the host would have loaded (#920). Relative local plugin specs (`./x`, `../x`) are re-anchored to absolute paths in the clone — opencode resolves them against the declaring config file's dir, which the clone no longer is (#826).
 - **hermes** — nothing is written (#535): its httpx stack rides `HTTPS_PROXY` (+ `SSL_CERT_FILE` → `combined-ca.pem`; legacy `HERMES_CA_BUNDLE` stays set for older builds, #1375) — https via CONNECT cert-MITM, plain-http via absolute-form forward-proxy requests. If no providers are configured, the launcher prints a warning and hermes runs **unproxied** (compression off).
 - **dsh** — split by destination (#535): dsh's fetch stack honors proxy envs except for an unconditional loopback bypass, so **non-loopback** upstreams ride `HTTPS_PROXY` (cert MITM) / `HTTP_PROXY` (absolute-form forward-proxy requests) with `SSL_CERT_FILE` → `combined-ca.pem`; only **loopback** upstreams keep the persistent overlay `DSH_HOME` (`~/.dsh-bili`) with a rewritten `settings.yaml` routing them through `/bili/`. `profiles/`, credentials and sessions are symlinked through; the real `~/.dsh` is never touched. The built-in `deepseek-official` route is captured separately via `$DEEPSEEK_BASE_URL` (dsh resolves `settings llm-deepseek.baseURL` ?? env ?? default, so a user setting wins and the env is the zero-config fallback) — with no custom providers the deepseek route is still proxied out of the box.

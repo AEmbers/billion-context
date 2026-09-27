@@ -921,17 +921,23 @@ export function resolveMitmDomains(env: NodeJS.ProcessEnv): string[] {
     ]);
 }
 
-/** #1392: opted-in non-http(s) baseUrl providers — config file
- *  `plugin.nonHttpProviders` (keys whose value is strictly `true`) ∪
+/** #1392: opted-in non-http(s) baseUrl providers — providers-table entries
+ *  (key = provider id) with `compactionOptIn: true` ∪
  *  BILI_NON_HTTP_PROVIDERS, deduped. Exported so launchers can mirror the list
  *  to the client env (BILI_NON_HTTP_PROVIDERS) exactly like resolveMitmDomains. */
 export function resolveNonHttpProviders(env: NodeJS.ProcessEnv = process.env): string[] {
     const out = new Set<string>();
-    const fileObj = loadConfigFile().plugin?.nonHttpProviders;
-    if (fileObj && typeof fileObj === "object" && !Array.isArray(fileObj)) {
-        for (const [id, v] of Object.entries(fileObj)) {
+    // #1392: the opt-in lives in the existing providers table — the KEY is the
+    // provider id (a non-URL key is inert for routing: longest-prefix matching
+    // never hits it), and the entry's compactionOptIn===true opts it in. Only
+    // meaningful for providers whose baseUrl is not http(s); widening the
+    // candidate set is all it does — carriage evidence still decides.
+    const providers = loadConfigFile().providers;
+    if (providers && typeof providers === "object") {
+        for (const [id, v] of Object.entries(providers)) {
+            if (!v || typeof v !== "object" || Array.isArray(v)) continue;
             const key = id.trim();
-            if (key.length > 0 && v === true) out.add(key);
+            if (key.length > 0 && (v as Record<string, unknown>).compactionOptIn === true) out.add(key);
         }
     }
     for (const id of splitCsv(env.BILI_NON_HTTP_PROVIDERS)) {
@@ -979,7 +985,6 @@ type FileConfig = {
      *  opted in iff its value is strictly `true`. Only widens the compaction-ownership
      *  candidate set — carriage evidence (carriedSids / status probe) still decides, so
      *  unrouted traffic never cancels and #1382 cannot recur for a new provider class. */
-    plugin?: { nonHttpProviders?: Record<string, unknown> };
     /** Set `false` to log real (non-public) target hosts instead of the
      *  `<private-host>` placeholder (#897; env BILI_LOG_MASK_HOSTS=0 wins). */
     maskHosts?: boolean;
