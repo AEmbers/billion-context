@@ -27,7 +27,7 @@ import { configFile as defaultConfigFile } from "./paths.js";
 import { log as loggerLog } from "./logger.js";
 import { createAutoRestartHandler } from "./restart.js";
 import { checkForUpdate, startAutoUpdate } from "./update.js";
-import { startAdvisoryWatcher, getAdvisoryState } from "./advisory.js";
+import { startAdvisoryWatcher, getAdvisoryState, advisoryDeferring } from "./advisory.js";
 import { resolveProxy } from "./upstream-proxy.js";
 import { runMcpStdio } from "./mcp.js";
 import { PLUGIN_AGENTS, isPluginAgent, pluginInstall, pluginRemove, pluginStatusAll, pluginUpdate, type PluginAgent } from "./plugin-install.js";
@@ -586,7 +586,10 @@ export async function main(): Promise<void> {
             autoUpdate: true,
             resolveProxy: (url) => resolveProxy(opts.routes, opts.proxy, url, opts.proxyFallback),
             updateTag: opts.updateTag,
-            advisoryActive: () => getAdvisoryState().active !== undefined,
+            // F2 (review): an advisory whose target cannot be resolved on the
+            // registry must not stall the normal self-update loop forever —
+            // advisoryDeferring() goes false while lastError says "cannot resolve".
+            advisoryActive: advisoryDeferring,
             onStaleInstall: createAutoRestartHandler({
                 enabled: opts.autoRestartOnUpdate,
                 packageName: PACKAGE_NAME,

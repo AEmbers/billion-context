@@ -33,6 +33,7 @@ jobs:
               console.error('invalid billionContextAdvisories payload (need schema:1 + advisories array)');
               process.exit(1);
             }
+            let targets = [];
             for (const a of p.advisories) {
               if (!a.id || !a.affected || !a.target || !a.reason) {
                 console.error('advisory entry missing required fields:', JSON.stringify(a));
@@ -46,6 +47,21 @@ jobs:
               }
               if (!semver.valid(a.target)) {
                 console.error('advisory', a.id, ': invalid target version', JSON.stringify(a.target));
+                process.exit(1);
+              }
+              targets.push(a.target);
+            }
+            // Existence gate (review F2a): an advisory whose target is not
+            // resolvable on npm would wedge every affected install — the
+            // forced install re-fails each cycle, the escape-hatch command in
+            // the web banner is uninstallable, and the deferral would stall
+            // normal auto-updates. Fail the publish BEFORE shipping it.
+            const { execFileSync } = require('child_process');
+            for (const t of targets) {
+              try {
+                execFileSync('npm', ['view', 'billion-context@' + t, 'version'], { stdio: 'pipe' });
+              } catch {
+                console.error('advisory target', t, 'does not exist on the npm registry — publish the fix release first');
                 process.exit(1);
               }
             }

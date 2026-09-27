@@ -65,6 +65,19 @@ export function getAdvisoryState(): AdvisoryState {
     return state;
 }
 
+/** True while the advisory target cannot be resolved on the registry — the
+ *  forced-install escape hatch is uninstallable (owner typo, unpublished
+ *  fix). In that state the advisory must NOT defer the normal self-update
+ *  loop (#1196 wedge class, review F2): the web banner falls back to
+ *  @latest and the normal loop keeps the install alive. */
+export function advisoryDeferring(): boolean {
+    return state.active !== undefined && !cannotResolveTarget(state.lastError);
+}
+
+export function cannotResolveTarget(err: string | undefined): boolean {
+    return typeof err === "string" && err.includes("cannot resolve");
+}
+
 /** Test seam: clear state, warn dedupe, and stop the timer. */
 export function _resetAdvisoryWatcherForTest(): void {
     state = {};

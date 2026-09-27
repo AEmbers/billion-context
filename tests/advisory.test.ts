@@ -12,6 +12,8 @@ import {
     runAdvisoryCheck,
     getAdvisoryState,
     _resetAdvisoryWatcherForTest,
+    advisoryDeferring,
+    cannotResolveTarget,
     type AdvisoryEntry,
 } from "../src/advisory.ts";
 import { checkForUpdate, _resetAdvisoryRefusalWarnsForTest } from "../src/update.ts";
@@ -241,6 +243,42 @@ test("runAdvisoryCheck: misconfigured advisory (target == current) fails loudly,
         assert.equal(JSON.parse(readFileSync(path.join(fx.installDir, "package.json"), "utf-8")).version, "1.2.3");
         assert.match(getAdvisoryState().lastError ?? "", /misconfigured advisory/);
         assert.equal(warns.filter((m) => m.includes("misconfigured advisory")).length, 1, "persistent misconfiguration must log once, not every cycle");
+    } finally {
+        setLogCapture(null);
+        delete process.env.XDG_CACHE_HOME;
+        _resetAdvisoryWatcherForTest();
+        _resetAdvisoryRefusalWarnsForTest();
+        rmSync(fx.root, { recursive: true, force: true });
+    }
+});
+
+test("runAdvisoryCheck: unresolvable target (owner typo) — install untouched, banner targetFailed, deferral released, warns once", async () => {
+    // F1/F2 (review): the target version does not exist on the registry.
+    // The fail-safe guard (update.ts "cannot resolve") must fire, the install
+    // must stay untouched, the state must mark the target failed for the web
+    // banner (@latest fallback), and — critically — advisoryDeferring() must
+    // go FALSE so the normal self-update loop is not stalled forever.
+    const fx = makeFixture();
+    process.env.XDG_CACHE_HOME = fx.cacheDir;
+    _resetAdvisoryWatcherForTest();
+    _resetAdvisoryRefusalWarnsForTest();
+    const warns: string[] = [];
+    try {
+        setLogCapture((_level, msg) => { warns.push(msg); });
+        const doc = advisoryDoc([{ id: "bc-test-009", affected: ">=1.2.0", target: "9.9.9", reason: "escape-hatch version unpublished (typo)" }]);
+        for (let i = 0; i < 2; i++) {
+            // No /billion-context/9.9.9 version-doc route: the registry has no such version.
+            await withFetch([{ match: /billion-context-advisories/, body: doc }], async () => {
+                await runAdvisoryCheck({ packageName: "billion-context", currentVersion: "1.2.3", advisoryUrl: "https://registry.test/billion-context-advisories/latest", installDir: fx.installDir }, true);
+            });
+        }
+        assert.equal(JSON.parse(readFileSync(path.join(fx.installDir, "package.json"), "utf-8")).version, "1.2.3", "install untouched when the target cannot be resolved");
+        const st = getAdvisoryState();
+        assert.ok(st.active, "advisory stays visible (banner) — the affected version is still affected");
+        assert.match(st.lastError ?? "", /cannot resolve 9\.9\.9 on the registry/, "fail-safe reason recorded");
+        assert.equal(cannotResolveTarget(st.lastError), true);
+        assert.equal(advisoryDeferring(), false, "normal self-update loop must NOT be deferred by an uninstallable target (#1196 wedge class)");
+        assert.equal(warns.filter((m) => m.includes("cannot resolve 9.9.9")).length, 1, "warned once per process across cycles");
     } finally {
         setLogCapture(null);
         delete process.env.XDG_CACHE_HOME;
