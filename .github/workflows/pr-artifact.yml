@@ -38,7 +38,8 @@ jobs:
                   # release drift guards), sorts below every release, and the -pr
                   # prerelease suffix keeps it unresolvable by any semver range —
                   # builds are addressed by their full version string. run_number is
-                  # repo-wide unique and monotonic (gaps OK); -a<attempt> makes a
+                  # unique+monotonic per workflow (gaps OK) and this workflow is the
+                  # sole 0.0.x publisher; -a<attempt> makes a
                   # rerun of one run publish a fresh version instead of E409.
                   PR_VERSION="0.0.${RUN_NUMBER}-pr.${PR_NUMBER}.${GITHUB_SHA:0:7}"
                   if [ "$RUN_ATTEMPT" != "1" ]; then
