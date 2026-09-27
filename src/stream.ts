@@ -1,4 +1,4 @@
-import { collectBlockContent, defaultCountTokens, formatRanges, storeCoveredOriginals, viableRanges, type CompressionCore, type Config, type CoreMessage, type CompressionState, type NudgeDecision } from "acp-kernel";
+import { collectBlockContent, defaultCountTokens, formatRanges, storeCoveredOriginals, viableRanges, type CompressionCore, type Config, type CoreMessage, type CompressionState, type NudgeDecision, type CompressParseDiagnostics } from "acp-kernel";
 import { handleAcpStatus } from "./acp-status.js";
 import { handleAcpCache, recordCacheFoldsFromBlocks } from "./cache-ledger.js";
 import { type Session, cacheBlockContent, markDirty } from "./session.js";
@@ -197,6 +197,19 @@ export function summaryFingerprintLine(blockId: string, summary: string): string
     return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
 }
 
+// #1494: entries dropped at PARSE time vanish from `ranges`, so the success
+// line ("Compressed <detail>") and the 0-blocks failure both list only the
+// survivors — a 3-entry call that silently loses one reads as a clean 2-block
+// success (the exact report in the issue; the kernel diagnostics carry the
+// per-entry reasons but nothing surfaced them when ≥1 range survived).
+function droppedEntriesNote(diagnostics: CompressParseDiagnostics): string {
+    if (diagnostics.invalidItems <= 0) return "";
+    const reasons = (diagnostics.invalidReasons ?? []).slice(0, 3).map((r) => (r.length > 160 ? r.slice(0, 160) + "..." : r));
+    const why = reasons.length > 0 ? reasons.join(" | ") : `${diagnostics.invalidItems} entr(ies) failed validation (parse kind=${diagnostics.kind})`;
+    const n = diagnostics.invalidItems;
+    return `[${n} of the submitted entr${n === 1 ? "y" : "ies"} ${n === 1 ? "was" : "were"} REJECTED and NOT compressed: ${why}. Re-issue the rejected range${n === 1 ? "" : "s"} in a new compress call.]`;
+}
+
 // #1387 (pi-side #420/#521 alignment): post-compress continuation contract.
 // Silence after success is not a stop signal — models extrapolate ghost endIds
 // past the session tail and burn a round on kernel rejection. Wording is
@@ -362,7 +375,8 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
             const noViableAnywhere = minChars > 0 && totalChars < minChars
                 ? ` This conversation holds only ${totalChars} char(s) — below the ${minChars}-char minimum, so NO range can succeed yet; do not retry compress or call acp_status/search_context about it — continue answering the user's task.`
                 : "";
-            return `[Compression FAILED: ${errs}${revNote}${currentRefsSnapshot(ctx)}${recordCompressFailure(ctx.session, normalizedSpecKey(ranges))}${spanHint}${noViableAnywhere}]`;
+            const dropped = droppedEntriesNote(diagnostics);
+            return `[Compression FAILED: ${errs}${revNote}${currentRefsSnapshot(ctx)}${recordCompressFailure(ctx.session, normalizedSpecKey(ranges))}${spanHint}${noViableAnywhere}${dropped ? " " + dropped : ""}]`;
         }
         clearCompressFailures(ctx.session);
 
@@ -394,6 +408,14 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
 
         const warn = r.warnings.length > 0 ? ` ${r.warnings.join("; ")}` : "";
         let msg = `[Compressed ${detail} → ${r.blocksCreated} block(s), ~${r.tokensCompressed} tokens saved.${warn}]`;
+        // #1494: a partial fold must not read as a clean success — surface the
+        // parse-dropped entries (and log them server-side) so the model
+        // re-issues the rejected range instead of believing it folded.
+        const dropped = droppedEntriesNote(diagnostics);
+        if (dropped !== "") {
+            ctx.log(`[acp-proxy: compress PARTIAL — ${diagnostics.invalidItems} entr(ies) rejected at parse: ${(diagnostics.invalidReasons ?? []).join(" | ")}]`);
+            msg += `\n${dropped}`;
+        }
         // #1294 P1: append a fingerprint line per created/updated block —
         // kernel refolds update an existing block's summary in place (same id),
         // so "updated" means any pre-existing block whose summary changed.

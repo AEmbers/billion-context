@@ -246,13 +246,74 @@ export const IMAGE_FULL_TOOL_GOOGLE = {
     parameters: IMAGE_FULL_TOOL_OPENAI.function.parameters,
 };
 
+// #1494: models drift off the advertised {content: [...]} schema when they
+// retry a single range: `content` becomes the single entry OBJECT instead of a
+// one-element array (kernel hard-rejects it: kind=content-not-array,
+// dropped=0), the whole argument becomes a bare entry array (kind=not-object),
+// or the same shapes arrive string-encoded through a chat wire. The kernel's
+// salvage ladder already tolerates this drift at the TOP level (a bare
+// {startId,…} without content is accepted as one range) but hard-rejects it
+// INSIDE content — an asymmetric wall that turns one shape slip into a full
+// call failure plus a wasted retry round. Normalize those shapes back to
+// canonical {content:[…]} before the kernel sees them; everything else passes
+// through untouched.
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function looksLikeRangeEntry(o: Record<string, unknown>): boolean {
+    const hasStart = typeof o["startId"] === "string" || typeof o["startRef"] === "string" || typeof o["messageId"] === "string";
+    const hasEnd = typeof o["endId"] === "string" || typeof o["endRef"] === "string" || typeof o["messageId"] === "string";
+    return hasStart && hasEnd && typeof o["summary"] === "string";
+}
+
+function decodeCompressObject(raw: string): Record<string, unknown> | undefined {
+    let s = raw.trim();
+    if (s.startsWith("```")) {
+        const nl = s.indexOf("\n");
+        if (nl === -1) return undefined;
+        const body = s.slice(nl + 1);
+        const end = body.lastIndexOf("```");
+        s = (end > 0 ? body.slice(0, end) : body).trim();
+    }
+    let v: unknown;
+    try { v = JSON.parse(s); } catch { return undefined; }
+    if (typeof v === "string") {
+        try { v = JSON.parse(v); } catch { return undefined; }
+    }
+    return isPlainObject(v) ? v : undefined;
+}
+
+export function normalizeCompressInput(input: unknown): unknown {
+    if (Array.isArray(input)) return { content: input };
+    if (isPlainObject(input)) {
+        const c = input["content"];
+        if (isPlainObject(c)) return { ...input, content: [c] };
+        return input;
+    }
+    if (typeof input === "string") {
+        const obj = decodeCompressObject(input);
+        if (!obj) return input;
+        const c = obj["content"];
+        if (isPlainObject(c)) return { ...obj, content: [c] };
+        if (looksLikeRangeEntry(obj)) return { content: [obj] };
+        return input;
+    }
+    return input;
+}
+
 export function parseCompressInput(input: unknown, callId?: string) {
-    const parsed = parseCompressArgs(input, { callId });
+    const parsed = parseCompressArgs(normalizeCompressInput(input), { callId });
     if (parsed.diagnostics.quoteSalvage === true) {
         loggerLog("warn", `[acp-compress-input] quote-salvage: recovered ${parsed.ranges.length} range(s) after single->double quote normalization (kind=${parsed.diagnostics.kind})`);
     }
     if (!parsed.diagnostics.ok && parsed.diagnostics.kind !== "ok") {
         loggerLog("warn", `[acp-compress-input] rejected: kind=${parsed.diagnostics.kind} invalidItems=${parsed.diagnostics.invalidItems}${parsed.diagnostics.keys ? ` keys=[${parsed.diagnostics.keys.join(",")}]` : ""}${parsed.diagnostics.length !== undefined ? ` len=${parsed.diagnostics.length}` : ""}${parsed.diagnostics.invalidReasons && parsed.diagnostics.invalidReasons.length > 0 ? ` reasons=[${parsed.diagnostics.invalidReasons.join(" | ")}]` : ""}`);
+    } else if (parsed.diagnostics.invalidItems > 0) {
+        // #1494: partial drop — at least one range survived, so the old
+        // condition above never fired and the rejection was invisible on both
+        // the server log and the model-facing receipt.
+        loggerLog("warn", `[acp-compress-input] partial: ${parsed.ranges.length} range(s) applied, ${parsed.diagnostics.invalidItems} rejected (kind=${parsed.diagnostics.kind}) reasons=[${(parsed.diagnostics.invalidReasons ?? []).join(" | ")}]`);
     }
     return { ranges: parsed.ranges, diagnostics: parsed.diagnostics };
 }
