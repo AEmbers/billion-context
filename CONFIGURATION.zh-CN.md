@@ -121,7 +121,32 @@
 - **类型：** `string`
 - **默认值：** *（无 —— 不使用上游代理）*
 - **状态：** ACTIVE
-- **说明：** 用于代理**自身**到模型 provider 的出站连接的上游 HTTP 代理（`http://host:port`）。不支持 SOCKS5。在 `providers` 条目内设置的按 URL 的 `proxy` 会针对该 provider 覆盖此项。空字符串表示"显式直连" —— 为所有 provider 禁用任何环境/系统代理回退。
+- **说明：** 用于代理**自身**到模型 provider 的出站连接的上游 HTTP 代理（`http://host:port`）—— 针对 provider 只能经 HTTP 代理才可达的主机（例如 GFW 内的 `api.openai.com`；把 bili 指向你本地的 v2rayA/clash HTTP 端口）。
+
+  **解析顺序（首个命中生效）：** per-URL `providers.<url>.proxy` → `BILI_UPSTREAM_PROXY` 环境变量 → Web UI 手动代理 → 本顶层 `proxy` → `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 环境变量 → Windows 系统代理 → 直连。auto 模式下环境/系统回退遵守 `NO_PROXY` 与 Windows 代理绕过列表。指向 bili 自身本地端口的值会被忽略或拒绝，防止成环。Windows 上常见的 Clash/Mihomo 静态系统代理会被自动发现；Web UI 显示生效来源及在 Internet Settings 里检测到的 PAC URL（如有）。
+
+  空字符串表示"显式直连"—— 覆盖并禁用其下所有层级（顶层：为所有 provider 禁用任何环境/系统代理回退；per-provider：仅该 provider）。
+
+  两条出站路径都覆盖：`/bili/` 路径模式（fetch）与 MITM CONNECT 隧道（代理到真实上游的连接也走 HTTP CONNECT 代理）。自动更新器自身的出网（npm registry 检查 + tarball 下载）对其主机使用同一决策，所以 npm 只能经代理可达的机器上 `bili update` 与自动更新同样可用（#609）。
+
+  不支持 SOCKS5：显式 `BILI_UPSTREAM_PROXY` / 配置 `proxy` 使用 `socks5`/`socks5h` scheme 会以可操作的错误启动失败；env/系统代理使用此类 scheme 则被忽略并打一次性警告（流量回落到直连）。Clash/mihomo 用户把 bili 指向同一个 mixed 端口的 `http://`（如 `http://127.0.0.1:7890`）。
+
+  ```jsonc
+  {
+    // 全局默认：所有 provider 走这个代理
+    "proxy": "http://127.0.0.1:20172",
+    "providers": {
+      "https://api.openai.com/v1": {
+        // Per-URL 覆盖全局（该主机用另一个代理）
+        "proxy": "http://127.0.0.1:20173"
+      },
+      "https://open.bigmodel.cn/api/anthropic": {
+        // 空字符串 = 显式直连，覆盖全局代理
+        "proxy": ""
+      }
+    }
+  }
+  ```
 
 ### `imageBilling`
 
@@ -156,6 +181,28 @@
 键通过**最长前缀胜出**的方式与请求的上游 URL 匹配。当请求 URL 等于该键，或以 `键 + "/"` 开头时，匹配成立。这使得匹配在边界上是安全的：键 `https://api.example.com` 能匹配 `https://api.example.com/v1/chat`，但**不会**匹配 `https://api.example.com.evil`（一个攻击者控制的相似域名）。
 
 浅层键（`https://open.bigmodel.cn`）匹配该主机上的所有路径。深层键（`https://open.bigmodel.cn/api/anthropic`）仅匹配该端点。当两个键都匹配时，最长（最具体）的那个胜出。键末尾的斜杠会被自动去除。
+
+### MITM vs `/bili/` key schemes
+
+登录客户端（ZCode 经 MITM）与 API-key 客户端可能打向同一个主机（`open.bigmodel.cn`）。要让两者的配置可以不同，MITM 流量在 provider lookup key 里用 `mitm://` scheme，而 `/bili/` 流量用真实的 `https://`：
+
+| 客户端 | Lookup key 示例 |
+|---|---|
+| ZCode（MITM，登录） | `mitm://open.bigmodel.cn` |
+| API-key 客户端（`/bili/`） | `https://open.bigmodel.cn/api/anthropic` |
+
+于是可以给 ZCode 配专属上游代理而不影响 API-key 客户端：
+
+```jsonc
+{
+  "providers": {
+    "mitm://open.bigmodel.cn":            { "proxy": "http://127.0.0.1:20173" },
+    "https://open.bigmodel.cn/api/anthropic": { "proxy": "http://127.0.0.1:20172" }
+  }
+}
+```
+
+两个 scheme 互不重叠：`mitm://` 键只命中该主机的 MITM（登录客户端）流量，普通 `https://` 键只命中 `/bili/`（API-key）流量。
 
 ### `models`
 
@@ -616,7 +663,7 @@
 | `ACP_MODEL_CONTEXT_LIMIT` | 全局覆盖上下文上限（绝对 token 数）。 |
 | `BILI_IMAGE_TOKEN_CAP` | 预检尺寸门与输出钳制用的单图 token 估算上限（#488/#496）。默认内联 `data:` 图片按 `base64 长度 / 4` 计 token、**无上限** —— 对字节计费 relay 正确，但对像素 tile 计费的官方上游（Anthropic/OpenAI）会严重高估（后者无论字节多少，每图约计 1.1K–1.6K token）。像素 tile 上游建议改用 [`imageBilling`](#imagebilling)（`"pixels"`，或 `BILI_IMAGE_BILLING=pixels`），按真实 tile 计费而非截断字节估算；该上限仍在两种计费模式之上作为统一天花板生效。不设置 = 无上限（默认）。 |
 | `BILI_IMAGE_BILLING` | 覆盖预检尺寸门与输出钳制的图片计费模式（#767）：`pixels` 或 `bytes`。每次请求实时读取（无需重启）；优先于全局 `imageBilling` 与所有按 provider 的 `providers.<url>.imageBilling`。在配置为 `"pixels"` 的路由上强制保守计费用 `bytes`（例如 OpenAI 同形 host 后面的字节计数 relay），或不想改配置文件就全进程启用 tile 计费用 `pixels`。详见 [`imageBilling`](#imagebilling)。 |
-| `BILI_PREFLIGHT_HOLD_MS` | 预压缩超过该宽限期（毫秒）后，代理提前提交响应并用保活字节挂住客户端（默认 `30000`；见 #568 / README「预压缩挂起」）。 |
+| `BILI_PREFLIGHT_HOLD_MS` | 预压缩超过该宽限期（毫秒）后，代理提前提交响应并用保活字节挂住客户端（默认 `30000`；见 #568 / README「预压缩挂起」。 |
 | `BILI_RECLAIM_FETCH_PATCH` | 设为 `0` 关闭 native 模式 fetch 自愈重武装（#1158）。默认情况下 native fetch 拦截会把 `globalThis.fetch` 装成受保护的访问器：第三方补丁重新赋值 `globalThis.fetch` 时（如 dsh-http-proxy 的 settings 刷新用冻结的 pre-bili `originalFetch` 盲覆盖），会被接链为下游，模型流量继续经过 bili。设 `0` 则回到经典直装：第三方重装生效，bili 将看不到本会话的模型流量。**出口提示：** 自愈生效期间，被认领的模型流量由 bili 代理自身派发——不再走第三方链的出口（例如 dsh-http-proxy 里配置的 SOCKS5；bili 自身的上游代理仅支持 HTTP 形式）。若需要回退第三方出口，设 `0` 并在 bili 层配置出口（`"proxy": "http://…"`）。 |
 | `BILI_CONFIG_FILE` | 覆盖配置文件路径（指向任意 JSON 文件）。 |
 | `ACP_PORT` / `PORT` | 覆盖监听端口。 |
@@ -645,7 +692,7 @@
 | `BILI_CHAIN_MAX_FUTURE_SKEW_MS` | 校验链检查点 `issued-at` 时间戳时容忍的最大未来偏斜（毫秒）（#1395 step 2）：戳在比当前时间未来超过此值的检查点会被判为 `stale`（重放 / 时钟偏斜），即使其摘要校验通过。默认 `120000`（2 分钟）；非数字或非正值回退到默认值。Step 2 仅影子模式——这些旋钮只调判定日志，绝不影响转发。 |
 | `BILI_CHAIN_RECENT_WINDOW_MS` | 链检查点校验的近期窗口（毫秒）（#1395 step 2）：早于此窗口的检查点被判为 `stale`。默认 `600000`（10 分钟）；非数字或非正值回退到默认值。Step 2 仅影子模式——这些旋钮只调判定日志，绝不影响转发。 |
 | `BILI_CONFLICT_SCAN` | 设为 `0` 关闭第三方压缩插件检测（#1206）。默认开启：bili 会扫描客户端自身的插件/扩展注册表 —— opencode 全局 + 项目配置的 `plugin` 数组、pi 全局 + 项目 `.pi/settings.json` 的 `packages`、omp `config.yml` 的 `extensions`、claude 设置的 `enabledPlugins`/`plugins` 及其插件目录、kimi `plugins/installed.json`、hermes 插件目录、dsh profile 依赖 —— 查找与 bili 并存的另一个压缩器。两个层级：**已知冲突**（`opencode-acp`、遗留 `billion-context-pi`，确定性判定）和**关键词疑似**条目（名称匹配 compress / compact / acp / summar* / context*；bili 自身条目永远跳过，`context7` 这类非压缩工具不会误报）。发现结果出现在：客户端启动前的 launcher stderr、每个会话首个请求的一次性代理 warn 日志、以及会话冲突台账 —— `acp_status` 的 `COMPRESSION CONFLICTS` 段、`GET /__bili/stats` → `conflicts`、Web UI 横幅。运行时干扰证据（未宣告的历史改写 #1001、孤儿块废弃）记入同一台账。「扫描只读、尽力而为、5 分钟缓存，绝不阻塞或改动客户端配置。」 |
-| `BILI_UPSTREAM_PROXY` | 代理自身出站连接的上游代理 —— 优先级最高，高于 per-URL/per-provider 配置。见 README「上游代理」一节。 |
+| `BILI_UPSTREAM_PROXY` | 代理自身出站连接的上游代理 —— 在*全局*来源中优先级最高（高于 Web UI 手动代理与配置文件 `proxy`）。per-URL 的 `providers.<url>.proxy` 对其匹配的 provider URL 仍然优先。完整解析顺序、防环规则与示例见 [服务端设置 → `proxy`](#服务端设置)。 |
 | `BILI_INHERITED_HTTP_PROXY` / `BILI_INHERITED_HTTPS_PROXY` / `BILI_INHERITED_ALL_PROXY` / `BILI_INHERITED_NO_PROXY` | 非用户直接使用 —— launcher 起代理子进程时自动设置（#1012）。launcher 会从客户端和代理子进程两侧剥掉 shell 的代理变量（客户端必须把流量发给 bili；代理的模型出网也不能被 shell 代理劫持），但会把用户剥离前的代理转发到这些变量里，让代理的**辅助出网**（MITM 盲隧道 —— 客户端侧的 MCP/web 流量）仍能走用户的 VPN。它们只作用于盲隧道的 fallback 层：显式路由 / 全局 `proxy` / `BILI_UPSTREAM_PROXY` / 显式 `"upstreamProxyMode": "direct"` 仍然优先，指向 bili 自身端口的值会被丢弃。模型出网不受影响（未显式配置则保持直连）。 |
 | `BILI_UPSTREAM_TIMEOUT_MS` | 上游请求的空闲预算（毫秒）：首字节时间（TTFB）与响应体块之间的间隔（默认 `720000` = 12 分钟）。持续产出数据块的健康流永远不会被中途切断；静默的流才会。同一个值同时驱动底层 HTTP 客户端的传输层超时，因此这一个旋钮即可端到端约束本地大模型的超长 prefill（#551）。 |
 | `BILI_ATTACH_HEALTH_DEADLINE_MS` | dsh/opencode attach 校验中，attach 目标已挂但本进程模型通道**钉死**在其上（观察到指向它的 `/bili/…` 路由流量）时的健康等待上限（毫秒）：bili 等待目标恢复而不是 spawn 第二实例——spawn 会把会话劈成两半（模型流量保持钉死，bili 工具在另一实例上 404）。超时后大声报错，并在每次模型请求时持续重查直到目标恢复（默认 `15000`）。见 #1365。 |
@@ -801,7 +848,7 @@ export ANTHROPIC_BASE_URL="http://localhost:8787/bili/https://api.anthropic.com"
 
 > **Codex 例外：** Codex 暴露顶层 `openai_base_url` 配置字段，所以 ChatGPT 登录版**可以**用 `/bili/` 前缀（见上文）。Codex 不需要 MITM。
 
-> **ZCode 原生模式（#1145）：** ZCode 是这张表里唯一同时拥有**原生插件模式**的客户端 —— `bili plugin install zcode` 经 provider store（`~/.zcode/v2/config.json`，v3.14+ 为 `provider_config.json`）路由模型流量，完全不需要 GUI 代理/CA 设置。原生模式不碰 MITM 面：若两者并用，请保留 GUI 代理设置（以及 `"mitm://zcode.z.ai": { "passthrough": true }` 路由，#661）供登录流量使用。完整机制：README「ZCode」小节。
+> **ZCode 原生模式（#1145）：** ZCode 是这张表里唯一同时拥有**原生插件模式**的客户端 —— `bili plugin install zcode` 经 provider store（`~/.zcode/v2/config.json`，v3.14+ 为 `provider_config.json`）路由模型流量，完全不需要 GUI 代理/CA 设置。原生模式不碰 MITM 面：若两者并用，请保留 GUI 代理设置（以及 `"mitm://zcode.z.ai": { "passthrough": true }` 路由，#661）供登录流量使用。完整机制：[CLIENTS.zh-CN.md](CLIENTS.zh-CN.md)（ZCode）。
 
 MITM 只对一份**白名单**中的模型域名生效（`open.bigmodel.cn`、`api.anthropic.com`、`api.openai.com`、`chatgpt.com`），外加发现机制按 lane 自动播种的自带网关默认域名（如 `opencode.ai` —— opencode `auth login` 的内置 zen 网关，#1405）。其余 HTTPS 主机全部盲转发 —— billion-context 绝不解密非模型流量。
 
@@ -828,7 +875,7 @@ MITM 只对一份**白名单**中的模型域名生效（`open.bigmodel.cn`、`a
 
 > 根 CA 在本地生成、只存在于本机 —— **不是**系统级安装。只有你配置的那个客户端（通过它的 CA 路径设置）信任它，其他应用不受影响。删掉 CA 文件并重启代理会重新生成。
 
-要给 MITM 登录客户端配**专属上游代理**（防火墙/GFW）而不影响同一域名上的 API-key 客户端，用 `mitm://` scheme 键 —— 见 README「上游代理」一节。
+要给 MITM 登录客户端配**专属上游代理**（防火墙/GFW）而不影响同一域名上的 API-key 客户端，用 `mitm://` scheme 键 —— 见 [MITM vs `/bili/` key schemes](#mitm-vs-bili-key-schemes)。
 
 ---
 

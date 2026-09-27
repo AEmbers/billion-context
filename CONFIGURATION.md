@@ -121,7 +121,32 @@ Top-level keys that control how the proxy listens and behaves globally.
 - **Type:** `string`
 - **Default:** *(none — no upstream proxy)*
 - **Status:** ACTIVE
-- **Description:** Upstream HTTP proxy (`http://host:port`) used for the proxy's **own** outbound connections to model providers. SOCKS5 is not supported: an explicit `proxy` value with a `socks5`/`socks5h` scheme fails startup with an actionable error, while env/system proxies (`HTTPS_PROXY`, …) using such a scheme are ignored with a one-time log warning (traffic falls through to direct). For Clash/mihomo, use the same mixed port over `http://` (e.g. `http://127.0.0.1:7890`). A per-URL `proxy` set inside a `providers` entry overrides this for that provider. An empty string means "explicitly direct" — it disables any environment/system proxy fallback for all providers.
+- **Description:** Upstream HTTP proxy (`http://host:port`) used for the proxy's **own** outbound connections to model providers — for hosts where a provider is only reachable through an HTTP proxy (e.g. `api.openai.com` behind the GFW; point bili at your local v2rayA/clash HTTP port).
+
+  **Resolution order (first match wins):** per-URL `providers.<url>.proxy` → `BILI_UPSTREAM_PROXY` env var → Web UI manual proxy → this top-level `proxy` → `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` env vars → Windows system proxy → direct. Auto mode honors `NO_PROXY` and the Windows proxy bypass list for environment/system fallbacks. A value pointing back to bili's own local port is ignored or rejected to prevent a loop. On Windows, common Clash/Mihomo static system proxies are discovered automatically; the Web UI shows the effective source and any PAC URL detected in Internet Settings.
+
+  An empty string means "explicitly direct" — override-and-disable whatever sits below it in the chain (top level: disables any environment/system proxy fallback for all providers; per provider: just that one).
+
+  Both outbound paths are covered: `/bili/` path-mode (fetch) AND MITM CONNECT tunnels (the proxy's connection to the real upstream goes through the HTTP CONNECT proxy). The auto-updater's own egress (npm registry check + tarball download) uses the same decision for its hosts, so `bili update` and auto-update work where npm is only reachable through the proxy (#609).
+
+  SOCKS5 is not supported: an explicit `BILI_UPSTREAM_PROXY` / config `proxy` with a `socks5`/`socks5h` scheme fails startup with an actionable error, while env/system proxies using such a scheme are ignored with a one-time log warning (traffic falls through to direct). For Clash/mihomo, use the same mixed port over `http://` (e.g. `http://127.0.0.1:7890`).
+
+  ```jsonc
+  {
+    // Global default: ALL providers route through this proxy
+    "proxy": "http://127.0.0.1:20172",
+    "providers": {
+      "https://api.openai.com/v1": {
+        // Per-URL overrides global (use a different proxy for this host)
+        "proxy": "http://127.0.0.1:20173"
+      },
+      "https://open.bigmodel.cn/api/anthropic": {
+        // Empty string = explicitly DIRECT, overriding the global proxy
+        "proxy": ""
+      }
+    }
+  }
+  ```
 
 ### `imageBilling`
 
@@ -156,6 +181,28 @@ The `providers` block maps **upstream URLs** to per-provider configuration. Each
 Keys are matched against the request's upstream URL by **longest-prefix wins**. A key matches if the request URL equals the key, or starts with `key + "/"`. This makes matching boundary-safe: a key `https://api.example.com` matches `https://api.example.com/v1/chat` but does **not** match `https://api.example.com.evil` (an attacker-controlled lookalike host).
 
 A shallow key (`https://open.bigmodel.cn`) matches every path on that host. A deep key (`https://open.bigmodel.cn/api/anthropic`) matches only that endpoint. When two keys both match, the longest (most specific) one wins. Trailing slashes on keys are stripped automatically.
+
+### MITM vs `/bili/` key schemes
+
+A login client (ZCode via MITM) and an API-key client can both hit the same host (`open.bigmodel.cn`). To let their config differ, MITM traffic uses a `mitm://` scheme in the provider lookup key while `/bili/` traffic uses the real `https://`:
+
+| Client | Lookup key example |
+|---|---|
+| ZCode (MITM, login) | `mitm://open.bigmodel.cn` |
+| API-key client (`/bili/`) | `https://open.bigmodel.cn/api/anthropic` |
+
+So you can give ZCode its own upstream proxy without affecting API-key clients:
+
+```jsonc
+{
+  "providers": {
+    "mitm://open.bigmodel.cn":            { "proxy": "http://127.0.0.1:20173" },
+    "https://open.bigmodel.cn/api/anthropic": { "proxy": "http://127.0.0.1:20172" }
+  }
+}
+```
+
+The two schemes never overlap: a `mitm://` key targets only MITM (login-client) traffic of that host, a plain `https://` key only `/bili/` (API-key) traffic.
 
 ### `models`
 
@@ -649,7 +696,7 @@ Environment variables take precedence over the config file. They are useful for 
 | `BILI_CHAIN_MAX_FUTURE_SKEW_MS` | Maximum future skew (ms) tolerated when validating a chain checkpoint's `issued-at` timestamp (#1395 step 2): a checkpoint stamped more than this far into the future is judged `stale` (replay / clock skew) even when its digest verifies. Default `120000` (2 min); non-numeric or non-positive values fall back to the default. Step 2 is shadow-only — these knobs tune verdict logging, never forwarding. |
 | `BILI_CHAIN_RECENT_WINDOW_MS` | Recency window (ms) for chain-checkpoint validation (#1395 step 2): a checkpoint older than this is judged `stale`. Default `600000` (10 min); non-numeric or non-positive values fall back to the default. Step 2 is shadow-only — these knobs tune verdict logging, never forwarding. |
 | `BILI_CONFLICT_SCAN` | Set `0` to disable third-party compression plugin detection (#1206). On by default: bili scans the client's own plugin/extension registries — opencode global + project `plugin` arrays, pi global + project `.pi/settings.json` `packages`, omp `config.yml` `extensions`, claude settings `enabledPlugins`/`plugins` + its plugins dir, kimi `plugins/installed.json`, hermes plugins dir, dsh profile dependencies — for another compressor co-resident with bili. Two tiers: **known conflicts** (`opencode-acp`, legacy `billion-context-pi`) and **keyword-suspected** entries (names matching compress / compact / acp / summar* / context*; bili's own entries are always skipped, and non-compression tools like `context7` do not match). Findings surface as launcher stderr lines before client start, a one-time proxy warn log on each session's first request, and the session's conflict ledger — visible in `acp_status`'s `COMPRESSION CONFLICTS` section, aggregated at `GET /__bili/stats` → `conflicts`, and shown as a web-UI banner. Runtime interference evidence (unannounced history rewrites #1001, orphan-block deactivations) feeds the same ledger. The scan is read-only, best-effort, 5-minute cached, and never blocks or modifies client config. |
-| `BILI_UPSTREAM_PROXY` | Upstream proxy for the proxy's own outbound connections — highest priority, above per-URL/per-provider config. See the README *Upstream proxy* section. |
+| `BILI_UPSTREAM_PROXY` | Upstream proxy for the proxy's own outbound connections — highest priority among the *global* sources (above the Web UI manual proxy and the config-file `proxy`). A per-URL `providers.<url>.proxy` still wins for its matching provider URL. See [`proxy`](#server-settings) under Server Settings for the full resolution order, loop prevention, and examples. |
 | `BILI_INHERITED_HTTP_PROXY` / `BILI_INHERITED_HTTPS_PROXY` / `BILI_INHERITED_ALL_PROXY` / `BILI_INHERITED_NO_PROXY` | Not user-facing — set automatically by the launcher when it spawns the proxy (#1012). The launcher strips the shell's proxy vars from both the client and the proxy child (clients must send to bili; the proxy must not have its model egress hijacked by a shell proxy), but it forwards the user's pre-strip proxy under these names so the proxy's **auxiliary egress** (MITM blind tunnels — client-side MCP/web traffic) can still ride the user's VPN. They feed only the blind-tunnel fallback tier: explicit routes / global `proxy` / `BILI_UPSTREAM_PROXY` / explicit `"upstreamProxyMode": "direct"` all still win, and a value pointing at bili's own port is dropped. Model egress is unaffected (stays direct unless explicitly configured). |
 | `BILI_ATTACH_HEALTH_DEADLINE_MS` | Health-wait deadline (ms) for dsh/opencode attach verification when the attach target is down but this process's model channel is **pinned** to it (routed `/bili/…` model traffic was observed against it): bili waits for the target to come back instead of spawning a second instance — a spawn would split the session (model traffic stays pinned, bili tools would 404 against the other instance). When the deadline elapses it fails loudly and keeps re-checking on every model request until the target returns (default `15000`). See #1365. |
 | `BILI_ATTACH_EVIDENCE_GRACE_MS` | Grace window (ms) during which a dsh/opencode attach verification probing a dead target waits for routed-channel evidence to appear before falling back to the legacy spawn path (covers the decision-before-first-request race: the probe fails at t≈0 while the first model request lands at t≈1s) (default `5000`). See #1365. |
@@ -827,7 +874,7 @@ Supported MITM clients:
 
 > **Codex exception:** Codex exposes a top-level `openai_base_url` config field, so the ChatGPT login version CAN use the `/bili/` prefix (see above). MITM is not needed for Codex.
 
-> **ZCode native mode (#1145):** ZCode is the only client in this list that also has a **native plugin mode** — `bili plugin install zcode` routes model traffic through the provider store (`~/.zcode/v2/config.json`, or `provider_config.json` on v3.14+) and needs no GUI proxy/CA setup at all. Native mode does not touch the MITM surface: if you run both, keep the GUI proxy settings (and the `"mitm://zcode.z.ai": { "passthrough": true }` route, #661) for login traffic. Full mechanics: README's *ZCode* section.
+> **ZCode native mode (#1145):** ZCode is the only client in this list that also has a **native plugin mode** — `bili plugin install zcode` routes model traffic through the provider store (`~/.zcode/v2/config.json`, or `provider_config.json` on v3.14+) and needs no GUI proxy/CA setup at all. Native mode does not touch the MITM surface: if you run both, keep the GUI proxy settings (and the `"mitm://zcode.z.ai": { "passthrough": true }` route, #661) for login traffic. Full mechanics: [CLIENTS.md](CLIENTS.md) (*ZCode*).
 
 MITM is scoped to a **whitelist** of model hosts (`open.bigmodel.cn`, `api.anthropic.com`, `api.openai.com`, `chatgpt.com`), plus per-lane stock-gateway defaults that discovery auto-seeds where a lane's config exists (e.g. `opencode.ai` — opencode's built-in zen gateway from `opencode auth login`, #1405). All other HTTPS hosts are blind-tunnelled — billion-context never decrypts non-model traffic.
 
@@ -854,7 +901,7 @@ One-time setup (trust the root CA in the client):
 
 > The root CA is generated locally and lives only on this machine; it is **not** a system-wide install. Only the client you configure (via its CA-path setting) trusts it, so no other app is affected. Deleting the CA files and restarting the proxy regenerates them.
 
-To give a MITM login client its **own upstream proxy** (firewall/GFW) without affecting API-key clients on the same host, use the `mitm://` scheme key — see the README's *Upstream proxy* section.
+To give a MITM login client its **own upstream proxy** (firewall/GFW) without affecting API-key clients on the same host, use the `mitm://` scheme key — see [MITM vs `/bili/` key schemes](#mitm-vs-bili-key-schemes).
 
 ---
 
