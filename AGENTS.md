@@ -145,6 +145,48 @@ misattributes on decompress. Consequences for this repo:
   reclamation (reverted in kernel #191, see `persist/store.ts`). The guard
   "do not bump past 0.0.47" is obsolete — master pins 0.0.56.
 
+### Why message identity is a content hash (and not an explicit id)
+
+The per-message raw id (`h_<sha16>`) is DERIVED from message content —
+`deriveMessageId` (acp-kernel `wire/message-id.ts`): `sha256("role|contentType|toolCallId|toolName|text")`,
+recomputed on every inbound request. It is NOT an assigned/stamped id. That is
+deliberate, not incidental; an explicit auto-increment id cannot serve here for
+three load-bearing reasons (full review: #1496):
+
+1. **Authorship ≠ transshipment.** The identity join runs on the INBOUND array
+   (client → bili), which the HOST re-authors every turn from its own private
+   store (codex rollout, claude-code transcript, pi/omp/hermes session). bili
+   compresses the OUTBOUND array to the upstream but does not own the inbound
+   one. An id bili stamps on a foreign message evaporates next turn — the host
+   resends its pristine original, not our labeled copy. Only the bytes survive
+   the round trip untouched, so only a content-derived id re-matches with no
+   round-trip channel. Plugin mode is a bounded exception: agent-executed
+   `compress` tool calls/results live in the agent's own history and round-trip,
+   but that does not remove the join need for user/foreign messages, which
+   dominate.
+2. **No writable, accepted, stored-back id field exists.** anthropic/openai chat
+   lanes carry no message-level id (only tool_use/tool_call blocks hold
+   provider-assigned ids). Responses `input[].id` exists but is a provider
+   namespace under shape validation with replay correspondence: arbitrary /
+   bili-minted values are rejected (#242: 66-char `msg-proxy-*` → 400; #1475:
+   renaming provider `rs_*` ids → Copilot 400), so even when a host stores one
+   back it cannot act as a free-form stamp. Editing content bytes instead breaks
+   wire fidelity (#1039).
+3. **The hash doubles as the change detector.** Because the id is a function of
+   bytes, any client-side edit/rewrite/fork changes the id and breaks the join —
+   how `foldCoverage` (#1195), `detectUnannouncedHistoryRewrite` (#1001) and
+   fork-adoption (#629) detect drift. An explicit id would need a separate byte
+   comparison to catch the same edits.
+
+Consequences: the `mNNNNN` ref ledger IS the auto-increment identity (persistent,
+never rewritten); the content hash is the per-turn JOIN that pins that ledger
+onto the freshly re-serialized array (`byRaw: hash → ref`). The known fragility
+is the collision class — identical bytes ⇒ identical id (#1476), fixed by kernel
+instance re-minting (#459). That fragility belongs to the kernel's instance-
+durability contract and is NOT removable by switching to explicit ids: the
+colliding messages are user/foreign messages, which have no round-trip channel
+for a persistent id anyway. Do not re-litigate this choice; see #1496.
+
 ## 3. Development Standards
 
 ### Build Commands
