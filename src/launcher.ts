@@ -189,7 +189,7 @@ export interface LaunchOptions {
      *  modelWindows. Handed to the spawned proxy via
      *  BILI_LAUNCHER_MODEL_MAX_OUTPUTS for the output-headroom reservation. */
     modelMaxOutputs?: Record<string, number>;
-    /** #1462: provider NAME → upstream URL map discovered from the client's
+    /** #1465: provider NAME → upstream URL map discovered from the client's
      *  own config (the same sources BILI_PROVIDER_REWRITES is built from).
      *  Handed to the spawned proxy via BILI_LAUNCHER_NAME_ROUTES so
      *  name-keyed providers entries in the bili config bind onto the URL
@@ -346,7 +346,7 @@ export function extractDomains(upstreams: string[]): string[] {
     return out;
 }
 
-/** #1462: name → upstream-URL map from the client's own provider config —
+/** #1465: name → upstream-URL map from the client's own provider config —
  *  exactly the pairs BILI_PROVIDER_REWRITES is built from, minus the
  *  wrapping. Only http(s) targets survive (that is all the proxy can route). */
 export function collectNameRoutes(routes: DiscoveredRoutes): Record<string, string> {

@@ -638,14 +638,7 @@ export type ProxyOptions = {
     stableSystemAnchor?: boolean;
 };
 
-/** Re-read ONLY the routes from the current config sources, returning a fresh
- *  ProviderRoutes object. Used by the web UI's "Apply" (hot-reload) button so
- *  provider/route changes take effect without restarting bili. Only routes are
- *  re-read — port/host/upstream can't change on a running server (the listen
- *  socket is already bound), so those stay as they were at startup. Mirrors the
- *  exact precedence of loadOptions: external ACP_PROVIDERS path > inline
- *  providers in the config file. */
-/** #1462: env name→upstream-URL map exported by `bili <client>` launchers
+/** #1465: env name→upstream-URL map exported by `bili <client>` launchers
  *  (BILI_LAUNCHER_NAME_ROUTES) so the proxy can bind name-keyed providers
  *  entries onto the URL lane the client actually talks to. */
 export const NAME_ROUTES_ENV = "BILI_LAUNCHER_NAME_ROUTES";
@@ -669,7 +662,7 @@ export function parseLauncherNameRoutes(env: NodeJS.ProcessEnv): Record<string, 
 
 /** Deep-merge `add` into `base` with `base` winning every conflict — the
  *  explicit URL-keyed entry is the more specific authorial statement, the
- *  named entry only fills gaps (#1462). Plain objects recurse; arrays and
+ *  named entry only fills gaps (#1465). Plain objects recurse; arrays and
  *  scalars take `base` when present. Agent-side-only fields (e.g.
  *  compactionOptIn, #1392) never get here — parseRouteEntry whitelists
  *  routing-relevant fields only. */
@@ -686,7 +679,7 @@ function deepMergeRoute(base: ProviderRoute, add: ProviderRoute): ProviderRoute 
     return out as ProviderRoute;
 }
 
-/** #1462: flatten name-keyed providers entries onto their URL lanes. For each
+/** #1465: flatten name-keyed providers entries onto their URL lanes. For each
  *  name the launcher mapped (name → upstream URL), a `providers.<name>` entry
  *  binds exactly like a URL-keyed entry for that upstream: three-level
  *  compress (global → provider → model) resolves through the existing
@@ -710,6 +703,13 @@ export function flattenNamedRoutes(routes: ProviderRoutes, nameRoutes: Record<st
     return out;
 }
 
+/** Re-read ONLY the routes from the current config sources, returning a fresh
+ *  ProviderRoutes object. Used by the web UI's "Apply" (hot-reload) button so
+ *  provider/route changes take effect without restarting bili. Only routes are
+ *  re-read — port/host/upstream can't change on a running server (the listen
+ *  socket is already bound), so those stay as they were at startup. Mirrors the
+ *  exact precedence of loadOptions: external ACP_PROVIDERS path > inline
+ *  providers in the config file. */
 export function loadRoutes(env: NodeJS.ProcessEnv = process.env): ProviderRoutes {
     const fileConfig = loadConfigFile();
     const routes: ProviderRoutes = {};

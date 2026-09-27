@@ -150,7 +150,7 @@
 
 `providers` 块将**上游 URL** 映射到按 provider 的配置。每个键是一个 URL 前缀；每个值可以声明模型上下文窗口、按 provider 的代理、压缩协议、压缩覆盖项、图片计费模式，以及按路由的透传开关。
 
-键也可以是 **provider 名字**（任意非 URL 字符串）。命名条目会绑定到该名字在所启动客户端自身配置里解析出的 URL 车道（#1462）：在 `bili pi` / `bili omp` / … 下，启动器会把 name→URL 映射交给代理（`BILI_LAUNCHER_NAME_ROUTES`，自动完成），条目的字段就像 URL 键一样作用于该上游 —— 包括三级压缩。冲突时显式 URL 键胜出；命名条目只补空缺。没有映射时（裸 `bili start`）命名条目对路由惰性 —— 只承载 `compactionOptIn` 这类 agent 侧字段（#1392）。
+键也可以是 **provider 名字**（任意非 URL 字符串）。命名条目会绑定到该名字在所启动客户端自身配置里解析出的 URL 车道（#1465）：在 `bili pi` / `bili omp` / … 下，启动器会把 name→URL 映射交给代理（`BILI_LAUNCHER_NAME_ROUTES`，自动完成），条目的字段就像 URL 键一样作用于该上游 —— 包括三级压缩。冲突时显式 URL 键胜出；命名条目只补空缺。没有映射时（裸 `bili start`）命名条目对路由惰性 —— 只承载 `compactionOptIn` 这类 agent 侧字段（#1392）。
 
 ```jsonc
 {

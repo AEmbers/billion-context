@@ -16,7 +16,7 @@ test("parseLauncherNameRoutes: JSON map, non-strings dropped, garbage ignored", 
     assert.deepEqual(parseLauncherNameRoutes({ [NAME_ROUTES_ENV]: '{"a":"https://x.test","b":3,"c":""}' }), { a: "https://x.test" });
 });
 
-test("flattenNamedRoutes: name entry creates the URL lane it maps to (#1462)", () => {
+test("flattenNamedRoutes: name entry creates the URL lane it maps to (#1465)", () => {
     const routes = {
         "work-claude": { compress: { modelContextLimit: 50000 } },
     } as ReturnType<typeof loadRoutes>;
