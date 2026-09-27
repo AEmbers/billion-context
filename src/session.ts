@@ -663,7 +663,7 @@ export function applyCompactionArchive(
         archivedBlocks: deactivated,
     };
     markDirty(session);
-    log("info", `[${session.id}] native compaction boundary: archived ${deactivated.length} pre-compaction block(s)${deactivated.length > 0 ? ` (${deactivated.join(", ")})` : ""}; pruned ref maps to ${prunedByRaw.length} live raw id(s)`);
+    log("info", `[${session.id}] native compaction boundary: archived ${deactivated.length} pre-compaction block(s)${deactivated.length > 0 ? ` (${deactivated.join(", ")})` : ""}; pruned ref maps to ${Object.keys(prunedByRaw).length} live raw id(s)`);
 }
 
 // #1001: clients rewrite session history SILENTLY mid-session (opencode native
