@@ -170,6 +170,17 @@ describe("#684 exit sentinels", () => {
         assert.equal(c.lines.length, 0);
     });
 
+    it("#1479 responses wire: interleaved custom_tool_call_output stays in the run (canary/repair/WC-009 parity)", () => {
+        const c = collector();
+        warnResponsesReasoningPairs([
+            { type: "reasoning", summary: [{ type: "summary_text", text: "r" }] },
+            { type: "function_call", name: "f1", arguments: "{}", call_id: "c1" },
+            { type: "custom_tool_call_output", call_id: "c1", output: "ok" },
+            { type: "function_call", name: "f2", arguments: "{}", call_id: "c2" },
+        ], c.log, "s1");
+        assert.equal(c.lines.length, 0);
+    });
+
     it("#1479 responses wire: orphaned run warns and names the orphaned call_id", () => {
         const c = collector();
         warnResponsesReasoningPairs([

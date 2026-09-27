@@ -2548,7 +2548,7 @@ export function warnResponsesReasoningPairs(
             continue;
         }
         // a call's output belongs to the same assistant turn as the call
-        if (t === "function_call_output") continue;
+        if (t === "function_call_output" || t === "custom_tool_call_output") continue;
         if (t === "message" && it.role === "assistant") continue;
         closeRun();
     }
