@@ -11,6 +11,7 @@ import type { BiliMessage } from "acp-kernel/wire";
 import {
     parseCompressInput,
     ABSORB_TOOL_NAME,
+    COMPRESS_TOOL_NAME,
     RULE_TOOL_NAME,
 } from "../compress-tool.js";
 import { effectiveAbsorbConfig, executeAbsorb, isProxyToolFor } from "../absorb.js";
@@ -221,9 +222,14 @@ export function executeProxyTool(
     args: Record<string, unknown>,
     ctx: LoopCtx,
     callId?: string,
+    rawArguments?: string,
 ): string {
     if (toolName === "compress") {
-        return applyRanges(parseCompressInput(args, callId), ctx);
+        // #1502: on strict-JSON.parse failure the caller passes the raw argument
+        // string here — the kernel's lenient parser salvages fence/trailing-
+        // comma/single-quote/truncated inputs that the degraded {} would drop.
+        const input = typeof rawArguments === "string" && rawArguments.length > 0 ? rawArguments : args;
+        return applyRanges(parseCompressInput(input, callId), ctx);
     }
     if (toolName === "decompress") {
         return resolveDecompress(args, ctx);
@@ -705,14 +711,17 @@ export async function* runCompressLoop(
                 }
                 if (isProxyToolFor(call.name, ctx.session, ctx.config)) {
                     let parsedArgs: Record<string, unknown>;
+                    let rawArgs: string | undefined;
                     try {
                         parsedArgs = call.arguments.length > 0 ? JSON.parse(call.arguments) : {};
                     } catch {
                         // #1306: an empty/truncated arguments string is wire-loss-shaped, bad JSON is model-shaped — log the shape so the two are separable in logs.
-                        ctx.log(`[acp-loop] proxy tool ${call.name}: arguments not parseable JSON (len=${call.arguments.length}${call.arguments.length > 0 ? `, head=${call.arguments.slice(0, 200)}` : ""}) — executing with {}`);
+                        // #1502: tail= alongside head= separates mid-string corruption from truncation; the raw string survives for the lenient parser.
+                        ctx.log(`[acp-loop] proxy tool ${call.name}: arguments not parseable JSON (len=${call.arguments.length}${call.arguments.length > 0 ? `, head=${call.arguments.slice(0, 200)}, tail=${call.arguments.slice(-200)}` : ""}) — ${call.name === COMPRESS_TOOL_NAME ? "routing the raw string to the lenient parser" : "executing with {}"}`);
+                        rawArgs = call.arguments;
                         parsedArgs = {};
                     }
-                    const result = await withSessionLock(ctx.session, () => executeProxyTool(call.name, parsedArgs, ctx, call.callId));
+                    const result = await withSessionLock(ctx.session, () => executeProxyTool(call.name, parsedArgs, ctx, call.callId, rawArgs));
                     proxyResults.push({ name: call.name, callId: call.callId, result, arguments: call.arguments, signature: call.signature });
                     if (ctx.visibilityMarkers !== false) {
                         const markerKey = `${call.name}\u0000${result}`;

@@ -203,6 +203,12 @@ export function summaryFingerprintLine(blockId: string, summary: string): string
 // success (the exact report in the issue; the kernel diagnostics carry the
 // per-entry reasons but nothing surfaced them when ≥1 range survived).
 function droppedEntriesNote(diagnostics: CompressParseDiagnostics): string {
+    // #1495: a gateway-stringified content array can arrive CUT — the lenient
+    // parser salvages only the complete leading entries (kind="truncated") and
+    // the unterminated tail is lost without counting as invalidItems.
+    if (diagnostics.kind === "truncated" && diagnostics.invalidItems <= 0) {
+        return `[The compress arguments arrived TRUNCATED — only the complete leading entries could be salvaged; any requested range not listed above was LOST, not compressed. Check acp_status for what is still compressible and re-issue the missing range(s).]`;
+    }
     if (diagnostics.invalidItems <= 0) return "";
     const reasons = (diagnostics.invalidReasons ?? []).slice(0, 3).map((r) => (r.length > 160 ? r.slice(0, 160) + "..." : r));
     const why = reasons.length > 0 ? reasons.join(" | ") : `${diagnostics.invalidItems} entr(ies) failed validation (parse kind=${diagnostics.kind})`;
@@ -253,6 +259,21 @@ function postCompressTail(ctx: RewriteCtx, cleanSuccess: boolean): string {
     return `\n\n${NO_RANGES_REMAIN_TEXT}`;
 }
 
+// #1495: the kernel's lenient parser salvages complete entries from damaged
+// arguments (truncated gateway-stringified arrays, corrupted elements) and
+// reports what it dropped via diagnostics — which this path only read on TOTAL
+// failure. On partial success the receipt was a clean "[Compressed … → N
+// block(s)]" for ranges that were requested but never folded. Every non-total
+// receipt now names what was dropped so partial application stays visible and
+// re-issuable. Apply-layer per-range errors (unknown refs, …) get the same
+// treatment: previously also invisible when some other range in the batch
+// succeeded.
+function applyErrorNote(r: { errors: string[] }): string {
+    if (r.errors.length === 0) return "";
+    const errs = r.errors.slice(0, 3).map((e) => e.length > 200 ? `${e.slice(0, 200)}…` : e).join(" | ");
+    return ` Errors: ${errs}`;
+}
+
 export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: RewriteCtx): string {
     const { ranges, diagnostics } = parsed;
     if (ranges.length === 0) {
@@ -277,15 +298,31 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
             rawReasons.length === 0 &&
             (diagnostics.kind === "empty-input" ||
                 (diagnostics.kind === "missing-content" && !(diagnostics.keys ?? []).includes("ranges")));
+        // #1502: a raw-string argument the lenient parser could not salvage
+        // (malformed-json/truncated; diag.length is set only for string inputs)
+        // used to arrive here pre-degraded to {} and inherit the empty-call
+        // verdict above. Name the real cause — syntax corruption, not emptiness —
+        // safe label: length only, no payload echo (#1454 pattern).
+        const argLen = diagnostics.length;
+        const argCorruption =
+            !isEmptyCall &&
+            argLen !== undefined &&
+            (diagnostics.kind === "malformed-json" || diagnostics.kind === "truncated");
         const guard = recordCompressFailure(
             ctx.session,
             `parse:${diagnostics.kind}:${diagnostics.invalidItems}:${rawReasons.slice(0, 3).join("|")}`,
             isEmptyCall
                 ? "An empty call fails identically on every retry — drop it instead of re-issuing."
-                : "Fix the argument shape against the format below instead of re-issuing the same malformed call.",
+                : argCorruption
+                    ? "Do not retry the same corrupt byte string — re-issue the call as one well-formed JSON object."
+                    : "Fix the argument shape against the format below instead of re-issuing the same malformed call.",
         );
         if (isEmptyCall) {
             return `[Compression FAILED: the call carried no content at all (kind=${diagnostics.kind}) — an empty compress() compresses nothing and can never succeed. Do NOT re-issue an empty call; if you meant to compress, put the non-empty 'content' array (elements {startId, endId, summary}) in that SAME single call.${guard}]`;
+        }
+        if (argCorruption) {
+            const truncNote = diagnostics.kind === "truncated" ? " (looks truncated)" : "";
+            return `[Compression FAILED: the call's arguments (${argLen} chars) were not parseable JSON${truncNote} — the intended content was lost and nothing was compressed. Re-issue the compress call as well-formed JSON: a single object with a non-empty 'content' array of {startId, endId, summary} elements.${guard}]`;
         }
         return `[Compression FAILED: no valid ranges parsed (kind=${diagnostics.kind}, dropped=${diagnostics.invalidItems}).${why} compress requires a non-empty 'content' array where each element is EITHER an object {startId, endId, summary} OR one line-form string whose first line is 'mNNNNN–mNNNNN optional topic' with the summary markdown on the following lines (a separate summary-only element right after a bare header line is also accepted). startId/endId are mNNNNN message refs from the conversation (call acp_status to see current refs).${compressibleSpanHint(ctx.session.state)} Re-issue the compress call with a valid content array.${guard}]`;
     }
@@ -376,7 +413,7 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
                 ? ` This conversation holds only ${totalChars} char(s) — below the ${minChars}-char minimum, so NO range can succeed yet; do not retry compress or call acp_status/search_context about it — continue answering the user's task.`
                 : "";
             const dropped = droppedEntriesNote(diagnostics);
-            return `[Compression FAILED: ${errs}${revNote}${currentRefsSnapshot(ctx)}${recordCompressFailure(ctx.session, normalizedSpecKey(ranges))}${spanHint}${noViableAnywhere}${dropped ? " " + dropped : ""}]`;
+            return `[Compression FAILED: ${errs}${revNote}${currentRefsSnapshot(ctx)}${recordCompressFailure(ctx.session, normalizedSpecKey(ranges))}${spanHint}${noViableAnywhere}${dropped ? " " + dropped : ""}${applyErrorNote(r)}]`;
         }
         clearCompressFailures(ctx.session);
 
@@ -407,13 +444,17 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         );
 
         const warn = r.warnings.length > 0 ? ` ${r.warnings.join("; ")}` : "";
-        let msg = `[Compressed ${detail} → ${r.blocksCreated} block(s), ~${r.tokensCompressed} tokens saved.${warn}]`;
+        // #1495: apply-layer per-range errors (unknown refs, …) were invisible
+        // whenever some other range in the batch succeeded — surface them on
+        // the success line too, not only on total failure.
+        let msg = `[Compressed ${detail} → ${r.blocksCreated} block(s), ~${r.tokensCompressed} tokens saved.${warn}${applyErrorNote(r)}]`;
         // #1494: a partial fold must not read as a clean success — surface the
         // parse-dropped entries (and log them server-side) so the model
         // re-issues the rejected range instead of believing it folded.
+        // #1495: droppedEntriesNote also covers kind="truncated" salvage loss.
         const dropped = droppedEntriesNote(diagnostics);
         if (dropped !== "") {
-            ctx.log(`[acp-proxy: compress PARTIAL — ${diagnostics.invalidItems} entr(ies) rejected at parse: ${(diagnostics.invalidReasons ?? []).join(" | ")}]`);
+            ctx.log(`[acp-proxy: compress PARTIAL — kind=${diagnostics.kind} ${diagnostics.invalidItems} entr(ies) rejected at parse: ${(diagnostics.invalidReasons ?? []).join(" | ")}]`);
             msg += `\n${dropped}`;
         }
         // #1294 P1: append a fingerprint line per created/updated block —
