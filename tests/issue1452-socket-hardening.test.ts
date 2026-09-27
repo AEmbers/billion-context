@@ -128,7 +128,14 @@ test("clientError: parse-fail flood is drained and closed with FIN, never destro
         // stays unread in the kernel buffer — exactly the residual state that
         // makes a destroy() surface as RST to the peer (verified matrix).
         socket.write(Buffer.alloc(65_536, 0));
-        await once(socket, "close");
+        // Bounded: without the clientError disposition, Node's default leaves
+        // the peer stranded (no FIN, no RST) and this await would hang CI
+        // instead of failing fast (#1452).
+        const closedInTime = await Promise.race([
+            (async () => { await once(socket, "close"); return true; })(),
+            new Promise((r) => setTimeout(() => r(false), 5_000)),
+        ]);
+        assert.ok(closedInTime, "clientError socket must close promptly; a hang means the drain-then-close disposition regressed (#1452)");
         assert.equal(sawError, null, `client socket must close cleanly, got error ${sawError}`);
         const marker = captured.find((c) => c.msg.includes("[conn] clientError"));
         assert.ok(marker, `expected [conn] clientError log line, got: ${captured.map((c) => c.msg).join(" | ")}`);
