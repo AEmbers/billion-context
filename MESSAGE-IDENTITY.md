@@ -107,7 +107,7 @@ is false in production:
   summary carrier;
 - **host self-compaction rewrites history**: #1001
   `detectUnannouncedHistoryRewrite` (opencode silently rewriting history on model
-  switch); the `REWRITE_MIN_INCOMING_TOTAL = 5` guard distinguishes true rewrites
+  switch); the `REWRITE_MIN_INCOMING_TOTAL = 10` guard distinguishes true rewrites
   from stub side requests (#1075);
 - **fork / regenerate / edit mutate early bytes**: #1148/#1102 branch replays,
   #1247 same-position rewrite;

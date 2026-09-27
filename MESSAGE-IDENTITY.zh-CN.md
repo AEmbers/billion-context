@@ -91,7 +91,7 @@ plugin 模式是立场 A 唯一部分成立的角落:agent 自己执行 `compres
 
 - **fold 缩短数组**:bili 自己的折叠把覆盖段替换为 summary carrier;
 - **宿主自压缩改写历史**:#1001 `detectUnannouncedHistoryRewrite`(opencode 切模型
-  时静默改写历史);`REWRITE_MIN_INCOMING_TOTAL = 5` 守卫区分真改写与 stub 侧请求
+  时静默改写历史);`REWRITE_MIN_INCOMING_TOTAL = 10` 守卫区分真改写与 stub 侧请求
   (#1075);
 - **fork / regenerate / edit 改早期字节**:#1148/#1102 分支重放、#1247 同位置改写;
 - **侧请求发短数组**:#1307。
