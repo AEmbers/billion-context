@@ -2238,17 +2238,28 @@ test("buildPiEnv: exports BILI_NON_HTTP_PROVIDERS only when non-http providers a
     assert.equal(bare.BILI_NON_HTTP_PROVIDERS, undefined);
 });
 
-test("resolveNonHttpProviders: strict-true file keys ∪ env list, deduped (#1392)", () => {
+test("resolveNonHttpProviders: providers-table compactionOptIn ∪ env list, deduped (#1392)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bili-nhp-"));
     const cfgFile = path.join(dir, "billion-context.json");
-    fs.writeFileSync(cfgFile, JSON.stringify({ plugin: { nonHttpProviders: { "claude-bridge": true, off: false, wrongType: "yes" } } }), "utf8");
+    fs.writeFileSync(cfgFile, JSON.stringify({
+        providers: {
+            "claude-bridge": { compactionOptIn: true },
+            "off-provider": { compactionOptIn: false },
+            "wrong-type": { compactionOptIn: "yes" },
+            "no-field": {},
+            "https://api.anthropic.com": { compactionOptIn: true },
+        },
+    }), "utf8");
     const prevCfg = process.env.BILI_CONFIG_FILE;
     process.env.BILI_CONFIG_FILE = cfgFile;
     try {
-        // Only strictly-true keys opt in: off:false and wrongType:"yes" are ignored.
-        assert.deepEqual(resolveNonHttpProviders({}), ["claude-bridge"]);
+        // Only strictly-true compactionOptIn opts a provider id in: false,
+        // "yes", and absent are ignored. URL-shaped entries with the field set
+        // also resolve (inert — the plugin consults the set only for non-http
+        // baseUrls) but keep deterministic order: config iteration order.
+        assert.deepEqual(resolveNonHttpProviders({}), ["claude-bridge", "https://api.anthropic.com"]);
         // Env ∪ file, deduped: claude-bridge (both sources) + z (env-only).
-        assert.deepEqual(resolveNonHttpProviders({ BILI_NON_HTTP_PROVIDERS: "claude-bridge,z" }), ["claude-bridge", "z"]);
+        assert.deepEqual(resolveNonHttpProviders({ BILI_NON_HTTP_PROVIDERS: "claude-bridge,z" }), ["claude-bridge", "https://api.anthropic.com", "z"]);
     } finally {
         if (prevCfg === undefined) delete process.env.BILI_CONFIG_FILE; else process.env.BILI_CONFIG_FILE = prevCfg;
         fs.rmSync(dir, { recursive: true, force: true });
