@@ -1231,6 +1231,13 @@ export async function pipePluginChatWithStrip(
      *  the text that survives such a frame is the tag's own interior. */
     let droppedTagInFrame = false;
     let finalFinishReason: string | undefined;
+    // #1501 option C: tool-call observations on this verbatim lane, keyed per
+    // protocol (openai: choice:toolIndex, anthropic: block:N, google:
+    // candidate/part). Bytes are forwarded untouched (#1039); the tracker only
+    // settles a once-per-response warn when upstream emits a call whose name
+    // never arrives (#1484 class), so the observed rate can settle the
+    // drop-vs-keep policy without touching fidelity.
+    const seenToolCalls = new Map<string, { label: string; id: string; name: string; argsLen: number; frags: number }>();
     // Degenerate-turn retry (#732/#821 for this pipe). The first attempt's
     // terminal event is dropped when the retry takes over, so the client sees
     // one turn: its framing stays open, and the retry's content blocks are
@@ -1396,6 +1403,19 @@ export async function pipePluginChatWithStrip(
         loggerLog("warn", msg);
         log?.(msg);
     };
+    // #1501 option C: once-per-response visibility into nameless tool calls on
+    // this verbatim lane (#1484 class). Bytes stay untouched (#1039); the warn
+    // exists so the observed rate settles the drop-vs-keep policy without
+    // touching fidelity — light, not surgery (BLIND TUNNEL WARNING pattern #897).
+    const maybeWarnNamelessToolCalls = () => {
+        const nameless = [...seenToolCalls.values()].filter((tc) => tc.name.length === 0);
+        if (nameless.length === 0) return;
+        const who = session ? `[${session.id}] ` : "";
+        const parts = nameless.map((tc) => `${tc.label}${tc.id ? ` id=${tc.id}` : ""} argsLen=${tc.argsLen} frags=${tc.frags}`).join(" | ");
+        const msg = `[plugin] ${who}nameless tool call(s) forwarded verbatim (${protocol}, ${nameless.length}): ${parts} (#1501 observe-only)`;
+        loggerLog("warn", msg);
+        log?.(msg);
+    };
     const pushField = (field: string, index: number, text: string): [string, boolean] => {
         const s = filterFor(field, index);
         const clean = s.filter.push(text);
@@ -1420,7 +1440,30 @@ export async function pipePluginChatWithStrip(
             const d = ch?.["delta"];
             if (!d || typeof d !== "object") continue;
             const dd = d as Record<string, unknown>;
-            if (dd["tool_calls"] !== undefined) sawToolUse = true;
+            if (dd["tool_calls"] !== undefined) {
+                sawToolUse = true;
+                // #1501 observe-only: accumulate fragments per tool-call index;
+                // the stream-end settle warns when a name never arrives (#1484).
+                if (Array.isArray(dd["tool_calls"])) {
+                    for (let ti = 0; ti < dd["tool_calls"].length; ti++) {
+                        const tcf = dd["tool_calls"][ti];
+                        if (!tcf || typeof tcf !== "object") continue;
+                        const t = tcf as Record<string, unknown>;
+                        const tIdx = typeof t["index"] === "number" ? t["index"] : ti;
+                        const key = `${ci}:${tIdx}`;
+                        const accTc = seenToolCalls.get(key) ?? { label: `idx=${tIdx}`, id: "", name: "", argsLen: 0, frags: 0 };
+                        if (typeof t["id"] === "string" && t["id"]) accTc.id = t["id"];
+                        const fn = t["function"];
+                        if (fn && typeof fn === "object") {
+                            const f = fn as Record<string, unknown>;
+                            if (typeof f["name"] === "string") accTc.name += f["name"];
+                            if (typeof f["arguments"] === "string") accTc.argsLen += f["arguments"].length;
+                        }
+                        accTc.frags++;
+                        seenToolCalls.set(key, accTc);
+                    }
+                }
+            }
             // #1039 invariant: tool_calls fragments in this delta are user
             // intent and pass through untouched — only the text fields below
             // are ever stripped (see tag-echo-filter.ts header).
@@ -1477,8 +1520,18 @@ export async function pipePluginChatWithStrip(
         if (ev["type"] === "content_block_start") {
             const cb = ev["content_block"] as Record<string, unknown> | undefined;
             const bt = cb && typeof cb === "object" ? cb["type"] : undefined;
-            if (bt === "tool_use") sawToolUse = true;
-            else if (bt === "thinking" || bt === "redacted_thinking") sawThinking = true;
+            if (bt === "tool_use") {
+                sawToolUse = true;
+                // The start block carries the full name, so absence is final (#1501).
+                const blockIndex = typeof ev["index"] === "number" ? ev["index"] : 0;
+                seenToolCalls.set(`block:${blockIndex}`, {
+                    label: `block=${blockIndex}`,
+                    id: cb && typeof cb["id"] === "string" ? cb["id"] : "",
+                    name: cb && typeof cb["name"] === "string" ? cb["name"] : "",
+                    argsLen: 0,
+                    frags: 1,
+                });
+            } else if (bt === "thinking" || bt === "redacted_thinking") sawThinking = true;
             return anyPending() ? flushTails() + rawEvent + "\n\n" : rawEvent + "\n\n";
         }
         if (ev["type"] !== "content_block_delta") {
@@ -1488,6 +1541,10 @@ export async function pipePluginChatWithStrip(
         const index = typeof ev["index"] === "number" ? ev["index"] : 0;
         // input_json_delta (tool-call arguments) is deliberately unmanaged:
         // #1039 — argument bytes are user intent, forwarded verbatim.
+        if (d?.["type"] === "input_json_delta") {
+            const accTc = seenToolCalls.get(`block:${index}`);
+            if (accTc && typeof d["partial_json"] === "string") accTc.argsLen += d["partial_json"].length;
+        }
         const field = d?.["type"] === "thinking_delta" ? "thinking" : d?.["type"] === "text_delta" ? "text" : null;
         if (field === null || typeof d?.[field] !== "string") {
             return rawEvent + "\n\n";
@@ -1553,7 +1610,19 @@ export async function pipePluginChatWithStrip(
             for (let pi = 0; pi < parts.length; pi++) {
                 const p = parts[pi] as Record<string, unknown> | null;
                 if (!p || typeof p !== "object") continue;
-                if (p["functionCall"] !== undefined) sawToolUse = true;
+                if (p["functionCall"] !== undefined) {
+                    sawToolUse = true;
+                    // Gemini delivers functionCall whole in one part, so a missing
+                    // name is final here (#1501). Observe-only — bytes untouched.
+                    const fcObj = p["functionCall"] && typeof p["functionCall"] === "object" ? p["functionCall"] as Record<string, unknown> : undefined;
+                    seenToolCalls.set(`cand:${ci}/part:${pi}`, {
+                        label: `candidate=${ci}/part=${pi}`,
+                        id: "",
+                        name: fcObj && typeof fcObj["name"] === "string" ? fcObj["name"] : "",
+                        argsLen: fcObj && fcObj["args"] !== null && typeof fcObj["args"] === "object" ? JSON.stringify(fcObj["args"]).length : 0,
+                        frags: 1,
+                    });
+                }
                 if (p["thought"] === true) sawThinking = true;
                 const raw = p["text"];
                 if (typeof raw !== "string") continue;
@@ -1702,12 +1771,14 @@ export async function pipePluginChatWithStrip(
         settleUsage();
         maybeWarnDegenerate();
         maybeWarnProtocolFragment();
+        maybeWarnNamelessToolCalls();
         if (truncated) {
             emitUpstreamTruncation(res, protocol, finalFinishReason !== undefined, log);
             return;
         }
     } catch (e) {
         settleUsage();
+        maybeWarnNamelessToolCalls();
         if (res.destroyed || res.writableEnded) {
             log?.("client aborted mid-stream");
             return;
