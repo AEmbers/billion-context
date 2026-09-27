@@ -241,10 +241,12 @@ export const WEB_CLIENT = `(function () {
         listEl.hidden = false;
         await refreshSessions(true);
     }
+    let hiddenEmptyN = 0;
     async function refreshSessions(showToast) {
         try {
             const d = await json("/__bili/sessions");
             sessionsCache = d.sessions || [];
+            hiddenEmptyN = d.hiddenEmpty || 0;
             renderSessionTable();
         } catch (e) {
             if (showToast) toast(t("toast.failed", { msg: e.message }), "err");
@@ -258,10 +260,15 @@ export const WEB_CLIENT = `(function () {
             || (s.label || "").toLowerCase().indexOf(q) >= 0
             || s.id.toLowerCase().indexOf(q) >= 0);
         $("ses-count").textContent = t("ses.count", { count: rows.length });
+        const heEl = $("ses-empty-hint");
+        if (heEl) {
+            if (hiddenEmptyN > 0) { heEl.hidden = false; heEl.textContent = t("ses.empty_hidden", { n: hiddenEmptyN }); }
+            else { heEl.hidden = true; heEl.textContent = ""; }
+        }
         const tb = $("sessions-body");
         tb.innerHTML = "";
         if (!rows.length) {
-            tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">🗂</div>' + t("ses.empty") + "<br>" + t("ses.empty_hint") + "</div></td></tr>";
+            tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">🗂</div>' + t("ses.empty") + "<br>" + t("ses.empty_hint") + "</div></td></tr>";
             return;
         }
         rows.forEach((s) => tb.appendChild(sessionRow(s, false)));

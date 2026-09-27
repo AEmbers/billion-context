@@ -35,7 +35,7 @@ export function renderPage(origin: string, version: string): string {
 <div class="stat"><div class="k" data-i18n="ov.output_tokens">${zh("ov.output_tokens")}</div><div class="v" id="st-output">—</div></div>
 </div>
 <div class="grid cols-2" style="margin-top:16px">
-<div class="card"><div class="card-h"><span data-i18n="ov.by_protocol">${zh("ov.by_protocol")}</span></div><div class="card-b flush"><table class="data"><thead><tr><th data-i18n="common.protocol">${zh("common.protocol")}</th><th class="num" data-i18n="common.sessions">${zh("common.sessions")}</th><th class="num" data-i18n="ses.th_reqs">${zh("ses.th_reqs")}</th><th class="num" data-i18n="ov.input_tokens">${zh("ov.input_tokens")}</th><th class="num" data-i18n="ov.cached_tokens">${zh("ov.cached_tokens")}</th><th class="num" data-i18n="ses.th_hit">${zh("ses.th_hit")}</th><th class="num" data-i18n="ses.th_saved">${zh("ses.th_saved")}</th><th class="num" data-i18n="ses.th_folds">${zh("ses.th_folds")}</th></tr></thead><tbody id="protocol-body"></tbody></table></div></div>
+<div class="card"><div class="card-h"><span data-i18n="ov.by_protocol">${zh("ov.by_protocol")}</span></div><div class="card-b flush"><div class="twrap tproc"><table class="data"><thead><tr><th data-i18n="common.protocol">${zh("common.protocol")}</th><th class="num" data-i18n="common.sessions">${zh("common.sessions")}</th><th class="num" data-i18n="ses.th_reqs">${zh("ses.th_reqs")}</th><th class="num" data-i18n="ov.input_tokens">${zh("ov.input_tokens")}</th><th class="num" data-i18n="ov.cached_tokens">${zh("ov.cached_tokens")}</th><th class="num" data-i18n="ses.th_hit">${zh("ses.th_hit")}</th><th class="num" data-i18n="ses.th_saved">${zh("ses.th_saved")}</th><th class="num" data-i18n="ses.th_folds">${zh("ses.th_folds")}</th></tr></thead><tbody id="protocol-body"></tbody></table></div></div></div>
 <div class="card"><div class="card-h"><span data-i18n="sys.title">${zh("sys.title")}</span></div><div class="card-b"><dl class="kv">
 <div class="k" data-i18n="sys.version">${zh("sys.version")}</div><div class="v mono" id="sys-version"></div>
 <div class="k" data-i18n="sys.disk_version">${zh("sys.disk_version")}</div><div class="v mono" id="sys-disk-version"></div>
@@ -43,17 +43,17 @@ export function renderPage(origin: string, version: string): string {
 <div class="k" data-i18n="sys.blind_tunnels">${zh("sys.blind_tunnels")}</div><div class="v mono" id="sys-blind">0</div>
 </dl></div></div>
 </div>
-<div class="card" style="margin-top:16px"><div class="card-h"><span data-i18n="ov.recent">${zh("ov.recent")}</span><a class="btn sm" href="#/sessions" data-i18n="ov.view_all">${zh("ov.view_all")}</a></div><div class="card-b flush"><table class="data"><thead><tr>
+<div class="card" style="margin-top:16px"><div class="card-h"><span data-i18n="ov.recent">${zh("ov.recent")}</span><a class="btn sm" href="#/sessions" data-i18n="ov.view_all">${zh("ov.view_all")}</a></div><div class="card-b flush"><div class="twrap twide"><table class="data"><thead><tr>
 <th data-i18n="ses.th_title">${zh("ses.th_title")}</th><th data-i18n="ses.th_client">${zh("ses.th_client")}</th><th data-i18n="ses.th_proto">${zh("ses.th_proto")}</th><th data-i18n="ses.th_upstream">${zh("ses.th_upstream")}</th><th class="num" data-i18n="ses.th_reqs">${zh("ses.th_reqs")}</th><th class="num" data-i18n="ses.th_ctx">${zh("ses.th_ctx")}</th><th class="num" data-i18n="ses.th_input">${zh("ses.th_input")}</th><th class="num" data-i18n="ses.th_saved">${zh("ses.th_saved")}</th><th class="num" data-i18n="ses.th_hit">${zh("ses.th_hit")}</th><th class="num" data-i18n="ses.th_folds">${zh("ses.th_folds")}</th><th class="num" data-i18n="ses.th_blocks">${zh("ses.th_blocks")}</th><th data-i18n="ses.th_seen">${zh("ses.th_seen")}</th>
-</tr></thead><tbody id="recent-body"></tbody></table></div></div>
+</tr></thead><tbody id="recent-body"></tbody></table></div></div></div>
 </section>
 <section id="page-sessions" class="page" hidden>
 <div id="sessions-list-view">
 <div class="page-head"><div><h1 data-i18n="ses.title">${zh("ses.title")}</h1><div class="sub" data-i18n="ses.sub">${zh("ses.sub")}</div></div>
-<div style="display:flex;gap:10px;align-items:center"><input id="ses-search" type="search" class="search" placeholder="${zh("ses.search_ph")}" data-i18n-ph="ses.search_ph"><span id="ses-count" class="dim small"></span></div></div>
-<div class="card"><div class="card-b flush"><table class="data"><thead><tr>
+<div style="display:flex;gap:10px;align-items:center"><input id="ses-search" type="search" class="search" placeholder="${zh("ses.search_ph")}" data-i18n-ph="ses.search_ph"><span id="ses-count" class="dim small"></span><span id="ses-empty-hint" class="dim small" hidden></span></div></div>
+<div class="card"><div class="card-b flush"><div class="twrap twide"><table class="data"><thead><tr>
 <th data-i18n="ses.th_title">${zh("ses.th_title")}</th><th data-i18n="ses.th_client">${zh("ses.th_client")}</th><th data-i18n="ses.th_proto">${zh("ses.th_proto")}</th><th data-i18n="ses.th_upstream">${zh("ses.th_upstream")}</th><th class="num" data-i18n="ses.th_reqs">${zh("ses.th_reqs")}</th><th class="num" data-i18n="ses.th_ctx">${zh("ses.th_ctx")}</th><th class="num" data-i18n="ses.th_input">${zh("ses.th_input")}</th><th class="num" data-i18n="ses.th_saved">${zh("ses.th_saved")}</th><th class="num" data-i18n="ses.th_hit">${zh("ses.th_hit")}</th><th class="num" data-i18n="ses.th_folds">${zh("ses.th_folds")}</th><th class="num" data-i18n="ses.th_blocks">${zh("ses.th_blocks")}</th><th data-i18n="ses.th_seen">${zh("ses.th_seen")}</th>
-</tr></thead><tbody id="sessions-body"></tbody></table></div></div>
+</tr></thead><tbody id="sessions-body"></tbody></table></div></div></div>
 </div>
 <section id="session-detail-view" hidden></section>
 </section>

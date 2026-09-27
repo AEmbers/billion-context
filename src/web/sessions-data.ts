@@ -92,6 +92,8 @@ export interface WebOverview {
     missTtlTotal: number;
     /** Σ input tokens across ledger sessions (denominator for the per-class hit-rate cost). */
     missInputTotal: number;
+    /** Startup/test stub sessions (no requests/context/ledger) filtered out of every list. */
+    hiddenEmpty: number;
     hitPct: number | null;
     blocks: number;
     byProtocol: Array<{ protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number; hitPct: number | null }>;
@@ -253,7 +255,17 @@ function summaryOf(s: Session, live: boolean): WebSessionSummary {
 
 /** Every known session, newest activity first. Live entries take precedence
  *  over their disk twin (disk files lag by up to the store's write debounce). */
-export async function buildSessionList(): Promise<WebSessionSummary[]> {
+/** Sessions without any trace of activity — reqs<=1, zero context tokens, no
+ *  compression blocks, no cache ledger (startup & test stubs). Hidden from every
+ *  list (#1426 user ask); still reachable through a direct detail link. */
+function isEmptyStub(s: WebSessionSummary): boolean {
+    return (s.requests ?? 0) <= 1 && (s.contextTokens ?? 0) === 0 && (s.blocks ?? 0) === 0 && !s.hasLedger;
+}
+
+let lastHiddenEmpty = 0;
+export function hiddenEmptyCount(): number { return lastHiddenEmpty; }
+
+async function allSummaries(): Promise<WebSessionSummary[]> {
     const disk = await loadDiskSessions();
     const out = new Map<string, WebSessionSummary>();
     for (const [id, s] of disk) out.set(id, summaryOf(s, false));
@@ -261,10 +273,18 @@ export async function buildSessionList(): Promise<WebSessionSummary[]> {
     return [...out.values()].sort((a, b) => b.lastSeen.localeCompare(a.lastSeen));
 }
 
+export async function buildSessionList(): Promise<WebSessionSummary[]> {
+    const all = await allSummaries();
+    const vis = all.filter((s) => !isEmptyStub(s));
+    lastHiddenEmpty = all.length - vis.length;
+    return vis;
+}
+
 /** Aggregate stats across ALL known sessions (live + disk) — the "how many
  *  tokens total / saved" numbers for the overview dashboard. */
 export async function buildOverview(): Promise<WebOverview> {
-    const all = await buildSessionList();
+    const allAll = await allSummaries();
+    const all = allAll.filter((s) => !isEmptyStub(s));
     let requests = 0, input = 0, cached = 0, output = 0, saved = 0, savedEstimated = 0, blocks = 0, live = 0;
     let grossSavedTotal = 0, netSavedTotal = 0, repayTotal = 0, summaryCostTotal = 0, hasFoldData = false;
     let missNewTotal = 0, missCompTotal = 0, missTtlTotal = 0, missInputTotal = 0;
@@ -330,6 +350,7 @@ export async function buildOverview(): Promise<WebOverview> {
         blocks,
         byProtocol: [...protoMap.values()].map((r) => ({ ...r, hitPct: hitPct(r.inputTokens, r.cachedTokens) })),
         recent: all.slice(0, 8),
+        hiddenEmpty: allAll.length - all.length,
     };
 }
 

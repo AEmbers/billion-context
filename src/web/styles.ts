@@ -287,4 +287,7 @@ pre.tool-args, pre.tool-out { margin: 6px 0 0; padding: 8px; background: var(--b
 .qmark { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 5px; border-radius: 50%; background: var(--bg-muted); color: var(--text-faint); font-size: 10px; line-height: 1; cursor: pointer; user-select: none; vertical-align: -2px; flex: none; }
 .qmark:hover { color: var(--accent); }
 .qtip { position: fixed; z-index: 60; max-width: 380px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15); padding: 10px 12px; font-size: 12.5px; line-height: 1.55; color: var(--text-muted); }
+.twrap { overflow-x: auto; }
+.tproc table.data { min-width: 660px; }
+.twide table.data { min-width: 1020px; }
 `;

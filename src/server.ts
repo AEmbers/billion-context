@@ -72,7 +72,7 @@ import { buildSessionCacheReport } from "./cache-ledger.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
-import { renderUI, handleConfigGet, handleConfigPut, buildOverview, buildSessionList, buildSessionDetail } from "./web/index.js";
+import { renderUI, handleConfigGet, handleConfigPut, buildOverview, buildSessionList, buildSessionDetail, hiddenEmptyCount } from "./web/index.js";
 import { reapOrphanBlocks } from "./orphan-gc.js";
 import { conflictScanEnabled, isDesignAbsorbed, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
 import { recordConflict, summarizeConflicts } from "./conflict-watch.js";
@@ -5760,7 +5760,7 @@ async function sendOverview(res: http.ServerResponse, opts: ProxyOptions): Promi
 async function sendWebSessions(res: http.ServerResponse): Promise<void> {
     const sessions = await buildSessionList();
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ sessions }, null, 2));
+    res.end(JSON.stringify({ sessions, hiddenEmpty: hiddenEmptyCount() }, null, 2));
 }
 
 async function sendWebSessionDetail(res: http.ServerResponse, url: string): Promise<void> {
