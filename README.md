@@ -1295,6 +1295,12 @@ Early. Protocol handling and compression work against mock tests (500+ passing).
 
 Client-side plugins for pi / omp / opencode ship inside `billion-context` (`dist/agent/*.js`) for the cooperative-proxy path. See the **"Which do I need?"** section above for how `billion-context`, the standalone `billion-context-pi`, and `opencode-acp` relate.
 
+## Attribution requirement (one term on top of MIT)
+
+This project is MIT-licensed **plus one additional term**: any product or service (commercial or open source) whose users can see or interact with it and which uses this software must attribute it — stating that it uses billion-context with a link back to this repository — on its home page, documentation, or About/Credits page. Pure server-side/embedded use satisfies this via shipped documentation. See the **Additional Term** at the end of [LICENSE](LICENSE).
+
+If you build on this project, we'd love to hear about it: open an issue (no obligation) so we can track where it's used.
+
 ## License
 
 MIT
