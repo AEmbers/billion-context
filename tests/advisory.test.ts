@@ -14,7 +14,8 @@ import {
     _resetAdvisoryWatcherForTest,
     type AdvisoryEntry,
 } from "../src/advisory.ts";
-import { checkForUpdate } from "../src/update.ts";
+import { checkForUpdate, _resetAdvisoryRefusalWarnsForTest } from "../src/update.ts";
+import { setLogCapture } from "../src/logger.ts";
 
 function integrityField(buf: Buffer, alg = "sha512"): string {
     return `${alg}-${crypto.createHash(alg).update(buf).digest("base64")}`;
@@ -222,21 +223,62 @@ test("runAdvisoryCheck: refuses a source checkout, stays active with the reason"
     }
 });
 
-test("runAdvisoryCheck: misconfigured advisory (target == current) fails loudly, no install churn", async () => {
+test("runAdvisoryCheck: misconfigured advisory (target == current) fails loudly, no install churn, warns once per process", async () => {
     const fx = makeFixture();
     process.env.XDG_CACHE_HOME = fx.cacheDir;
     _resetAdvisoryWatcherForTest();
+    _resetAdvisoryRefusalWarnsForTest();
+    const warns: string[] = [];
     try {
+        setLogCapture((_level, msg) => { warns.push(msg); });
         const doc = advisoryDoc([{ id: "bc-test-004", affected: ">=1.2.0", target: "1.2.3", reason: "r" }]);
-        const calls = await withFetch([{ match: /billion-context-advisories/, body: doc }], async () => {
-            await runAdvisoryCheck({ packageName: "billion-context", currentVersion: "1.2.3", advisoryUrl: "https://registry.test/billion-context-advisories/latest", installDir: fx.installDir }, true);
-        });
-        assert.equal(calls, 1, "only the advisory document was fetched");
+        for (let i = 0; i < 2; i++) {
+            const calls = await withFetch([{ match: /billion-context-advisories/, body: doc }], async () => {
+                await runAdvisoryCheck({ packageName: "billion-context", currentVersion: "1.2.3", advisoryUrl: "https://registry.test/billion-context-advisories/latest", installDir: fx.installDir }, true);
+            });
+            assert.equal(calls, 1, "only the advisory document was fetched");
+        }
         assert.equal(JSON.parse(readFileSync(path.join(fx.installDir, "package.json"), "utf-8")).version, "1.2.3");
         assert.match(getAdvisoryState().lastError ?? "", /misconfigured advisory/);
+        assert.equal(warns.filter((m) => m.includes("misconfigured advisory")).length, 1, "persistent misconfiguration must log once, not every cycle");
     } finally {
+        setLogCapture(null);
         delete process.env.XDG_CACHE_HOME;
         _resetAdvisoryWatcherForTest();
+        _resetAdvisoryRefusalWarnsForTest();
+        rmSync(fx.root, { recursive: true, force: true });
+    }
+});
+
+test("runAdvisoryCheck: refuses host-managed (pnpm store) installs in place, warns once per process", async () => {
+    const fx = makeFixture();
+    // pnpm virtual-store layout: .../.pnpm/billion-context@1.2.3/node_modules/billion-context
+    const pnpmDir = path.join(fx.root, "store", ".pnpm", "billion-context@1.2.3", "node_modules", "billion-context");
+    mkdirSync(path.join(pnpmDir, "dist"), { recursive: true });
+    writeFileSync(path.join(pnpmDir, "package.json"), pkgJson("1.2.3"));
+    writeFileSync(path.join(pnpmDir, "dist", "index.js"), "export const loaded = '1.2.3';\n");
+    process.env.XDG_CACHE_HOME = fx.cacheDir;
+    _resetAdvisoryWatcherForTest();
+    _resetAdvisoryRefusalWarnsForTest();
+    const warns: string[] = [];
+    try {
+        setLogCapture((_level, msg) => { warns.push(msg); });
+        const doc = advisoryDoc([{ id: "bc-test-006", affected: ">=1.2.0", target: "1.2.9", reason: "r" }]);
+        for (let i = 0; i < 2; i++) {
+            await withFetch([{ match: /billion-context-advisories/, body: doc }], async () => {
+                await runAdvisoryCheck({ packageName: "billion-context", currentVersion: "1.2.3", advisoryUrl: "https://registry.test/billion-context-advisories/latest", installDir: pnpmDir }, true);
+            });
+        }
+        assert.equal(JSON.parse(readFileSync(path.join(pnpmDir, "package.json"), "utf-8")).version, "1.2.3", "host-managed copy must stay untouched (#991)");
+        const st = getAdvisoryState();
+        assert.equal(st.active?.id, "bc-test-006", "stays active so the warning persists until the owner lane upgrades");
+        assert.match(st.lastError ?? "", /managed/);
+        assert.equal(warns.filter((m) => m.includes("no in-place overwrite")).length, 1, "persistent refusal must log once, not every cycle");
+    } finally {
+        setLogCapture(null);
+        delete process.env.XDG_CACHE_HOME;
+        _resetAdvisoryWatcherForTest();
+        _resetAdvisoryRefusalWarnsForTest();
         rmSync(fx.root, { recursive: true, force: true });
     }
 });

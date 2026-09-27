@@ -90,6 +90,23 @@ export function _resetStaleWarnForTest(): void {
     staleWarnKey = undefined;
 }
 
+// #1481: per-process dedupe for advisory force-install refusals/failures. The
+// advisory watcher retries every cycle while an entry matches, so without this
+// a persistent refusal (source checkout, host-managed lane, bad target) would
+// log a fresh warning every cycle forever. Keyed by advisory id + message.
+const advisoryRefusalWarnKeys = new Set<string>();
+
+export function _resetAdvisoryRefusalWarnsForTest(): void {
+    advisoryRefusalWarnKeys.clear();
+}
+
+function warnAdvisoryOnce(advisoryId: string, message: string): void {
+    const key = `${advisoryId}\u0000${message}`;
+    if (advisoryRefusalWarnKeys.has(key)) return;
+    advisoryRefusalWarnKeys.add(key);
+    loggerLog("warn", message);
+}
+
 // --- Version comparison (ported from opencode-acp lib/update.ts) ---
 // Proper semver including prerelease ordering: a prerelease is OLDER than its
 // release (0.1.46-pr.202.1 < 0.1.46), and prerelease parts compare
@@ -1012,29 +1029,36 @@ export async function forceInstallVersion(
     advisoryId: string,
 ): Promise<{ ok: boolean; error?: string }> {
     if (!installDir) {
-        return { ok: false, error: "cannot locate the install directory" };
+        const error = "cannot locate the install directory";
+        warnAdvisoryOnce(advisoryId, `[update] advisory ${advisoryId}: ${error}`);
+        return { ok: false, error };
     }
     const diskNow = await readDiskVersion(installDir);
     if ((diskNow ?? opts.currentVersion) === targetVersion) {
         // The advisory marks its own target as affected — a misconfiguration.
         // Fail loudly instead of spinning on a no-op install every cycle.
-        return { ok: false, error: `advisory ${advisoryId} targets the current version ${targetVersion} (misconfigured advisory)` };
+        const error = `advisory ${advisoryId} targets the current version ${targetVersion} (misconfigured advisory)`;
+        warnAdvisoryOnce(advisoryId, `[update] ${error} — fix the advisory document`);
+        return { ok: false, error };
     }
     if (await isGitWorkingTree(installDir)) {
-        loggerLog("warn", `[update] advisory ${advisoryId}: running from a source checkout (${installDir}) — refusing self-update (#580); upgrade manually with npm install -g ${opts.packageName}@${targetVersion}`);
+        warnAdvisoryOnce(advisoryId, `[update] advisory ${advisoryId}: running from a source checkout (${installDir}) — refusing self-update (#580); upgrade manually with npm install -g ${opts.packageName}@${targetVersion}`);
         return { ok: false, error: "running from a source checkout — refusing self-update (#580)" };
     }
     const managed = hostManagedInstall(installDir);
     if (managed) {
-        loggerLog("warn", `[update] advisory ${advisoryId}: install dir belongs to ${managed.owner} — no in-place overwrite (#991); update via ${managed.channel}`);
+        warnAdvisoryOnce(advisoryId, `[update] advisory ${advisoryId}: install dir belongs to ${managed.owner} — no in-place overwrite (#991); update via ${managed.channel}`);
         return { ok: false, error: `install dir is managed by ${managed.owner}; update via ${managed.channel}` };
     }
     const doc = await fetchVersionDoc(opts, opts.packageName, targetVersion);
     if (!doc?.tarball) {
-        return { ok: false, error: `cannot resolve ${targetVersion} on the registry` };
+        const error = `cannot resolve ${targetVersion} on the registry`;
+        warnAdvisoryOnce(advisoryId, `[update] advisory ${advisoryId}: ${error}`);
+        return { ok: false, error };
     }
     const lock = await tryAcquireLock();
     if (!lock) {
+        warnAdvisoryOnce(advisoryId, `[update] advisory ${advisoryId}: another process is updating, will retry next cycle`);
         return { ok: false, error: "another process is updating, will retry next cycle" };
     }
     try {
@@ -1049,6 +1073,7 @@ export async function forceInstallVersion(
             notifyStaleInstall(opts, targetVersion);
             return { ok: true };
         }
+        warnAdvisoryOnce(advisoryId, `[update] advisory ${advisoryId}: install failed: ${result.error} (will retry next cycle)`);
         return { ok: false, error: result.error };
     } finally {
         await lock.release();
