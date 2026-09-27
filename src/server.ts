@@ -68,7 +68,7 @@ import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
-import { buildSessionCacheReport } from "./cache-ledger.js";
+import { buildSessionCacheReport, handleAcpCache } from "./cache-ledger.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
@@ -5680,7 +5680,9 @@ function sendCacheReport(res: http.ServerResponse, url: string): void {
         sessions = sessions.slice().sort((a, b) => b.lastSeen - a.lastSeen);
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ reports: sessions.map((s) => ({ id: s.id, report: buildSessionCacheReport(s) })) }, null, 2));
+    // Same markdown the acp_cache MCP tool emits (handleAcpCache = formatCacheReport),
+    // so web copy/download matches /acp-cache output exactly.
+    res.end(JSON.stringify({ reports: sessions.map((s) => ({ id: s.id, report: handleAcpCache(s, { detail: "full" }) })) }, null, 2));
 }
 
 // #1206: orphan reaping was silent — blocks deactivated because their source

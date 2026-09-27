@@ -539,7 +539,7 @@ export const WEB_CLIENT = `(function () {
         }
         parts.push("</div></div>");
         const tot = ledger.totals;
-        parts.push('<div class="card" style="margin-top:16px"><div class="card-h"><span>' + t("det.cache_econ") + "</span>" + (tot ? (tot.balanced ? ' <span class="badge ok">' + t("det.ce_balanced") + "</span>" : ' <span class="badge warn">' + t("det.ce_unbalanced") + "</span>") : "") + '</div><div class="card-b">');
+        parts.push('<div class="card" style="margin-top:16px"><div class="card-h"><span>' + t("det.cache_econ") + "</span>" + (tot ? (tot.balanced ? ' <span class="badge ok">' + t("det.ce_balanced") + "</span>" : ' <span class="badge warn">' + t("det.ce_unbalanced") + "</span>") : "") + '</div><div class="card-b">' + (d.ledger ? '<div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:10px"><button id="cacherpt-copy" class="btn sm">' + t("common.copy") + '</button><button id="cacherpt-dl" class="btn sm">' + t("det.report_dl") + "</button></div>" : ""));
         if (tot) {
             parts.push('<div class="grid cols-4">');
             mini(parts, t("det.ce_new"), fmtW(tot.newContent || 0));
@@ -606,6 +606,7 @@ export const WEB_CLIENT = `(function () {
             host.innerHTML = buildDetailHtml(d);
             bindHandoffActions(d);
             bindBlocksActions(d);
+            bindCacheReportActions(d);
             const tc = $("title-copy");
             if (tc && d.title) tc.addEventListener("click", () => copyText(d.title, tc));
         } catch (e) {
@@ -675,6 +676,40 @@ export const WEB_CLIENT = `(function () {
             const b = d.blockDetails[bi];
             if (!b) return;
             btn.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); copyText(buildBlockMd(b), btn); });
+        });
+    }
+    function bindCacheReportActions(d) {
+        const copyB = $("cacherpt-copy");
+        const dlB = $("cacherpt-dl");
+        if (!copyB || !dlB) return;
+        const grab = async () => {
+            const r = await json("/__bili/cache-report?session=" + encodeURIComponent(d.id));
+            const rep = r && Array.isArray(r.reports) && r.reports[0] ? r.reports[0].report : null;
+            if (!rep) throw new Error("no cache report for this session yet");
+            return rep;
+        };
+        copyB.addEventListener("click", async () => {
+            busy(copyB, true);
+            try {
+                const md = await grab();
+                try { await navigator.clipboard.writeText(md); }
+                catch (e) { const ta = document.createElement("textarea"); ta.value = md; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
+                const old = copyB.innerHTML;
+                copyB.innerHTML = "&#10003; " + t("common.copied");
+                setTimeout(() => { copyB.innerHTML = old; }, 1200);
+            } catch (e) { toast(t("toast.failed", { msg: e.message }), "err"); } finally { busy(copyB, false); }
+        });
+        dlB.addEventListener("click", async () => {
+            busy(dlB, true);
+            try {
+                const md = await grab();
+                const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = "billion-context-cacherpt-" + String(d.id).replace(/[^A-Za-z0-9._-]/g, "_") + ".md";
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+            } catch (e) { toast(t("toast.failed", { msg: e.message }), "err"); } finally { busy(dlB, false); }
         });
     }
     function bindHandoffActions(d) {
@@ -789,7 +824,7 @@ export const WEB_CLIENT = `(function () {
             } else {
                 ptState.className = "badge disk";
                 ptState.textContent = t("cfg.pt_off");
-                ptSource.textContent = "";
+                ptSource.textContent = pt && pt.source ? (pt.source === "env" ? t("sys.pt_env") : t("sys.pt_file")) : "";
                 clearPt.hidden = true;
             }
             loadUpstream(cfg);

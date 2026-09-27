@@ -223,7 +223,9 @@ function summaryOf(s: Session, live: boolean): WebSessionSummary {
     return {
         id: s.id,
         ...(s.meta.title ? { title: s.meta.title } : {}),
-        ...(s.meta.label ? { label: s.meta.label } : {}),
+        // #1426: meta.label is auto-stamped with the session id on many clients —
+        // treat label === id as "no title" so lists/details show 无标题 + block hint.
+        ...(s.meta.label && s.meta.label !== s.id ? { label: s.meta.label } : {}),
         ...(s.meta.protocol ? { protocol: s.meta.protocol } : {}),
         ...(s.meta.upstreamOrigin ? { upstreamOrigin: s.meta.upstreamOrigin } : {}),
         live,
