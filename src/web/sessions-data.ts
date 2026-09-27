@@ -40,6 +40,13 @@ export interface WebSessionSummary {
     clientHint?: string;
     /** Number of compression events recorded in the per-request cache ledger (folds). */
     foldCount?: number;
+    /** Non-cached token attribution from ledger samples (acp-kernel decomposeSample):
+     *  genuinely new content, re-read caused by compression folds, and stable-prefix
+     *  misses attributed to upstream TTL expiry/eviction or client wire rewrites
+     *  (those two cannot be told apart by the kernel). */
+    newContent?: number;
+    compRepay?: number;
+    ttlRepay?: number;
     /** Σ (S−σ)×requestsAfter across ledger folds — input tokens not billed thanks to
      *  compression (acp-kernel EconomicsSummary.grossSaved semantics). */
     grossSaved?: number;
@@ -72,9 +79,15 @@ export interface WebOverview {
     repayTotal: number;
     /** Σ summary generation cost (output tokens) across ledger sessions. */
     summaryCostTotal: number;
+    /** Σ genuinely-new missed tokens across ledger sessions (decomposeSample). */
+    missNewTotal: number;
+    /** Σ compression re-read missed tokens across ledger sessions. */
+    missCompTotal: number;
+    /** Σ upstream-TTL-expiry / other-prefix-invalidation missed tokens across ledger sessions. */
+    missTtlTotal: number;
     hitPct: number | null;
     blocks: number;
-    byProtocol: Array<{ protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number }>;
+    byProtocol: Array<{ protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number; hitPct: number | null }>;
     recent: WebSessionSummary[];
 }
 
@@ -163,7 +176,7 @@ function summaryOf(s: Session, live: boolean): WebSessionSummary {
     // Per-field MAX (the sources overlap, never sum). Read-only on purpose:
     // getCacheLedger() would bootstrap/mutate session.metadata instead.
     const led = s.metadata["cacheLedger"] as {
-        agg?: { requests?: number; input?: number; cached?: number; output?: number };
+        agg?: { requests?: number; input?: number; cached?: number; output?: number; nc?: number; cr?: number; tr?: number };
         folds?: Array<{ S?: number; sigma?: number; T?: number; requestsAfter?: number }>;
     } | undefined;
     const agg = led;
@@ -219,6 +232,7 @@ function summaryOf(s: Session, live: boolean): WebSessionSummary {
         ...(hasLedger ? { hasLedger: true } : {}),
         ...(firstBlockHint ? { firstBlockHint } : {}),
         ...(hasFolds ? { grossSaved, netSaved, repayCost, summaryCost, foldCount } : {}),
+        ...(hasLedger ? { newContent: agg?.agg?.nc ?? 0, compRepay: agg?.agg?.cr ?? 0, ttlRepay: agg?.agg?.tr ?? 0 } : {}),
         ...(clientHint ? { clientHint } : {}),
     };
 }
@@ -239,6 +253,7 @@ export async function buildOverview(): Promise<WebOverview> {
     const all = await buildSessionList();
     let requests = 0, input = 0, cached = 0, output = 0, saved = 0, savedEstimated = 0, blocks = 0, live = 0;
     let grossSavedTotal = 0, netSavedTotal = 0, repayTotal = 0, summaryCostTotal = 0, hasFoldData = false;
+    let missNewTotal = 0, missCompTotal = 0, missTtlTotal = 0;
     const protoMap = new Map<string, { protocol: string; sessions: number; requests: number; inputTokens: number; cachedTokens: number; savedNet: number; folds: number }>();
     for (const s of all) {
         requests += s.requests;
@@ -262,6 +277,11 @@ export async function buildOverview(): Promise<WebOverview> {
         row.folds += s.foldCount ?? 0;
         protoMap.set(key, row);
         if (s.tokensSaved > 0 && !s.hasLedger) savedEstimated += s.tokensSaved;
+        if (s.hasLedger) {
+            missNewTotal += s.newContent ?? 0;
+            missCompTotal += s.compRepay ?? 0;
+            missTtlTotal += s.ttlRepay ?? 0;
+        }
         if (s.hasLedger && s.grossSaved != null) {
             hasFoldData = true;
             grossSavedTotal += s.grossSaved;
@@ -287,9 +307,12 @@ export async function buildOverview(): Promise<WebOverview> {
         hasFoldData,
         repayTotal,
         summaryCostTotal,
+        missNewTotal,
+        missCompTotal,
+        missTtlTotal,
         hitPct: hitPct(input, cached),
         blocks,
-        byProtocol: [...protoMap.values()],
+        byProtocol: [...protoMap.values()].map((r) => ({ ...r, hitPct: hitPct(r.inputTokens, r.cachedTokens) })),
         recent: all.slice(0, 8),
     };
 }

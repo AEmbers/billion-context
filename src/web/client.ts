@@ -157,16 +157,21 @@ export const WEB_CLIENT = `(function () {
             $("st-netsaved").textContent = o.hasFoldData ? ((o.netSavedTotal || 0) < 0 ? "-" : "") + fmtW(Math.abs(o.netSavedTotal || 0)) : t("common.none");
             $("st-net-sub").textContent = o.hasFoldData ? t("ov.sub_repay", { r: fmtW(o.repayTotal || 0), s: fmtW(o.summaryCostTotal || 0) }) + ((o.savedEstimated || 0) > 0 ? " · " + t("ov.net_excl") : "") : "";
             $("st-hitpct").textContent = o.hitPct == null ? t("common.none") : o.hitPct.toFixed(1) + "%";
+            const hs = $("st-hit-split");
+            if (hs) {
+                const missSum = (o.missNewTotal || 0) + (o.missCompTotal || 0) + (o.missTtlTotal || 0);
+                hs.textContent = missSum > 0 ? t("ov.miss_split", { n: fmtW(o.missNewTotal || 0), c: fmtW(o.missCompTotal || 0), x: fmtW(o.missTtlTotal || 0) }) : t("common.none");
+            }
             $("st-input").textContent = o.inputTokens ? fmtW(o.inputTokens) : t("common.none");
             $("st-cached").textContent = o.cachedTokens ? fmtW(o.cachedTokens) : t("common.none");
             $("st-output").textContent = o.outputTokens ? fmtW(o.outputTokens) : t("common.none");
             const pb = $("protocol-body");
             pb.innerHTML = "";
             const rows = (o.byProtocol || []).slice().sort((a, b) => b.sessions - a.sessions || b.requests - a.requests);
-            if (!rows.length) pb.innerHTML = '<tr><td colspan="7" class="dim">' + t("common.empty") + "</td></tr>";
+            if (!rows.length) pb.innerHTML = '<tr><td colspan="8" class="dim">' + t("common.empty") + "</td></tr>";
             rows.forEach((r) => {
                 const tr = document.createElement("tr");
-                tr.innerHTML = '<td>' + protoBadge(r.protocol) + '</td><td class="num">' + r.sessions + '</td><td class="num">' + (r.requests ? fmtW(r.requests) : t("common.none")) + '</td><td class="num">' + (r.inputTokens ? fmtW(r.inputTokens) : t("common.none")) + '</td><td class="num">' + (r.cachedTokens ? fmtW(r.cachedTokens) : t("common.none")) + '</td><td class="' + (r.savedNet > 0 ? "num good-num" : "num") + '">' + (r.savedNet ? fmtW(r.savedNet) : t("common.none")) + '</td><td class="num">' + (r.folds ? fmtW(r.folds) : t("common.none")) + "</td>";
+                tr.innerHTML = '<td>' + protoBadge(r.protocol) + '</td><td class="num">' + r.sessions + '</td><td class="num">' + (r.requests ? fmtW(r.requests) : t("common.none")) + '</td><td class="num">' + (r.inputTokens ? fmtW(r.inputTokens) : t("common.none")) + '</td><td class="num">' + (r.cachedTokens ? fmtW(r.cachedTokens) : t("common.none")) + '</td><td class="num">' + (r.hitPct == null ? t("common.none") : r.hitPct + "%") + '</td><td class="' + (r.savedNet > 0 ? "num good-num" : "num") + '">' + (r.savedNet ? fmtW(r.savedNet) : t("common.none")) + '</td><td class="num">' + (r.folds ? fmtW(r.folds) : t("common.none")) + "</td>";
                 pb.appendChild(tr);
             });
             $("sys-version").textContent = d.version || "?";
@@ -483,6 +488,7 @@ export const WEB_CLIENT = `(function () {
         mini(parts, t("common.requests"), d.requests ? fmtW(d.requests) : null);
         mini(parts, t("ov.input_tokens"), d.inputTokens ? fmtW(d.inputTokens) : null);
         mini(parts, t("ov.cached_tokens"), d.cachedTokens ? fmtW(d.cachedTokens) : null);
+        mini(parts, t("det.hit_pct"), d.cacheHitPct == null ? null : d.cacheHitPct.toFixed(1) + "%");
         mini(parts, t("ov.output_tokens"), d.outputTokens ? fmtW(d.outputTokens) : null);
         const dSavedV = d.netSaved != null ? d.netSaved : d.tokensSaved;
         mini(parts, t("ov.tokens_saved"), dSavedV ? fmtW(dSavedV) : null, dSavedV > 0);
