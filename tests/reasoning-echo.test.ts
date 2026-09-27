@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { isStrictReasoningEcho, normalizeStrictEchoReasoning, warnReasoningPairs, warnAnthropicThinkingPairs, warnResponsesReasoningPairs } from "../src/server.js";
-import { modelIdOf, normalizeStrictEchoBody } from "../src/strict-echo.js";
+import { modelIdOf, normalizeStrictEchoBody, normalizeStrictEchoResponsesInput } from "../src/strict-echo.js";
 import type { Session } from "../src/session.js";
 import type { OpenAIMessage } from "acp-kernel/wire";
 import { createInitialState } from "acp-kernel";
@@ -148,16 +148,171 @@ describe("#684 exit sentinels", () => {
         assert.equal(c.lines.length, 0);
     });
 
-    it("responses wire: function_call without preceding reasoning warns", () => {
+    it("#1479 responses wire: healthy [reasoning, message, function_call] run stays silent (was chronic false positive)", () => {
         const c = collector();
         warnResponsesReasoningPairs([
             { type: "message", role: "user", content: "u" },
-            { type: "reasoning", content: "r" },
+            { type: "reasoning", summary: [{ type: "summary_text", text: "r" }] },
             { type: "message", role: "assistant", content: "a" },
             { type: "function_call", name: "compress", arguments: "{}", call_id: "c1" },
         ], c.log, "s1");
+        assert.equal(c.lines.length, 0);
+    });
+
+    it("#1479 responses wire: multi-call run with one leading reasoning stays silent", () => {
+        const c = collector();
+        warnResponsesReasoningPairs([
+            { type: "reasoning", summary: [{ type: "summary_text", text: "r" }] },
+            { type: "function_call", name: "f1", arguments: "{}", call_id: "c1" },
+            { type: "function_call_output", call_id: "c1", output: "ok" },
+            { type: "function_call", name: "f2", arguments: "{}", call_id: "c2" },
+        ], c.log, "s1");
+        assert.equal(c.lines.length, 0);
+    });
+
+    it("#1479 responses wire: orphaned run warns and names the orphaned call_id", () => {
+        const c = collector();
+        warnResponsesReasoningPairs([
+            { type: "reasoning", summary: [{ type: "summary_text", text: "r" }] },
+            { type: "message", role: "assistant", content: "a" },
+            { type: "message", role: "user", content: "u2" },
+            { type: "function_call", name: "compress", arguments: "{}", call_id: "c-orphan" },
+        ], c.log, "s1");
         assert.equal(c.lines.length, 1);
         assert.match(c.lines[0]!, /reasoning-pair-violated/);
+        assert.match(c.lines[0]!, /c-orphan/);
+    });
+
+    it("#1479 responses wire: two orphaned runs count every call in both", () => {
+        const c = collector();
+        warnResponsesReasoningPairs([
+            { type: "reasoning", summary: [{ type: "summary_text", text: "r" }] },
+            { type: "message", role: "assistant", content: "a" },
+            { type: "message", role: "user", content: "u2" },
+            { type: "function_call", name: "f1", arguments: "{}", call_id: "c1" },
+            { type: "function_call", name: "f2", arguments: "{}", call_id: "c2" },
+            { type: "message", role: "user", content: "u3" },
+            { type: "custom_tool_call", name: "compress", arguments: "{}", call_id: "c3" },
+        ], c.log, "s1");
+        assert.equal(c.lines.length, 1);
+        assert.match(c.lines[0]!, /3 tool-call item\(s\) in 2 assistant run\(s\)/);
+        assert.match(c.lines[0]!, /c1/);
+        assert.match(c.lines[0]!, /c2/);
+        assert.match(c.lines[0]!, /c3/);
+    });
+
+    it("#1479 responses wire: non-thinking session (no reasoning anywhere) stays silent", () => {
+        const c = collector();
+        warnResponsesReasoningPairs([
+            { type: "message", role: "user", content: "u" },
+            { type: "function_call", name: "f1", arguments: "{}", call_id: "c1" },
+            { type: "function_call_output", call_id: "c1", output: "ok" },
+            { type: "function_call", name: "f2", arguments: "{}", call_id: "c2" },
+        ], c.log, "s1");
+        assert.equal(c.lines.length, 0);
+    });
+});
+
+describe("#1479 responses-wire strict-echo repair", () => {
+    function items(): Record<string, unknown>[] {
+        return [
+            { type: "message", role: "user", content: "what is the weather" },
+            { type: "reasoning", id: "rs-1", summary: [{ type: "summary_text", text: "thinking about it" }] },
+            { type: "message", role: "assistant", content: "let me check" },
+            { type: "message", role: "user", content: "and tomorrow?" },
+            { type: "function_call", id: "fc-c1", call_id: "call-c1", name: "get_weather", arguments: "{}" },
+            { type: "function_call_output", call_id: "call-c1", output: "sunny" },
+            { type: "message", role: "assistant", content: "sunny tomorrow too" },
+        ];
+    }
+
+    it("disabled: returns the same array untouched", () => {
+        const input = items();
+        const c = collector();
+        assert.equal(normalizeStrictEchoResponsesInput(input as never, false, c.log, "s1"), input);
+        assert.equal(c.lines.length, 0);
+    });
+
+    it("non-thinking session (no reasoning item anywhere): returns the same array", () => {
+        const input = items().filter((it) => it.type !== "reasoning");
+        const c = collector();
+        assert.equal(normalizeStrictEchoResponsesInput(input as never, true, c.log, "s1"), input);
+        assert.equal(c.lines.length, 0);
+    });
+
+    it("healthy run order: returns the same array, no log", () => {
+        const input: Record<string, unknown>[] = [
+            { type: "reasoning", id: "rs-1", summary: [{ type: "summary_text", text: "t" }] },
+            { type: "message", role: "assistant", content: "a" },
+            { type: "function_call", id: "fc-1", call_id: "c1", name: "f", arguments: "{}" },
+        ];
+        const c = collector();
+        assert.equal(normalizeStrictEchoResponsesInput(input as never, true, c.log, "s1"), input);
+        assert.equal(c.lines.length, 0);
+    });
+
+    it("orphaned run: injects exactly one blank reasoning at the run start, preserves everything else, no mutation", () => {
+        const input = items();
+        const c = collector();
+        const out = normalizeStrictEchoResponsesInput(input as never, true, c.log, "s1");
+        assert.notEqual(out, input);
+        assert.equal(out.length, input.length + 1);
+        const fcIdx = out.findIndex((it) => it.type === "function_call");
+        assert.deepEqual(out[fcIdx - 1], { type: "reasoning", summary: [{ type: "summary_text", text: "" }] });
+        let k = 0;
+        for (let i = 0; i < out.length; i++) {
+            if (i === fcIdx - 1) continue;
+            assert.equal(out[i], input[k++]);
+        }
+        assert.deepEqual(out.find((it) => it.id === "rs-1"), input.find((it) => it.id === "rs-1"));
+        assert.equal(input.length, 7);
+        assert.equal(c.lines.length, 1);
+        assert.match(c.lines[0]!, /strict-echo-responses: injected 1 blank reasoning item\(s\)/);
+        assert.match(c.lines[0]!, /\(#1479\)/);
+    });
+
+    it("multiple orphaned runs: one blank per run", () => {
+        const input: Record<string, unknown>[] = [
+            { type: "reasoning", id: "rs-1", summary: [{ type: "summary_text", text: "t" }] },
+            { type: "message", role: "assistant", content: "a" },
+            { type: "message", role: "user", content: "u2" },
+            { type: "function_call", id: "fc-1", call_id: "c1", name: "f1", arguments: "{}" },
+            { type: "message", role: "user", content: "u3" },
+            { type: "custom_tool_call", id: "ct-1", call_id: "c2", name: "compress", arguments: "{}" },
+        ];
+        const c = collector();
+        const out = normalizeStrictEchoResponsesInput(input as never, true, c.log, "s1");
+        assert.equal(out.length, input.length + 2);
+        assert.match(c.lines[0]!, /injected 2 blank reasoning item\(s\)/);
+        const blanks = out.filter((it) => it.type === "reasoning" && JSON.stringify(it.summary) === JSON.stringify([{ type: "summary_text", text: "" }]));
+        assert.equal(blanks.length, 2);
+    });
+
+    it("normalizeStrictEchoBody patches Responses input[] bodies (the loop re-request path)", () => {
+        const body = { model: "m", stream: true, input: items() };
+        const c = collector();
+        const out = normalizeStrictEchoBody(body, true, c.log, "s1");
+        assert.notEqual(out, body);
+        assert.equal(out.model, "m");
+        assert.equal(out.stream, true);
+        const outInput = out.input as Record<string, unknown>[];
+        assert.equal(outInput.length, (body.input as unknown[]).length + 1);
+        const fcIdx = outInput.findIndex((it) => it.type === "function_call");
+        assert.deepEqual(outInput[fcIdx - 1], { type: "reasoning", summary: [{ type: "summary_text", text: "" }] });
+        assert.match(c.lines[0]!, /strict-echo-responses/);
+    });
+
+    it("normalizeStrictEchoBody: chat messages[] and Responses input[] still each handled independently", () => {
+        const body = {
+            model: "m",
+            messages: [{ role: "assistant" as const, content: "", tool_calls: [{ id: "c1", type: "function" as const, function: { name: "f", arguments: "{}" } }] }],
+            input: items(),
+        };
+        const c = collector();
+        const out = normalizeStrictEchoBody(body, true, c.log, "s1");
+        assert.notEqual(out, body);
+        assert.equal((out.messages as Record<string, unknown>[])[0].reasoning_content, "");
+        assert.equal((out.input as Record<string, unknown>[]).length, (body.input as unknown[]).length + 1);
     });
 });
 
