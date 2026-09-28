@@ -1652,6 +1652,14 @@ async function handle(
                 if (!windowSourceLogged.has(model)) {
                     windowSourceLogged.add(model);
                     log("info", `[window] model=${model} source=${wsSource} native=${native ?? "none"} effective=${reqConfig.modelContextLimit} launcher=${launcherWindow ?? "none"} configured=${configuredWindow ?? "none"} peek=${peekWindow ?? "none"} fallback=${nativeFromFallback}`);
+                    // #1569: a cooperating plugin is present but its configured
+                    // window never arrived — the host's own limit.context is not
+                    // reaching us, and nudge bands / emergency depth are being
+                    // sized against a guessed denominator. Say so once per model
+                    // instead of degrading silently into registry-peek.
+                    if (runtimeAgent !== undefined && pluginWindow === undefined && runtimeWindow === undefined) {
+                        log("warn", `[window] model=${model} agent=${runtimeAgent} sent no context window (x-bili-plugin-context-window absent, no matching runtime-info) — host-configured limit not reaching the proxy; sizing against ${wsSource}`);
+                    }
                 }
             }
             resolvedNativeWindow = native;
@@ -3021,6 +3029,19 @@ function effectiveTokenCount(session: Session, msgs: CoreMessage[], inboundImage
     if (session.metadata.anonymousPrefixAffinity) return raw;
     const est = session.stats.localInputEstimate ?? 0;
     if (est <= 0) return 0;
+    // #1569: while the latest baseline is estimate-grade (the transient window
+    // right after a failed turn), min(est, raw) sizes on the char-count upper
+    // bound — ~3.5× high on code/JSON-heavy tool results. That inflation lit
+    // spurious nudge bands whose kernel growth-reference pin then blocked
+    // GENUINE nudges until context regrew past the artifact (false T1 at 66%,
+    // false EMERGENCY at 120%, ~20-min dead zone in the #1569 log). Once a
+    // REAL usage report has landed (lastUsageGradeTokens > 0), billing proved
+    // the calibrated CJK-aware rate holds for this session's content class —
+    // size on the current view's calibrated estimate instead. Never-reporting
+    // upstreams (#553/#728) keep the fail-closed upper bound: their anchor
+    // stays absent. No cap by est: est bounds the PREVIOUS turn's outbound,
+    // not this view's growth.
+    if ((session.stats.lastUsageGradeTokens ?? 0) > 0) return estimateCoreMessages(msgs) + inboundImageTokens;
     return Math.min(est, raw);
 }
 
