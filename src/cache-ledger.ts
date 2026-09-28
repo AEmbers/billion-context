@@ -337,6 +337,37 @@ export function recordCacheSample(
     }
 }
 
+/** #1547: single settle path for one successful upstream turn's usage report.
+ *  All three response shapes — loop SSE (recordUsage), plugin pipes
+ *  (applyUsageSample) and the non-streaming rewriter (server.ts forward) —
+ *  route their input-side stats + ledger sample through here, so session.stats
+ *  and the cache ledger can never drift apart per response shape again. The
+ *  caller keeps its own settle-decision gate, log line, collapse watch and
+ *  outputTokens update; `reportedCached === null` means the provider reported
+ *  no cache tokens (recordCacheSample quarantines that sample). */
+export function settleUsageReport(
+    session: Session,
+    s: { total: number; reportedCached: number | null; output?: number; protocol?: string; upstream?: string },
+): void {
+    // #793: a zero-total sample carries no information (gateway placeholder or
+    // relay echo) — it must not clobber the last trusted lastInputTokens.
+    if (s.total > 0) {
+        session.stats.inputTokens += s.total;
+        // Net out this turn's compress credit: the post-compress re-request
+        // re-sends the unfolded history, so its usage report over-reports the
+        // context the NEXT request will actually carry (see stream.ts applyRanges).
+        session.stats.lastInputTokens = Math.max(0, s.total - (session.stats.compressCreditTokens ?? 0));
+        session.stats.lastInputTokensSource = "usage";
+        // #1110: a real usage report retires the one-shot overflow arm.
+        delete session.stats.overflowArmTokens;
+    }
+    if (s.reportedCached !== null && s.total > 0) {
+        session.stats.cachedTokens += s.reportedCached;
+        session.stats.cacheSamples += 1;
+    }
+    recordCacheSample(session, { at: Date.now(), input: s.total, cached: s.reportedCached, output: s.output, protocol: s.protocol, upstream: s.upstream });
+}
+
 /** [#1279] Price profile stamped by the last request (server.ts runPrepare).
  *  Metadata is persisted user-editable JSON, so re-validate on read: only
  *  finite non-negative numbers survive — a corrupt stamp degrades to the

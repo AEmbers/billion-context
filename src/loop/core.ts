@@ -5,7 +5,7 @@ import {
     type CoreMessage,
 } from "acp-kernel";
 import { handleAcpStatus } from "../acp-status.js";
-import { handleAcpCache, recordCacheSample } from "../cache-ledger.js";
+import { handleAcpCache, settleUsageReport } from "../cache-ledger.js";
 import { lastCompressSuffix, withSessionLock, type Session } from "../session.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import {
@@ -277,22 +277,6 @@ function recordUsage(
     // prefix as an unexplained ttlRepay residual (which reads as a 0% hit rate).
     const reportedCached: number | null = typeof cached === "number" ? cached : null;
     const total = promptInputTotal(ctx.protocol, prompt, cached, usage.creationTokens);
-    if (total > 0) ctx.session.stats.inputTokens += total;
-    // Net out this turn's compress credit: the post-compress re-request
-    // re-sends the unfolded history, so its usage report over-reports the
-    // context the NEXT request will actually carry (see stream.ts applyRanges).
-    // #793: a zero-total sample (missing or placeholder input) must not
-    // clobber the last trusted value — mirrors applyUsageSample (plugin mode).
-    if (total > 0) {
-        ctx.session.stats.lastInputTokens = Math.max(0, total - (ctx.session.stats.compressCreditTokens ?? 0));
-        ctx.session.stats.lastInputTokensSource = "usage";
-        // #1110: a real usage report retires the one-shot overflow arm.
-        delete ctx.session.stats.overflowArmTokens;
-    }
-    if (reportedCached !== null && total > 0) {
-        ctx.session.stats.cachedTokens += reportedCached;
-        ctx.session.stats.cacheSamples += 1;
-    }
     if (typeof out === "number") ctx.session.stats.outputTokens += out;
     const hitPct =
         reportedCached !== null && total > 0 ? Math.round((reportedCached / total) * 100) : 0;
@@ -303,14 +287,7 @@ function recordUsage(
         `[acp-usage] round ${round} input=${total} ${reportedCached !== null ? `cached=${reportedCached} (cache hit ${hitPct}%)` : "(no cache report)"}${foldNew ? " fold=new" : ""}${total <= 0 ? " (zero-total: lastInputTokens kept)" : ""}${imageUsageSuffix(ctx.session)}`,
     );
     if (total > 0 || reportedCached !== null) {
-        recordCacheSample(ctx.session, {
-            at: Date.now(),
-            input: total,
-            cached: reportedCached,
-            output: out,
-            protocol: ctx.protocol,
-            upstream: ctx.upstreamOrigin,
-        });
+        settleUsageReport(ctx.session, { total, reportedCached, output: out, protocol: ctx.protocol, upstream: ctx.upstreamOrigin });
     }
 }
 
