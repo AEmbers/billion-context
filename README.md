@@ -275,17 +275,22 @@ Everything that doesn't fit in one Quickstart line — how each client's lanes a
 
 ## FAQ
 
-**How do I check my cache hit rate?** Don't dig through logs — run `/acp`
-or `/acp-cache` and click the localhost URL it prints: the session page shows
-the cache hit-rate **line chart** plus a per-break **attribution** of why
-each prefix stopped hitting (adjacent-request pairing: pure-append /
-mid-stream-rewrite / prefix-stable-miss, #1254/#1266). Rule of thumb:
-**compression itself costs ≤2%** — a healthy session sits at **95–97%**. When
-you see less, the report tells you which of the usual suspects it was, in this
-order: ① upstream cache TTL expiry, ② a model switch, ③ a bili bug (report it
-with the page attached), ④ other/unknown. Same report over HTTP:
-`GET /__bili/cache-report`; the raw per-request `[acp-usage]` lines still land
-in the log file for deep dives.
+**How do I check my cache hit rate?** Don't dig through logs — `/acp-cache`
+prints a **text summary report right in the client**, headed by a clickable
+**Web UI link**: open it for the web version of the session page — the cache
+hit-rate **line chart** plus per-break **attribution**. The report has four
+blocks that pin things down at a glance: **GRAND LEDGER** (totals + hit% with
+an explicit `HEALTHY` verdict; misses decomposed into new content /
+compress re-pay / upstream-ttl-or-client-rewrite) · **FOLD ECONOMICS** (per-fold
+economics: net tokens saved, paid-back verdicts) · **LINE ITEMS** (anomalies
+only: hit<85% or miss≥5000). Rule of thumb: **compression itself costs ≤2%** —
+a healthy session sits at **95–97%**. When you see less, the attribution tells
+you which of the usual suspects it was, in this order: ① upstream cache TTL
+expiry (shows up as stable-prefix misses — the top-spikes line names idle
+times), ② a model switch, ③ a bili bug (report it with the page attached),
+④ other/unknown. `/acp-cache [full]` lists every fold & line; same report over
+HTTP: `GET /__bili/cache-report`; the raw per-request `[acp-usage]` lines still
+land in the log file for deep dives.
 
 **What does `/acp` show?** In clients with the native plugin (opencode, dsh),
 `/acp` renders the ACP status panel of the current conversation straight from
