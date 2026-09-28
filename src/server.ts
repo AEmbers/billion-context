@@ -2234,7 +2234,7 @@ async function handle(
             }
         }
         // Two compression modes, decided here per request and bound per session
-        // (see README "Two compression modes"):
+        // (see TECHNICAL-NOTES.md "Two compression modes"):
         //  - pluginMode (x-bili-plugin header / registered agent): the ACP-native
         //    agent (pi/omp) OWNS compression — it executes `compress` locally, the
         //    call+result live in its own re-sent history, and the summary carrier
@@ -2731,7 +2731,7 @@ const ACP_TAG_MARK = "\x3cacp ";
 // compression, src/preflight.ts — #247) have NO other carrier: their anchor is
 // the only place the summary reaches the model, so it must survive.
 //
-// Per mode (see README "Two compression modes"): in plugin/launcher mode the
+// Per mode (see TECHNICAL-NOTES.md "Two compression modes"): in plugin/launcher mode the
 // tool call is ALWAYS in the re-sent history (the agent owns compression), so
 // this strips every acp_summary and the carrier is the tool call; in proxy mode
 // the tool call is usually absent (ephemeral server-side execution) or

@@ -42,6 +42,8 @@
 
 ---
 
+> **Cache health at a glance:** a healthy session keeps a **95–97%** prefix-cache hit rate — compression itself costs ≤2%. Sustained lower? Check attribution with `/acp` or `/acp-cache` (see [FAQ](#faq)); usual causes, in order: upstream cache TTL expiry · model switch · a bili bug (please report) · other/unknown.
+
 ## Community
 
 QQ Group:
@@ -94,84 +96,6 @@ The proxy injects four context-management tools into the conversation; the model
 - **`decompress`** — restore a compressed range when exact details are needed again.
 - **`search_context`** — keyword search over compressed summaries and visible messages.
 - **`acp_status`** — context-usage overview plus which ranges are still compressible.
-
-Four opt-in extensions add capabilities on top, each off by default with full semantics (enable flags, scope, caveats) in [CONFIGURATION.md](CONFIGURATION.md): **`absorb`** distills oversized tool results (builds, logs, greps) into compact summaries at arrival instead of waiting for a fold round (#605); **`acp_rule`** records principle-level reminders (lessons, behaviors to remember, pitfalls) hard-protected from every fold (#1399, [billion-context-pi#433](https://github.com/ranxianglei/billion-context-pi/issues/433)); **`acp_retrieve`** stores oversized results in a content-addressed store behind a byte-stable ID reference, making folds lossless and retrievable on demand (#1097/#1179); **`image_full`** downscales screenshot-like images once at arrival so fewer billed pixels enter the wire, restorable to original resolution for the session (#1095).
-
-Protection knobs decide which tool results survive folding: `compress.protectedLatestTools` keeps a cumulative tool's latest snapshot un-foldable (a live todo/task list, #639); `compress.protectedTools` hard-excludes every instance of a low-frequency high-value tool; `compress.neverPreserveRecentTools` / `compress.preserveRecentTools` tune the recent-zone exemption list — e.g. the recommended `["read"]` remedy for the batch-read fold→re-read loop (#1198/#1277). All documented in [CONFIGURATION.md](CONFIGURATION.md).
-
-### Two compression modes — who executes `compress`
-
-The proxy runs in one of two modes, and **the mode decides who executes
-`compress`, which in turn decides how the summary travels to the model** (the
-"carrier"). This distinction is the root of #377.
-
-| | **Launcher / plugin mode** (`bili pi`, `bili codex`, …) | **Proxy mode** (plain client → `/bili/`) |
-|---|---|---|
-| Client | ACP-native agent with the bili extension (pi/omp) | Any OpenAI/Anthropic client, no extension |
-| Who executes `compress` | **The agent** (pi runs it locally) | **The proxy** (server-side compress loop) |
-| `compress` tool call in the re-sent history? | Yes — part of the agent's own conversation | No — ephemeral proxy-loop traffic |
-| Preflight blocks (no tool call)? | Last-resort backstop — the agent normally compresses on its own `compress` calls, but `src/preflight.ts` still fires (in both modes) when the input alone exceeds the window (#470) | Yes — `src/preflight.ts` compresses behind the client's back |
-| **Summary carrier on the wire** | **the `compress` tool call** | **an `acp_summary` user message** |
-| System messages on the wire | always exactly 1 (client + prompt) | always exactly 1 (client + prompt) — summaries ride on user messages |
-| SGLang "single system" 400 (#377) | cannot happen | cannot happen (summaries are user messages, not system) |
-| Proxy-injected `compress` tools | none — the agent registers the 4 ACP tools natively | the 4 context tools (when enabled) |
-| Proxy-injected nudge | **yes** — the agent has no nudge channel of its own, so the proxy-side nudge is the proactive compression trigger (preflight alone only fires at the hard limit; #451) | yes (when enabled) |
-
-**Why the carriers differ.** In plugin mode the agent owns compression: the
-`compress` call + result live in the agent's own history and are re-sent every
-turn, so the summary rides on the tool call and the agent's view never renders
-the kernel's `acp_summary` fallback (`billion-context-pi` `src/messages.ts`
-skips `acp_summary_*`). In proxy mode the client is not ACP-native, so the
-proxy executes `compress` server-side; the tool call never enters the client's
-history, and preflight blocks have no tool call at all — so the kernel's
-`acp_summary` message is the only carrier. The kernel renders it as role
-`system`, but strict OpenAI-compatible backends (SGLang) require exactly one
-system message at index 0, so `systemToUser` (`src/util.ts`) re-voices it as a
-`user` message, leaving it at its anchor position. This keeps the head system
-message (the prefix-cache anchor) byte-stable across compress turns, so a new
-block does not invalidate the whole-conversation prefix.
-
-**Why `user`, not `system` or a forged tool call.** A mid-stream `system`
-message is what SGLang rejects (#377). A forged `compress` tool call would be
-the "pure" carrier, but in proxy mode it requires fabricating an
-assistant `tool_calls` + `user` `tool_result` pair by id, declaring the tool in
-the request, and handling preflight blocks that have no authentic call — far
-more invasive than re-voicing a standalone note. A `user` message is allowed
-anywhere in the conversation, so it is the minimal change that satisfies both
-SGLang's one-system rule and prefix-cache stability. The accepted trade-off:
-a summary is a stand-in for the folded history, and re-voicing it as a user
-turn is a semantic mismatch the model tolerates (it is clearly marked
-`[Compressed conversation section]`).
-
-**Do the two modes coexist?**
-
-- **Same proxy instance: yes, by design.** One proxy serves plugin and plain
-  clients at once; `pluginMode` is decided per request (`x-bili-plugin` header)
-  and bound per session (`session.metadata.pluginAgent`). The launcher reuses a
-  running proxy.
-- **Same session: the mode is sticky.** A session created in plugin mode stays
-  plugin mode (metadata inheritance); a plain session can only be *upgraded* to
-  plugin mode if a plugin request arrives with a matching conversation id (the
-  header outranks) — and never downgraded. In practice a plain→plugin upgrade
-  requires the plugin client's conversation id to match an existing plain
-  session id, which doesn't happen (each client generates its own id).
-- **Cross-mode block hazard: theoretical only.** It would require the same
-  conversation id to span a mode switch. plugin→proxy is safe (the tool call is
-  in the shared history); proxy→plugin could orphan proxy-created block
-  summaries (their tool call isn't in the agent's history and the agent's view
-  skips `acp_summary`) — but that needs the id match above, which doesn't occur.
-
-**Verifying that a compression actually landed.** After executing `compress`,
-the proxy emits a confirmation marker (`📦 [ACP] Compressed …`) as plain
-assistant text — but under sustained context pressure a model was observed
-*writing that marker format itself* without ever calling the tool (#717): 17
-fake "compressions" over ~2 hours while real usage climbed to 89%. A marker
-line visible in the transcript is therefore not proof of persistence — verify
-with `acp_status` (block count increased, compressible-range start advanced)
-before trusting it. As a backstop, the proxy strips any marker-shaped line the
-model emits on its own and logs a `[marker-echo]` warning, and both the nudge
-and the injected prompt state explicitly that markers are proxy-emitted only.
-
 
 ## Which do I need?
 
@@ -239,7 +163,6 @@ bili plugin install kimi        # writes $KIMI_CODE_HOME/plugins/managed/billion
 bili plugin install hermes      # copies the Python plugin into ~/.hermes/plugins/billion-context/ (+ machine-owned bili.json sidecar) and enables it via `hermes plugins enable billion-context`
 bili plugin install zcode       # writes hooks.enabled + a SessionStart hook + mcp.servers.bili into ~/.zcode/cli/config.json; per-session routing lands in the bigmodel provider store on first start
 bili plugin remove <client>     # undo (dsh removes through the same channel; config snapshots go to .bili-bak)
-bili plugin update [client]     # bring every lane's bili presence up to date, each through its own owner (see below)
 ```
 
 Where a client has its own plugin channel you can also install natively,
@@ -262,33 +185,6 @@ skipping bili commands entirely:
 For pi / omp / kimi / claude there is no client-side channel — `bili plugin
 install <client>` writes their config entries for you (kimi's declarative
 `kimi.plugin.json` + registry record, claude's managed settings block, …).
-
-#### Single-writer: who owns which copy (#991)
-
-Every bili presence on a machine has exactly **one writer** — the thing
-that installed it is the thing that updates it, and nothing else ever
-overwrites that copy in place:
-
-| Lane | Copy lives in | Updated by |
-|------|---------------|------------|
-| global `bili` | npm global (`npm i -g billion-context`) | `bili update` / background auto-update |
-| **pi** | pi's package manager (npm form) | **`pi update`** — bili never overwrites it |
-| **opencode** | opencode's plugin dir | **opencode's plugin manager** — bili never overwrites it |
-| **dsh** | each profile's pnpm store | a periodic check re-runs dsh's plugin channel per profile — driven by the global bili self-update **or by the profile copy's own proxy** when the global isn't running (dsh-market installs, #1196); manual: `dsh plugin add billion-context@latest`. pnpm's hardlinked store must never be copied over in place |
-| omp / claude / codex / kimi / zcode | no copy — entries point at the global bili install | they update together with the global copy |
-| **hermes** | `~/.hermes/plugins/billion-context/` (copied files + `bili.json` sidecar pointing at the global dist) | **`bili plugin update hermes`** re-copies the files; the sidecar tracks the global install |
-
-This is enforced in code, not just convention: the self-updater
-(`src/update.ts` → `hostManagedInstall`) detects install dirs under a pnpm
-virtual store (`.pnpm`) or a host agent tree (pi / opencode / dsh / kimi /
-omp homes) and **skips** them; `installViaTarball` refuses them structurally
-so direct callers cannot corrupt a store either. Mixing *commands* is fine
-(`dsh plugin add` ≡ `bili plugin install dsh` — same channel, same records);
-mixing *writers* is what the guard forbids. `bili plugin update [client]`
-is the one command that drives every lane through its own owner and prints
-the per-lane update path (`bili plugin list` shows the same per-lane channel).
-
-Mechanics of how the plugin binds to its proxy — spawn vs attach, identity-based reuse (#1225), the lifecycle attach gate (#1335), lane-aware discovery across all live instances (#1232), and the runtime-info protocol (#955) — all live in [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
 
 Notes:
 
@@ -354,13 +250,7 @@ client baseURL before:  https://api.openai.com/v1
 client baseURL after:   http://localhost:8787/bili/https://api.openai.com/v1
 ```
 
-That's it — put your real API key in the client config as usual (the proxy
-passes it through untouched). Context windows (gpt-5.1-codex=400K,
-glm-5.2=1M, claude-opus-4=200K, …) are looked up from models.dev
-automatically.
-
-For per-client configuration examples (OpenCode, Codex, Pi, login-client
-MITM, …) see the web UI guide at [http://localhost:8787](http://localhost:8787).
+For more per-client configuration examples, see the web UI guide at [http://localhost:8787](http://localhost:8787).
 
 **Verify.** With the proxy running and your config saved, check it answers
 and that your first real request shows compression activity in the log:
@@ -382,6 +272,57 @@ should see a `processTurn` line per request, and once the conversation grows,
 ### Client deep dives
 
 Everything that doesn't fit in one Quickstart line — how each client's lanes attach, what gets written where, and known limitations — lives in **[CLIENTS.md](CLIENTS.md)**: dsh · Kimi Code · Hermes · ZCode · Gemini family (Gemini CLI / iFlow CLI / Qwen Code) · cert-MITM clients that never compress (CONNECT blind tunnels, #897) · unrecognized endpoints going direct (#1290) · OpenCode (launcher / native / pure proxy, `/acp` status & rules, legacy opencode-acp sessions #920).
+
+## FAQ
+
+**How do I check my cache hit rate?** Don't dig through logs — `/acp-cache`
+prints a **text summary report right in the client**, headed by a clickable
+**Web UI link**: open it for the web version of the session page — the cache
+hit-rate **line chart** plus per-break **attribution**:
+
+![web session page: cache hit-rate chart + attribution](docs/cache-web-session.en.png)
+The report has four
+blocks that pin things down at a glance: **GRAND LEDGER** (totals + hit% with
+an explicit `HEALTHY` verdict; misses decomposed into new content /
+compress re-pay / upstream-ttl-or-client-rewrite) · **FOLD ECONOMICS** (per-fold
+economics: net tokens saved, paid-back verdicts) · **LINE ITEMS** (anomalies
+only: hit<85% or miss≥5000). Rule of thumb: **compression itself costs ≤2%** —
+a healthy session sits at **95–97%**. When you see less, the attribution tells
+you which of the usual suspects it was, in this order: ① upstream cache TTL
+expiry (shows up as stable-prefix misses — the top-spikes line names idle
+times), ② a model switch, ③ a bili bug (report it with the page attached),
+④ other/unknown. `/acp-cache [full]` lists every fold & line; same report over
+HTTP: `GET /__bili/cache-report`; the raw per-request `[acp-usage]` lines still
+land in the log file for deep dives.
+
+**What does `/acp` show?** In clients with the native plugin (opencode, dsh),
+`/acp` renders the ACP status panel of the current conversation straight from
+the proxy (session, blocks, compressible ranges, usage); before the first model
+request it shows an idle notice instead. `/acp-cache [full]` prints the cache
+report above.
+
+**Can I query sessions and config over the web?** Yes — open
+[http://localhost:8787](http://localhost:8787): an overview dashboard, session
+list with per-session detail, live logs, a config editor, and an upstream
+connectivity test. Everything is also plain JSON for scripting
+(`/__bili/stats`, `/__bili/sessions`, `/__bili/config`, …).
+
+**When does compression happen?** It is model-driven: the injected context
+tools are called by the model as context grows, gentle growth nudges
+(~50K-token steps by design, adjustable via `compress.nudgeGrowthTokens`)
+prompt it along the way, and preflight fires as a hard backstop when the input
+alone exceeds the window (#470). Watch it live with `/acp` or the web UI.
+
+**Is bili transparent? How do I turn it off?** Unrecognized endpoints forward
+unchanged ([CLIENTS.md](CLIENTS.md)), and every mode reverses cleanly:
+`bili plugin remove <client>` for native installs, stop using the launcher
+command / env vars / `/bili/` prefix for the other two — traffic goes direct
+again immediately.
+
+**Where are logs and session data stored?** Log:
+`~/.local/state/billion-context/bili.log` (also mirrored to stderr); session
+state: `~/.local/share/billion-context/` (XDG-overridable; Windows AV exclusion
+#362, opt-in cleanup #1082) — full paths in [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Running the proxy
 
