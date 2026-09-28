@@ -5622,6 +5622,7 @@ async function forward(
                             log,
                             label: prepared.session.id,
                         }),
+                        chainCarrierTag ?? undefined,
                     );
                 } else {
                     // #732/#821: the plugin pipe re-issues the agent's own body
@@ -5742,6 +5743,7 @@ async function forward(
                         log,
                         label: prepared.session.id,
                     }),
+                    chainCarrierTag ?? undefined,
                 );
             } else {
                 await pipeThrough(toClient, res);
@@ -5782,6 +5784,7 @@ async function forward(
                         log,
                         label: p.session.id,
                     }),
+                    chainCarrierTag ?? undefined,
                 );
             } else {
                 await pipePluginChatWithStrip(
