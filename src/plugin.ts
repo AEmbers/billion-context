@@ -1392,6 +1392,15 @@ export async function pipePluginChatWithStrip(
         }
         return out;
     };
+    // #1546: resolve ONE (field, index) stream's held tail without touching the
+    // others. A terminal frame folds its own fields' tails into their deltas so
+    // the finish marker lands after every byte of that field — flushing them as
+    // separate synthetic chunks ahead of the frame would reorder a tail that was
+    // held from THIS frame's own text (e.g. "hello <a" → "<a" before "hello ").
+    const flushFieldTail = (field: string, index: number): string => {
+        const s = streams.get(`${field}:${index}`);
+        return s ? s.filter.flush() : "";
+    };
     const write = (s: string) => {
         if (res.destroyed || res.writableEnded) return;
         if (!res.write(Buffer.from(s, "utf8"))) {
@@ -1476,9 +1485,15 @@ export async function pipePluginChatWithStrip(
         let droppedText = false;
         let keptText = false;
         let hadText = false;
+        // #1546: a frame carrying a non-null finish_reason is terminal — its held
+        // tails must be drained before it reaches the client, never after.
+        let isTerminal = false;
         for (let ci = 0; ci < choices.length; ci++) {
             const ch = choices[ci] as Record<string, unknown> | null;
-            if (ch && typeof ch["finish_reason"] === "string") finalFinishReason = ch["finish_reason"] as string;
+            if (ch && typeof ch["finish_reason"] === "string") {
+                finalFinishReason = ch["finish_reason"] as string;
+                isTerminal = true;
+            }
             const d = ch?.["delta"];
             if (!d || typeof d !== "object") continue;
             const dd = d as Record<string, unknown>;
@@ -1512,7 +1527,10 @@ export async function pipePluginChatWithStrip(
             for (const field of ["content", "reasoning_content", "reasoning"]) {
                 const v = dd[field];
                 if (typeof v !== "string") continue;
-                hadText = true;
+                // #1546: an empty-string field carries no text — treating it as
+                // text blocked the no-text flush path and let a terminal frame
+                // leap ahead of a held tail.
+                if (v.length > 0) hadText = true;
                 if (field !== "content" && v.length > 0) sawThinking = true;
                 if (!mayStartRenderTag(v) && !mayStartMarkerLine(v) && !anyPending()) {
                     if (v.length > 0) {
@@ -1523,16 +1541,33 @@ export async function pipePluginChatWithStrip(
                     continue;
                 }
                 const index = typeof ch?.["index"] === "number" ? ch["index"] : ci;
-                const [clean, changed] = pushField(field, index, v);
+                const [released, pushedChanged] = pushField(field, index, v);
+                let clean = released;
+                let changed = pushedChanged;
+                if (isTerminal) {
+                    // Fold this field's held tail into its own delta so the finish
+                    // marker lands after every byte of the field (#1546).
+                    const tail = flushFieldTail(field, index);
+                    if (tail.length > 0) {
+                        clean = released + tail;
+                        changed = true;
+                        proseAcc += tail;
+                    }
+                }
                 if (clean.length === 0) droppedText = true;
                 else {
                     keptText = true;
                     if (field === "content") {
                         visibleTextChars += clean.length;
+                        // The folded tail is released markup (an unclosed-tag
+                        // interior), counted like flushTails so degenerate-turn
+                        // detection is unchanged (#1546).
+                        const tailLen = clean.length - released.length;
+                        if (tailLen > 0) releasedMarkupChars += tailLen;
                         // What a dropped tag leaves behind is its own interior: the
                         // host finds no tool call in it and stalls the turn.
                         if (droppedTagInFrame) {
-                            releasedMarkupChars += clean.length;
+                            releasedMarkupChars += released.length;
                             droppedTagInFrame = false;
                         }
                     }
@@ -1545,6 +1580,11 @@ export async function pipePluginChatWithStrip(
                 }
             }
         }
+        // #1546: a terminal frame must reach the client only after every held
+        // tail is drained. Tails of fields THIS frame carried were folded into
+        // their deltas above; drain whatever remains (other fields/choices) as
+        // synthetic chunks ahead of the frame so nothing lands after finish.
+        const drain = isTerminal && anyPending() ? flushTails() : "";
         if (rebuilt) {
             // Delta carried no visible text after stripping: drop the whole
             // chunk instead of forwarding an empty content delta. Only when
@@ -1553,8 +1593,9 @@ export async function pipePluginChatWithStrip(
             if (droppedText && !keptText && !hadTextOtherThanTextFields(rebuilt["choices"])) {
                 return "";
             }
-            return rebuildEvent(rawEvent, rebuilt);
+            return drain + rebuildEvent(rawEvent, rebuilt);
         }
+        if (drain.length > 0) return drain + rawEvent + "\n\n";
         if (!hadText && anyPending()) return flushTails() + rawEvent + "\n\n";
         return rawEvent + "\n\n";
     };
@@ -1633,6 +1674,9 @@ export async function pipePluginChatWithStrip(
         let droppedText = false;
         let keptText = false;
         let hadText = false;
+        // #1546: a chunk carrying finishReason is terminal — its held tails must
+        // be drained before it reaches the client, never after.
+        let isTerminal = false;
         for (let ci = 0; ci < candidates.length; ci++) {
             const cand = candidates[ci] as Record<string, unknown> | null;
             if (!cand || typeof cand !== "object") continue;
@@ -1643,6 +1687,7 @@ export async function pipePluginChatWithStrip(
                 finalFinishReason = cand["finishReason"] as string;
                 sawTerminal = true;
                 lastChunkMeta = { ...lastChunkMeta, finishReason: finalFinishReason };
+                isTerminal = true;
             }
             const content = cand["content"];
             if (!content || typeof content !== "object") continue;
@@ -1668,7 +1713,8 @@ export async function pipePluginChatWithStrip(
                 if (p["thought"] === true) sawThinking = true;
                 const raw = p["text"];
                 if (typeof raw !== "string") continue;
-                hadText = true;
+                // #1546: an empty-string part carries no text — see processOpenai.
+                if (raw.length > 0) hadText = true;
                 // A reasoning part streams through the same machine under its own
                 // field, so an interleaved thought/text pair in one frame never
                 // shares held-back state.
@@ -1681,11 +1727,29 @@ export async function pipePluginChatWithStrip(
                     if (field === "text") visibleTextChars += raw.length;
                     continue;
                 }
-                const [clean, changed] = pushField(field, index, raw);
+                const [released, pushedChanged] = pushField(field, index, raw);
+                let clean = released;
+                let changed = pushedChanged;
+                if (isTerminal) {
+                    // Fold this part's held tail into its own text so the
+                    // finishReason lands after every byte of the part (#1546).
+                    const tail = flushFieldTail(field, index);
+                    if (tail.length > 0) {
+                        clean = released + tail;
+                        changed = true;
+                        proseAcc += tail;
+                    }
+                }
                 if (clean.length === 0) droppedText = true;
                 else {
                     keptText = true;
-                    if (field === "text") visibleTextChars += clean.length;
+                    if (field === "text") {
+                        visibleTextChars += clean.length;
+                        // Counted like flushTails so degenerate-turn detection is
+                        // unchanged (#1546).
+                        const tailLen = clean.length - released.length;
+                        if (tailLen > 0) releasedMarkupChars += tailLen;
+                    }
                 }
                 if (changed) {
                     // Deep enough clone of the frame's candidates that the
@@ -1711,6 +1775,9 @@ export async function pipePluginChatWithStrip(
                 }
             }
         }
+        // #1546: drain held tails ahead of the terminal (finishReason) chunk so
+        // nothing lands after it — parts THIS chunk carried were folded above.
+        const drain = isTerminal && anyPending() ? flushTails() : "";
         if (rebuilt) {
             // Text carried was entirely stripped away: drop the whole chunk
             // instead of forwarding an empty text part — but only when EVERY
@@ -1718,8 +1785,9 @@ export async function pipePluginChatWithStrip(
             // finishReason / functionCall / usageMetadata sibling must survive,
             // the chat processor's #463 rule).
             if (droppedText && !keptText && !googleFrameHasNonText(rebuilt)) return "";
-            return rebuildEvent(rawEvent, rebuilt);
+            return drain + rebuildEvent(rawEvent, rebuilt);
         }
+        if (drain.length > 0) return drain + rawEvent + "\n\n";
         if (!hadText && anyPending()) return flushTails() + rawEvent + "\n\n";
         return rawEvent + "\n\n";
     };
