@@ -321,7 +321,7 @@ export const WEB_CLIENT = `(function () {
     function kv(parts, label, value, mono) {
         parts.push('<div class="k">' + label + '</div><div class="v' + (mono ? " mono" : "") + '">' + (value == null || value === "" ? t("common.none") : escapeHtml(String(value))) + "</div>");
     }
-    function trajectorySvg(lines, folds, win, baseIn) {
+    function trajectorySvg(lines, folds, win, baseIn, seamEvents) {
         lines = (lines || []).filter((l) => Boolean(l));
         if (!lines.length) return "";
         const W = 960, H = 260, PL = 56, PR = 16, PT = 14, PB = 26;
@@ -395,6 +395,23 @@ export const WEB_CLIENT = `(function () {
             foldMarks += '<line x1="' + bk.fx.toFixed(1) + '" y1="' + PT + '" x2="' + bk.fx.toFixed(1) + '" y2="' + (PT + ih) + '" stroke="#cf222e" stroke-width="1.2" stroke-dasharray="3 3"><title>'
                 + t("det.fold_short") + (n > 1 ? " ×" + n : "") + (seqs ? " " + seqs + (bk.items.length > 5 ? "…" : "") + " · " : " ") + dt(bk.items[0].at) + " · " + fmtW(bk.items.reduce((a, m) => a + (m.S || 0), 0)) + "</title></line>";
         });
+        // #1609: cache-seam suspects (#1606) get SOLID red marks at the first sample at/after
+        // the divergence time — folds stay dashed, so both read in the same visual language.
+        let seamMarks = "";
+        (seamEvents || []).forEach((ev) => {
+            if (!ev || !(ev.at > 0)) return;
+            let idx = -1;
+            for (let i = 0; i < lines.length; i++) { if ((lines[i].at || 0) >= ev.at) { idx = i; break; } }
+            if (idx < 0) idx = lines.length - 1;
+            const fx = x(idx);
+            const hit = typeof ev.hitPct === "number" ? ev.hitPct.toFixed(1) : "?";
+            const lcp = fmtB(ev.lcpBytes || 0);
+            const msg = ev.msgIndex != null ? ev.msgIndex : "?";
+            const prev = ev.prevMsgs != null ? ev.prevMsgs : "?";
+            const cur = ev.curMsgs != null ? ev.curMsgs : "?";
+            seamMarks += '<line x1="' + fx.toFixed(1) + '" y1="' + PT + '" x2="' + fx.toFixed(1) + '" y2="' + (PT + ih) + '" stroke="#cf222e" stroke-width="1.8"><title>'
+                + t("det.seam_mark_tip", { seq: ev.seq != null ? ev.seq : "?", at: dt(ev.at), hit, lcp, msg, prev, cur }) + "</title></line>";
+        });
         let ceiling = "";
         if (win && win > 0) {
             const yy = y(win);
@@ -426,7 +443,7 @@ export const WEB_CLIENT = `(function () {
             + bands
             + hovers
             + '<path d="' + stroke.trim() + '" fill="none" stroke="var(--accent)" stroke-width="1.8"/>'
-            + foldMarks + ceiling + baseline + ticks + xt + xtTime + "</svg>";
+            + foldMarks + seamMarks + ceiling + baseline + ticks + xt + xtTime + "</svg>";
     }
     function legendItem(style, label, dashed) {
         if (dashed) return '<span><span class="dot" style="background:none;border-top:2px dashed #cf222e;height:0;border-radius:0;width:14px"></span>' + label + "</span>";
@@ -619,15 +636,29 @@ export const WEB_CLIENT = `(function () {
         parts.push("</div></div>");
         const ledger = d.ledger || {};
         const lines = ledger.lines || [];
+        // #1609: cache-miss attribution (#1606). Defensive reads — servers predating #1606
+        // carry no ledger.seam at all, and an all-zero shape must render nothing.
+        const seamRaw = ledger.seam && typeof ledger.seam === "object" ? ledger.seam : null;
+        const seam = seamRaw ? {
+            suspects: Number(seamRaw.suspects) || 0,
+            missed: Number(seamRaw.missed) || 0,
+            events: Array.isArray(seamRaw.events) ? seamRaw.events.filter((e) => e && e.at > 0) : [],
+            providerSide: { count: (seamRaw.providerSide && Number(seamRaw.providerSide.count)) || 0, missed: (seamRaw.providerSide && Number(seamRaw.providerSide.missed)) || 0 },
+            rewinds: { count: (seamRaw.rewinds && Number(seamRaw.rewinds.count)) || 0, missed: (seamRaw.rewinds && Number(seamRaw.rewinds.missed)) || 0 },
+            abortCorrelated: Number(seamRaw.abortCorrelated) || 0,
+        } : null;
+        const seamActive = !!(seam && (seam.suspects > 0 || seam.missed > 0 || seam.events.length > 0 || seam.providerSide.count > 0 || seam.rewinds.count > 0 || seam.abortCorrelated > 0));
         parts.push('<div class="card" style="margin-top:16px"><div class="card-h"><span>' + t("det.trajectory") + '</span><span class="hint">' + t("det.trajectory_sub") + '</span></div><div class="card-b">');
         if (!lines.length) {
             parts.push('<div class="chart-empty">' + t("det.trajectory_empty") + "</div>");
         } else {
-            parts.push('<div class="chart-wrap">' + trajectorySvg(lines, ledger.folds || [], d.contextWindow, d.systemPromptTokens || 0) + "</div>");
+            parts.push('<div class="chart-wrap">' + trajectorySvg(lines, ledger.folds || [], d.contextWindow, d.systemPromptTokens || 0, seamActive ? seam.events : []) + "</div>");
             parts.push('<div class="chart-legend">');
             parts.push(legendItem("background:var(--accent)", t("det.legend_input")));
             parts.push(legendItem("background:var(--accent);opacity:.4", t("det.legend_cached"), false));
             parts.push(legendItem("#cf222e", t("det.legend_fold"), true));
+            if (seamActive && seam.events.length > 0)
+                parts.push(legendItem("background:#cf222e", t("det.legend_seam")));
             parts.push(legendItem("#cf222e", t("det.legend_window"), true));
             // Swatches carry real backgrounds (a bare hex in style= renders nothing):
             parts.push(legendItem("background:#bf8700", t("det.cause_comp")));
@@ -638,6 +669,15 @@ export const WEB_CLIENT = `(function () {
             if ((ledger.linesOmitted || 0) > 0) parts.push('<div class="dim small" style="margin-top:6px">' + t("det.omitted", { n: ledger.linesOmitted }) + "</div>");
         }
         parts.push("</div></div>");
+        if (seamActive && seam.events.length > 0) {
+            const evHead = '<tr><th class="num">#</th><th>' + t("det.fold_time") + '</th><th class="num">' + t("det.seam_col_hit") + '</th><th class="num">' + t("det.seam_col_input") + '</th><th>' + t("det.seam_col_div") + "</th></tr>";
+            parts.push('<details open class="seam-ev"><summary title="' + escapeHtml(t("det.seam_events_tip")) + '"><b>' + t("det.seam_events", { n: seam.events.length }) + "</b></summary>"
+                + '<div class="fold-scroll" style="max-height:320px;border:none;border-radius:0;padding:2px 8px 8px"><table class="data"><thead>' + evHead + "</thead><tbody>");
+            seam.events.forEach((ev) => {
+                parts.push('<tr><td class="num">' + ev.seq + '</td><td class="num">' + (ev.at ? fmtDT(ev.at) : t("common.none")) + '</td><td class="num">' + (typeof ev.hitPct === "number" ? ev.hitPct.toFixed(1) + "%" : t("common.none")) + '</td><td class="num">' + fmtW(ev.input || 0) + '</td><td class="mono small">' + fmtB(ev.lcpBytes || 0) + " @ " + t("det.seam_msg", { i: ev.msgIndex != null ? ev.msgIndex : "?", prev: ev.prevMsgs != null ? ev.prevMsgs : "?", cur: ev.curMsgs != null ? ev.curMsgs : "?" }) + "</td></tr>");
+            });
+            parts.push("</tbody></table></div></details>");
+        }
         const tot = ledger.totals;
         parts.push('<div class="card" style="margin-top:16px"><div class="card-h"><span>' + t("det.cache_econ") + "</span>" + (tot ? (tot.balanced ? ' <span class="badge ok">' + t("det.ce_balanced") + "</span>" : ' <span class="badge warn">' + t("det.ce_unbalanced") + "</span>") : "") + '</div><div class="card-b">' + (d.ledger ? '<div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:10px"><button id="cacherpt-copy" class="btn sm">' + t("common.copy") + '</button><button id="cacherpt-dl" class="btn sm">' + t("det.report_dl") + "</button></div>" : ""));
         if (tot) {
@@ -647,6 +687,16 @@ export const WEB_CLIENT = `(function () {
             mini(parts, t("det.ce_ttl"), fmtW(tot.ttlRepay || 0));
             mini(parts, t("det.ce_residual"), fmtW(tot.residual || 0));
             parts.push("</div>");
+        }
+        if (seamActive) {
+            parts.push('<div class="section-label" style="margin-top:14px">' + t("det.attr_title") + "</div>"
+                + '<div class="grid cols-4">'
+                + '<div class="mini"><div class="k" style="color:#cf222e" title="' + escapeHtml(t("det.attr_seam_tip")) + '">' + escapeHtml(t("det.attr_seam")) + '</div><div class="v mono" style="color:#cf222e">' + fmtW(seam.missed) + (seam.suspects > 0 ? ' <span class="dim small">×</span>' + seam.suspects : "") + "</div></div>"
+                + '<div class="mini"><div class="k" style="color:#bf8700" title="' + escapeHtml(t("det.attr_provider_tip")) + '">' + escapeHtml(t("det.attr_provider")) + '</div><div class="v mono" style="color:#bf8700">' + fmtW(seam.providerSide.missed) + (seam.providerSide.count > 0 ? ' <span class="dim small">×</span>' + seam.providerSide.count : "") + "</div></div>"
+                + '<div class="mini"><div class="k" style="color:#57606a" title="' + escapeHtml(t("det.attr_rewind_tip")) + '">' + escapeHtml(t("det.attr_rewind")) + '</div><div class="v mono" style="color:#57606a">' + fmtW(seam.rewinds.missed) + (seam.rewinds.count > 0 ? ' <span class="dim small">×</span>' + seam.rewinds.count : "") + "</div></div>"
+                + '<div class="mini"><div class="k" style="color:#d4a72c" title="' + escapeHtml(t("det.attr_abort_tip")) + '">' + escapeHtml(t("det.attr_abort")) + '</div><div class="v mono" style="color:#d4a72c">' + String(seam.abortCorrelated) + "</div></div>"
+                + "</div>"
+                + '<div class="dim small" style="margin-top:6px">' + t("det.attr_note") + "</div>");
         }
         const folds = ledger.folds || [];
         parts.push('<div class="section-label" style="margin-top:14px">' + t("det.folds") + "</div>");
