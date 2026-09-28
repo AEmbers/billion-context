@@ -6009,7 +6009,7 @@ async function forward(
                 const reportedCached: number | null = typeof cached === "number" ? cached : null;
                 const billed = typeof total === "number" ? total : 0;
                 if (billed > 0 || reportedCached !== null) {
-                    noteForwardedBody(prepared.session, typeof prepared.body === "string" ? prepared.body : String(prepared.body));
+                    noteForwardedBody(prepared.session, typeof prepared.body === "string" ? prepared.body : prepared.body.toString("utf8"));
                     settleUsageReport(prepared.session, { total: billed, reportedCached, output: out, protocol: prepared.protocol, upstream: targetOrigin });
                     if (reportedCached !== null) warnCacheCollapse(prepared.session, billed, reportedCached);
                     const hitPct = reportedCached !== null && billed > 0 ? Math.round((100 * reportedCached) / billed) : undefined;
