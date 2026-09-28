@@ -52,10 +52,6 @@ export interface WebSessionSummary {
     missDropNew?: number;
     missDropComp?: number;
     missDropTtl?: number;
-    /** Mid-session model switches seen between consecutive ledger usage samples (#1535). */
-    modelSwitches?: number;
-    /** Σ stable-prefix tokens re-billed right after a model switch (#1535). */
-    switchMissedTokens?: number;
     /** Σ (S−σ)×requestsAfter across ledger folds — input tokens not billed thanks to
      *  compression (acp-kernel EconomicsSummary.grossSaved semantics). */
     grossSaved?: number;
@@ -189,7 +185,7 @@ function summaryOf(s: Session, live: boolean): WebSessionSummary {
     // Per-field MAX (the sources overlap, never sum). Read-only on purpose:
     // getCacheLedger() would bootstrap/mutate session.metadata instead.
     const led = s.metadata["cacheLedger"] as {
-        agg?: { requests?: number; input?: number; cached?: number; output?: number; nc?: number; cr?: number; tr?: number; switches?: number; switchMissed?: number };
+        agg?: { requests?: number; input?: number; cached?: number; output?: number; nc?: number; cr?: number; tr?: number };
         folds?: Array<{ S?: number; sigma?: number; T?: number; requestsAfter?: number }>;
     } | undefined;
     const agg = led;
@@ -254,9 +250,6 @@ function summaryOf(s: Session, live: boolean): WebSessionSummary {
                   missDropComp: Math.round(((agg.agg.cr ?? 0) / agg.agg.input) * 1000) / 10,
                   missDropTtl: Math.round(((agg.agg.tr ?? 0) / agg.agg.input) * 1000) / 10,
               }
-            : {}),
-        ...(typeof agg?.agg?.switches === "number" && agg.agg.switches > 0
-            ? { modelSwitches: agg.agg.switches, switchMissedTokens: agg?.agg?.switchMissed ?? 0 }
             : {}),
         ...(clientHint ? { clientHint } : {}),
     };
