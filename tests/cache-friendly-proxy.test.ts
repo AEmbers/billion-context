@@ -180,16 +180,18 @@ function closeServer(s: http.Server | undefined): Promise<void> {
 
 /** Shared fold trigger: demand compression once the payload is big enough and
  *  refs are plentiful, throttled so consecutive demands cannot stack. */
-function makeCompressTrigger(threshold: number): { calls: () => number; should: (body: string) => boolean; args: (refs: string[]) => string } {
+function makeCompressTrigger(threshold: number, plan?: Array<number | undefined>, gapless?: boolean): { calls: () => number; should: (body: string) => boolean; args: (refs: string[]) => string } {
     let lastDemandBytes = Infinity;
     let sinceDemand = 99;
     let calls = 0;
+    let firstViewRefs: string[] | undefined;
     return {
         calls: () => calls,
         should(body: string): boolean {
             const bytes = Buffer.byteLength(body);
             const refs = parseRefIds(body);
-            const noShrinkAfterDemand = sinceDemand <= 2 && bytes >= lastDemandBytes * 0.9;
+            if (firstViewRefs === undefined && refs.length >= 12) firstViewRefs = refs;
+            const noShrinkAfterDemand = !gapless && sinceDemand <= 2 && bytes >= lastDemandBytes * 0.9;
             if (bytes > threshold && refs.length >= 12 && !noShrinkAfterDemand) {
                 lastDemandBytes = bytes;
                 sinceDemand = 0;
@@ -200,7 +202,11 @@ function makeCompressTrigger(threshold: number): { calls: () => number; should: 
             return false;
         },
         args(refs: string[]): string {
-            const start = refs[2]!;
+            const planned = plan?.[calls - 1];
+            const view = firstViewRefs ?? refs;
+            // planned number: index into the PRE-FOLD view -> swallowing ranges
+            // (superset / partial overlap); default: tail range of current view.
+            const start = typeof planned === "number" ? (view[planned] ?? refs[2]!) : refs[2]!;
             const end = refs[refs.length - 6]!;
             return JSON.stringify({
                 content: [{
@@ -379,13 +385,13 @@ function extractReply(wire: Wire, raw: string): string {
 /** Drives a growing conversation on one wire until >= 2 folds happened and at
  *  least 3 plain turns followed the last fold. Returns the captured upstream
  *  bodies in arrival order. */
-async function driveWire(wire: Wire, sessionId: string, model: string, ctx: number): Promise<string[]> {
+async function driveWire(wire: Wire, sessionId: string, model: string, ctx: number, opts?: { plan?: Array<number | undefined>; gapless?: boolean }): Promise<string[]> {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `cf-${wire}-`));
     const prevXdg = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = tmp;
     delete process.env.ACP_DUMP_BODY;
     const captured: string[] = [];
-    const trigger = makeCompressTrigger(THRESHOLD);
+    const trigger = makeCompressTrigger(THRESHOLD, opts?.plan, opts?.gapless);
     let upstream: http.Server | undefined;
     let proxy: http.Server | undefined;
     try {
@@ -515,4 +521,51 @@ test("cache-friendly proxy (google wire): growth append-stable, folds keep the a
     const bodies = await driveWire("google", "cf-google", "gemini-test", 1_000_000);
     assert.ok(bodies.length >= 10, `expected a substantial request stream, got ${bodies.length}`);
     runChecks("google", bodies);
+});
+
+// Fifth geometry, anthropic wire: SWALLOWING folds — range geometries the
+// per-wire matrix never produces (its demands always take the current view's
+// tail). Production models routinely compress "from the beginning", citing
+// refs covered by earlier folds. Three shapes pinned:
+//   S1 superset swallow  — fold 2 covers fold 1 entirely: the OLD summary is
+//      replaced by the NEW wide one (the feared "second fold loses the new
+//      summary" must not happen; the new carrier must be on the wire);
+//   S2 partial overlap   — fold 3 starts INSIDE fold 2's region: both coexist;
+//   S3 back-to-back tails — every later summary survives every later round-2
+//      and normal turn (monotone accumulation, zero drops).
+test("cache-friendly proxy (anthropic swallow/back-to-back): superset replaces, partial coexists, tails never drop", { timeout: 120_000 }, async () => {
+    // plan: demand1 = tail; demand2 = view[2] (superset swallow of fold 1);
+    // demand3 = view[5] (partial overlap inside fold 2); demands 4+ = tails,
+    // gapless so they fire back-to-back while prior tool pairs still ride the
+    // resent history.
+    const bodies = await driveWire("anthropic", "cf-swallow-anth", "claude-swallow-1", 40 * 1024, { plan: [undefined, 2, 5], gapless: true });
+    const lists = bodies.map((b) => normOf("anthropic", JSON.parse(b) as Item));
+    const r2All = bodies.map((b, i) => i).filter((i) => isRound2Body("anthropic", JSON.parse(bodies[i]!) as Item));
+    const r2Idxs = r2All.filter((i) => i > 0 && !r2All.includes(i - 1));
+    assert.ok(r2Idxs.length >= 4, `expected >= 4 folds (got ${r2Idxs.length})`);
+    const rangesAt = (i: number): string[] => {
+        const found: string[] = [];
+        const text = JSON.stringify(lists[i]);
+        const re = /Cache-friendly fold summary covering (m\d+)\.\.(m\d+)/g;
+        let m2: RegExpExecArray | null;
+        while ((m2 = re.exec(text)) !== null) if (!found.includes(`${m2[1]}..${m2[2]}`)) found.push(`${m2[1]}..${m2[2]}`);
+        return found;
+    };
+    // S1: after the superset swallow (fold 2), the next normal body carries
+    // exactly the NEW wide summary — old replaced, new present.
+    const afterS1 = rangesAt(r2Idxs[1]! + 1);
+    assert.equal(afterS1.length, 1, `S1: expected exactly the new superset summary, got ${JSON.stringify(afterS1)}`);
+    assert.ok(!afterS1.includes(rangesAt(r2Idxs[0]! + 1)[0]!), "S1: fold-1 summary must be superseded");
+    // S2: after the partial overlap (fold 3), both fold-2's and fold-3's coexist.
+    const afterS2 = rangesAt(r2Idxs[2]! + 1);
+    assert.equal(afterS2.length, 2, `S2: expected coexistence, got ${JSON.stringify(afterS2)}`);
+    // S3: every summary present before fold N is still present after it —
+    // nothing is ever dropped by later folds. (Skip the tail fold when the
+    // run ended on its round-2: there is no post-fold body to inspect yet.)
+    for (let k = 3; k < r2Idxs.length; k++) {
+        if (r2Idxs[k]! + 1 >= bodies.length) continue;
+        const before = rangesAt(r2Idxs[k]! - 1);
+        const after = rangesAt(r2Idxs[k]! + 1);
+        for (const r of before) assert.ok(after.includes(r), `S3: summary ${r} dropped by fold #${k + 1}`);
+    }
 });
