@@ -916,6 +916,13 @@ type Prepared = {
      *  forward() re-runs processTurn with the same strategy so the re-request
      *  renders tags exactly like the request that produced it. */
     renderTags?: "text-only" | "none";
+    /** [#1592] The exact reasoning-drop closure this wire's steady path applied
+     *  (prepareAnthropic/prepareOpenai/prepareResponses capture theirs; google
+     *  serializes thinking itself and leaves it unset). refreshFolded must
+     *  apply the SAME drop the steady path used, or the folded re-request and
+     *  the next client turn render one history with two shapes (mid-history
+     *  byte-prefix break on every fold). */
+    dropReasoning?: (msgs: BiliMessage[]) => BiliMessage[];
      /** Effective compression prompts for this request (three-level cascade,
       *  defaults to the kernel's defaultPrompts). Carried so the compress loop
       *  in forward() rebuilds the SAME system prompt the request was prepared
@@ -3301,7 +3308,7 @@ async function prepareAnthropic(
     session.stats.localInputEstimate = estimateCoreMessagesUpper(processedMessages.length > 0 ? processedMessages : originalMessages)
         + countSystemAndToolsTokens(extractSystem(systemOut), toolsOut)
         + imageTokensInParsedBody("anthropic", rebuilt, imageBillingFor(opts, upstreamOrigin));
-    return { body: JSON.stringify(rebuilt), session, attachedRetrievals, attachedRetrievalNoteIds, processedMessages, originalMessages, anthropicSystem: parsed.system, systemNotes: sysNotes, protocol: "anthropic", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only" } as Prepared;
+    return { body: JSON.stringify(rebuilt), session, attachedRetrievals, attachedRetrievalNoteIds, processedMessages, originalMessages, anthropicSystem: parsed.system, systemNotes: sysNotes, protocol: "anthropic", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", dropReasoning: stripReasoning } as Prepared;
 }
 
 async function prepareOpenai(
@@ -3547,7 +3554,7 @@ async function prepareOpenai(
     }
     snapshotMessages(session, originalMessages);
     markDirty(session);
-    return { body: JSON.stringify(rebuilt), session, attachedRetrievals, attachedRetrievalNoteIds, processedMessages, originalMessages, protocol: "openai", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, openaiSystemText, systemNotes: sysNotes, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only" } as Prepared;
+    return { body: JSON.stringify(rebuilt), session, attachedRetrievals, attachedRetrievalNoteIds, processedMessages, originalMessages, protocol: "openai", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, openaiSystemText, systemNotes: sysNotes, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", dropReasoning: stripReasoning } as Prepared;
 }
 
 /** Append the ephemeral nudge to a Gemini `contents` array. Gemini is
@@ -4120,6 +4127,7 @@ async function prepareResponses(
         renderTags,
         resetAfterSuccess: isCompactionTrigger,
         codexForge,
+        dropReasoning: stripReasoning,
     };
 }
 
@@ -5868,12 +5876,24 @@ async function forward(
                     // against them drops the only cross-turn summary carrier and breaks the byte-prefix
                     // at the fold anchor (post-fold cache floor reset to the stable head).
                     const out = [...stripKernelSummaries(viewed as BiliMessage[], turn.state), ...(records as BiliMessage[])] as BiliMessage[];
+                    // [#1592] Mirror the steady path's per-wire post-processing EXACTLY:
+                    // the reasoning drop each prepare* applied, and — only on the
+                    // Responses wire — the run-ordering repair (#564). Applying the
+                    // repair on chat/anthropic/google round-2s injected acp_turn_sep_*
+                    // user messages and split assistant runs that the steady paths
+                    // never emit, so the folded re-request and the very next client
+                    // turn rendered one history with two different shapes and the
+                    // byte prefix broke mid-history on every fold.
+                    const dropped = prepared.dropReasoning ? prepared.dropReasoning(out) : out;
+                    const ordered = prepared.protocol === "responses" ? repairResponsesAssistantOrdering(dropped, prepared.originalMessages) : dropped;
                     // [#1095] the folded re-request must carry the SAME bytes the
-                    // model saw (deterministic encode + per-fingerprint cache).
-                    await applyImageCompressionPass(prepared.session, out, { config: loopConfig, billing: imageBillingFor(opts, route?.rewrittenUrl), log: ctx.log });
+                    // model saw (deterministic encode + per-fingerprint cache) —
+                    // applied after the ordering repair, matching the steady
+                    // paths' sequence.
+                    await applyImageCompressionPass(prepared.session, ordered as BiliMessage[], { config: loopConfig, billing: imageBillingFor(opts, route?.rewrittenUrl), log: ctx.log });
                     const imgNote = imageFullTrailingNote(prepared.session);
-                    if (imgNote) out.push({ id: "bili_image_full_note", role: "user", contentType: "text", text: imgNote });
-                    return repairResponsesAssistantOrdering(out, prepared.originalMessages);
+                    if (imgNote) (ordered as BiliMessage[]).push({ id: "bili_image_full_note", role: "user", contentType: "text", text: imgNote });
+                    return ordered;
                 });
             };
             // #1455: loop-originated upstream responses (re-request/retries) are NOT covered by the outer tee above — they were invisible to ACP_DUMP_SSE until now.
