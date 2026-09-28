@@ -125,7 +125,7 @@ async function turn2MessageCount(s: Scenario): Promise<number> {
         assert.equal(r2.status, 200);
         await r2.text();
         assert.equal(received.length, 2, "both turns reached the upstream");
-        assert.equal(received[0].length, 2, "turn 1 forwards system + the single user message");
+        assert.equal(received[0].length, 3, "turn 1 forwards system + the single user message + the ephemeral conversation-id note (#1611)");
         return (received[1] as unknown[]).length;
     } finally {
         proxy.close();
@@ -142,7 +142,7 @@ test("e2e #924: configured ModelEntry.output stands in for a missing request bud
         session: "hf-cfg",
         model: "headroom-model-a",
         models: { "headroom-model-a": { context: 200_000, output: 80_000 } },
-    }), 31);
+    }), 32);
 });
 
 test("e2e #924: registry output ceiling stands in when nothing is configured", async () => {
@@ -152,7 +152,7 @@ test("e2e #924: registry output ceiling stands in when nothing is configured", a
         session: "hf-reg",
         model: "headroom-model-b",
         registry: { "openai/headroom-model-b": { limit: { context: 200_000, output: 80_000 } } },
-    }), 31);
+    }), 32);
 });
 
 test("e2e #924: unknown model keeps today's no-reservation behavior", async () => {
@@ -161,7 +161,7 @@ test("e2e #924: unknown model keeps today's no-reservation behavior", async () =
     assert.equal(await turn2MessageCount({
         session: "hf-unknown",
         model: "zzz-unlisted-model",
-    }), 30);
+    }), 31);
 });
 
 test("e2e #924: an explicit request budget outranks the configured output", async () => {
@@ -173,7 +173,7 @@ test("e2e #924: an explicit request budget outranks the configured output", asyn
         model: "headroom-model-a",
         models: { "headroom-model-a": { context: 200_000, output: 80_000 } },
         maxTokens: 10_000,
-    }), 30);
+    }), 31);
 });
 
 test("e2e #971: launcher-env max output stands in with nothing configured", async () => {
@@ -183,7 +183,7 @@ test("e2e #971: launcher-env max output stands in with nothing configured", asyn
     assert.equal(await turn2MessageCount({
         session: "hf-launcher",
         model: "headroom-launch-model",
-    }), 31);
+    }), 32);
 });
 
 test("e2e #971: runtime-info headers outrank the launcher env", async () => {
@@ -200,5 +200,5 @@ test("e2e #971: runtime-info headers outrank the launcher env", async () => {
             "x-bili-plugin-model": "headroom-rank-model",
             "x-bili-plugin-max-output": "180000",
         },
-    }), 31);
+    }), 32);
 });

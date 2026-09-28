@@ -71,6 +71,7 @@ const CHAIN_PREFIX = LT + "bili-chain v=";
 const NUDGE_PREFIX = "This is an efficiency nudge";
 const IMGNOTE_PREFIX = "[Downscaled screenshots:";
 const RETRNOTE_PREFIX = "[billion-context] Earlier acp_retrieve";
+const CONVNOTE_PREFIX = "[Your bili conversation id:";
 const SUM_MARKER = "[Compressed conversation section]";
 const TAG_RE = new RegExp(`^${LT}acp tokens="[0-9]+(\\.[0-9])?K?" type="text"${GT}(m[0-9]+)${CLOSE_TAG}\n`);
 
@@ -100,6 +101,7 @@ function slotKind(x: string): string | null {
     if (x.startsWith(NUDGE_PREFIX)) return "nudge";
     if (x.startsWith(IMGNOTE_PREFIX)) return "imgnote";
     if (x.startsWith(RETRNOTE_PREFIX)) return "retrnote";
+    if (x.startsWith(CONVNOTE_PREFIX)) return "convnote";
     return null;
 }
 
@@ -295,9 +297,9 @@ function assertFoldTransition(prev: Unit[], next: Unit[], cover: string[], inser
 }
 
 function assertSlotsTail(c: Canon, label: string): void {
-    assert.ok(c.slots.length <= 4, `${label}: ${c.slots.length} tail slots (> 4): ${c.slots.join(",")}`);
+    assert.ok(c.slots.length <= 5, `${label}: ${c.slots.length} tail slots (> 5): ${c.slots.join(",")}`);
     const kinds = c.slots.join(",");
-    assert.ok(kinds === "" || /(?:chain|nudge|imgnote|retrnote)(?:,(?:chain|nudge|imgnote|retrnote))*$/.test(kinds), `${label}: unexpected slot kinds ${kinds}`);
+    assert.ok(kinds === "" || /(?:chain|nudge|imgnote|retrnote|convnote)(?:,(?:chain|nudge|imgnote|retrnote|convnote))*$/.test(kinds), `${label}: unexpected slot kinds ${kinds}`);
 }
 
 function assertTagPolicy(cans: Canon[], label: string): void {

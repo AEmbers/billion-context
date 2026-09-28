@@ -403,12 +403,32 @@ export function withMarkerIntegrityNote(text: string, visibilityMarkers = true):
 
 // #760: per-call conversation_id for MCP tools. Hosts that share ONE MCP shim
 // process across several concurrent conversations (kimi web et al.) have no
-// env/meta session channel, so the proxy prints its own resolved session id
-// and the model echoes it back as the conversation_id argument of every
-// mcp__bili__ call. Session-stable, so it rides the static system-prompt part
-// (prefix-cache safe) next to MARKER_INTEGRITY_NOTE, in BOTH modes.
-export function withConversationIdNote(text: string, conversationId: string): string {
-    return text + `\n\n[Your bili conversation id: ${conversationId}. When calling the bili compression tools, pass this value as the conversation_id argument so a shared MCP process can route the call to THIS session.]`;
+// env/meta session channel, so the model supplies the target conversation per
+// tool call, echoing back a value the proxy printed in context.
+//
+// #1611: that VALUE must NOT ride the static system prompt. A fork/resume/
+// session-switch continues under a NEW canonical id while the message history
+// stays byte-identical (#1486); with the id embedded in system, that one line
+// was the ONLY cross-session divergence and it collapsed the upstream prefix
+// cache to 0% (cached_tokens=0 despite identical history). The system now
+// carries only this BYTE-STABLE pointer (constant across every session), and
+// the live value travels in an ephemeral trailing user message on each wire
+// lane (conversationIdTrailingNote) — mirroring the nudge / imgNote /
+// retrieveNote pattern ("not persisted, never enters the agent's re-sent
+// history, safe for the prefix-cache anchor"). MCP routing is unchanged: the
+// model reads the value from context and echoes it as the conversation_id
+// argument (src/mcp.ts routes on the argument).
+export const CONVERSATION_ID_POINTER_NOTE = "[Your bili conversation id is provided in a short ephemeral message near the end of this conversation. When calling the bili compression tools, pass that value as the conversation_id argument so a shared MCP process can route the call to THIS session.]";
+
+export function withConversationIdNote(text: string): string {
+    return text + `\n\n` + CONVERSATION_ID_POINTER_NOTE;
+}
+
+// The live per-conversation value, carried as an ephemeral trailing user
+// message (#1611: it cannot stay in the static system prompt without breaking
+// the cross-session prefix cache).
+export function conversationIdTrailingNote(conversationId: string): string {
+    return `[Your bili conversation id: ${conversationId}]`;
 }
 
 // #888 per-summary length budget. acp-kernel rejects a compress call atomically

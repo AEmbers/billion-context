@@ -69,6 +69,12 @@ const INSTRUCTIONS = ["You are a coding agent operating in a sandbox.", "Follow 
 const isChain = (it: Item | undefined): boolean =>
     !!it && it.type === "message" && typeof (it.content as string) === "string" && (it.content as string).includes("bili-chain");
 
+// #1611: the per-conversation id value rides an ephemeral trailing user message —
+// like the chain tag it sits past the cacheable history prefix, and its position
+// shifts as history grows, so it is excluded from the append-stability comparison.
+const isConvNote = (it: Item | undefined): boolean =>
+    !!it && it.type === "message" && typeof (it.content as string) === "string" && (it.content as string).startsWith("[Your bili conversation id");
+
 const findSummaryIndex = (items: Item[]): number =>
     items.findIndex((it) => it.type === "message" && typeof it.content === "string" && (it.content as string).includes(SUMMARY_MARKER));
 
@@ -206,9 +212,11 @@ test("#1548: post-fold re-request keeps the in-place summary; next-turn prefix s
         }
         assert.ok(next.length > sNext + 1, "next turn must append new content after the anchor");
 
-        // 3. Ordinary growth stays append-stable (chain tag is the only volatile slot).
+        // 3. Ordinary growth stays append-stable (the trailing ephemerale — chain tag
+        //    and the #1611 conversation-id note — are the only volatile tail slots).
         const checkAppendStable = (a: Item[], b: Item[], label: string): void => {
-            const aLen = a.length - (isChain(a[a.length - 1]) ? 1 : 0);
+            let aLen = a.length;
+            while (aLen > 0 && (isChain(a[aLen - 1]) || isConvNote(a[aLen - 1]))) aLen--;
             assert.ok(b.length >= aLen, `${label}: shrank unexpectedly (${a.length} -> ${b.length})`);
             for (let i = 0; i < aLen; i++) {
                 assert.ok(sameItem(a[i], b[i]), `${label}: item[${i}] mutated during plain growth`);

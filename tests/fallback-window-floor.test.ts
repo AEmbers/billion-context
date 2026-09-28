@@ -118,8 +118,8 @@ test("e2e: fallback-derived window is floored at 100k after output-headroom rese
         await r2.text();
 
         assert.equal(received.length, 2, "both turns reached the upstream");
-        assert.equal(received[0].length, 2, "turn 1 forwards system + the single user message");
-        assert.equal(received[1].length, 30, "turn 2 appends no nudge at 50% of the floored 100k window (would be 31 at 78% of the unfloored 64k)");
+        assert.equal(received[0].length, 3, "turn 1 forwards system + the single user message + the ephemeral conversation-id note (#1611)");
+        assert.equal(received[1].length, 31, "turn 2 appends no nudge at 50% of the floored 100k window (would be 32 at 78% of the unfloored 64k); +1 vs pre-#1611 for the conversation-id note");
     } finally {
         proxy.close();
         await once(proxy, "close");
@@ -210,7 +210,7 @@ test("e2e: per-route context declaration is operator-owned and never floored", a
         await r2.text();
 
         assert.equal(received.length, 2);
-        assert.equal(received[1].length, 31, "operator-declared window is not floored: nudge appended at 78% of 64k");
+        assert.equal(received[1].length, 32, "operator-declared window is not floored: nudge appended at 78% of 64k (+1 for the conversation-id note, #1611)");
     } finally {
         proxy.close();
         await once(proxy, "close");

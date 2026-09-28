@@ -139,6 +139,49 @@ function sysText(body: string): string {
     return "";
 }
 
+// #1611: the conversation_id VALUE moved out of the static system into an
+// ephemeral trailing user message — these read that tail off the wire body.
+function userMessageTexts(body: string): string[] {
+    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: unknown }[] };
+    const out: string[] = [];
+    for (const m of parsed.messages ?? []) {
+        if (m.role !== "user") continue;
+        if (typeof m.content === "string") out.push(m.content);
+        else if (Array.isArray(m.content)) {
+            for (const b of m.content as { type?: string; text?: string }[]) {
+                if (b.type === "text" && typeof b.text === "string") out.push(b.text);
+            }
+        }
+    }
+    return out;
+}
+
+function convIdTrailingNote(body: string): string {
+    return userMessageTexts(body).find((t) => /Your bili conversation id/.test(t)) ?? "";
+}
+
+// #1611: the shared history is everything on the wire EXCEPT the ephemeral
+// trailing id note (which also carries the per-request chain stamp). Two
+// sessions continuing the same history must agree on this byte-for-byte; only
+// that trailing message may differ.
+function historyMinusTrailingId(body: string): string {
+    const parsed = JSON.parse(body) as { messages?: unknown[] };
+    const kept = (parsed.messages ?? []).filter((m) => {
+        if (!m || typeof m !== "object") return true;
+        const msg = m as { role?: string; content?: unknown };
+        if (msg.role !== "user") return true;
+        const texts: string[] = [];
+        if (typeof msg.content === "string") texts.push(msg.content);
+        else if (Array.isArray(msg.content)) {
+            for (const b of msg.content as { type?: string; text?: string }[]) {
+                if (b.type === "text" && typeof b.text === "string") texts.push(b.text);
+            }
+        }
+        return !texts.some((t) => /Your bili conversation id/.test(t));
+    });
+    return JSON.stringify(kept);
+}
+
 function toolNames(body: string): string[] {
     const parsed = JSON.parse(body) as { tools?: { name?: string }[] };
     return (parsed.tools ?? []).map((t) => t.name ?? "");
@@ -190,7 +233,7 @@ test("plugin manifest advertises an optional conversation_id in all three tool f
     }
 });
 
-test("wire mode: proxy prints its own conversation id in the static system part, byte-stable across turns", async () => {
+test("wire mode: conversation_id value rides an ephemeral trailing message; system keeps only a byte-stable pointer", async () => {
     const rig = await startRig();
     try {
         await postModel(rig, "conv-760-a");
@@ -198,9 +241,39 @@ test("wire mode: proxy prints its own conversation id in the static system part,
         await waitFor(() => rig.upstreamBodies.length >= 2, "two upstream bodies");
         const sys0 = sysText(rig.upstreamBodies[0]);
         const canon = canonicalOf("conv-760-a");
-        assert.match(sys0, new RegExp(`\\[Your bili conversation id: ${canon}\\.`), "id note carries the derived canonical pfa-* id");
-        assert.doesNotMatch(sys0, /\[Your bili conversation id: conv-760-a\./, "note no longer leaks the raw client session id");
+        // #1611: the per-conversation VALUE must not sit in the static system —
+        // it rides an ephemeral trailing user message so a fork/resume under a
+        // new id keeps the whole-history prefix byte-stable for the cache.
+        assert.doesNotMatch(sys0, /\[Your bili conversation id: /, "system carries no per-conversation id value");
+        assert.match(sys0, /conversation id is provided in a short ephemeral message/, "system carries the byte-stable pointer note");
+        assert.match(convIdTrailingNote(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canon}\\]`), "trailing note carries the derived canonical pfa-* id");
+        assert.doesNotMatch(convIdTrailingNote(rig.upstreamBodies[0]), /conv-760-a/, "trailing note does not leak the raw client session id");
         assert.equal(sysText(rig.upstreamBodies[1]), sys0, "system bytes stable across turns (prefix-cache anchor)");
+    } finally {
+        await rig.closeAll();
+    }
+});
+
+test("#1611: fork/resume under a NEW id keeps system + shared history byte-identical; only the trailing id diverges", async () => {
+    const rig = await startRig();
+    try {
+        // Two continuations of the SAME client history under DIFFERENT bili ids —
+        // the fork/resume/session-switch shape. Identical input bodies ⇒ identical
+        // processed history (#1486); before the fix the static system diverged in
+        // exactly one line (the id value) → 0% prefix cache despite byte-identical
+        // history. After the fix only the ephemeral trailing note differs.
+        await postModel(rig, "conv-fork-a");
+        await postModel(rig, "conv-fork-b");
+        await waitFor(() => rig.upstreamBodies.length >= 2, "two upstream bodies");
+        const a = rig.upstreamBodies[0];
+        const b = rig.upstreamBodies[1];
+        assert.equal(sysText(b), sysText(a), "static system bytes identical across sessions (THE FIX)");
+        assert.doesNotMatch(sysText(a), /pfa-[0-9a-f]{16}/, "system A embeds no per-conversation id value");
+        assert.doesNotMatch(sysText(b), /pfa-[0-9a-f]{16}/, "system B embeds no per-conversation id value");
+        assert.equal(historyMinusTrailingId(a), historyMinusTrailingId(b), "shared history byte-identical across sessions");
+        assert.notEqual(convIdTrailingNote(a), convIdTrailingNote(b), "trailing ids differ across sessions");
+        assert.match(convIdTrailingNote(a), new RegExp(`\\[Your bili conversation id: ${canonicalOf("conv-fork-a")}\\]`));
+        assert.match(convIdTrailingNote(b), new RegExp(`\\[Your bili conversation id: ${canonicalOf("conv-fork-b")}\\]`));
     } finally {
         await rig.closeAll();
     }
@@ -241,9 +314,10 @@ test("canonical pfa-* id (derived, not the client's own) routes to the right ses
     try {
         await postModel(rig, "conv-canonical");
         await waitFor(() => rig.upstreamBodies.length >= 1, "one upstream body");
-        const sys0 = sysText(rig.upstreamBodies[0]);
         const canon = canonicalOf("conv-canonical");
-        assert.match(sys0, new RegExp(`\\[Your bili conversation id: ${canon}\\.`), "note carries the derived canonical id");
+        // #1611: value rides the ephemeral trailing message; system keeps no per-conversation value.
+        assert.match(convIdTrailingNote(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canon}\\]`), "trailing note carries the derived canonical id");
+        assert.doesNotMatch(sysText(rig.upstreamBodies[0]), /\[Your bili conversation id: /, "system carries no per-conversation id value");
 
         // Route by the CANONICAL id — the value the model actually echoes back.
         const rCanon = await toolCall(rig, canon);
@@ -367,13 +441,13 @@ test("shared shim, no env/meta id: per-call ids route two sessions independently
         const canonB = canonicalOf("conv-mcp-b");
         // A's first request: wire mode — ephemeral compress tool injected, id note present.
         assert.ok(toolNames(rig.upstreamBodies[0]).includes("compress"), "wire request carries the ephemeral compress tool");
-        assert.match(sysText(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canonA}\\.`));
+        assert.match(convIdTrailingNote(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canonA}\\]`));
         // A's second request arrives AFTER the tool call landed:
         // pure plugin mode — no ephemeral tools, id note still flows.
         assert.ok(!toolNames(rig.upstreamBodies[2]).includes("compress"), "post-tool-call request drops the ephemeral compress tool");
-        assert.match(sysText(rig.upstreamBodies[2]), new RegExp(`\\[Your bili conversation id: ${canonA}\\.`), "id note flows in plugin mode too");
+        assert.match(convIdTrailingNote(rig.upstreamBodies[2]), new RegExp(`\\[Your bili conversation id: ${canonA}\\]`), "id note flows in plugin mode too");
         // B's requests carry B's id, not A's — no cross-talk.
-        assert.match(sysText(rig.upstreamBodies[3]), new RegExp(`\\[Your bili conversation id: ${canonB}\\.`));
+        assert.match(convIdTrailingNote(rig.upstreamBodies[3]), new RegExp(`\\[Your bili conversation id: ${canonB}\\]`));
 
         // Sticky plugin-mode flip, and the untouched sibling stays wire mode.
         const stA = await statusOf(rig, "conv-mcp-a");

@@ -182,10 +182,13 @@ test("e2e: explicit-identity zero-baseline session with the same conversation โ
     const forward = calls.filter((c) => c.stream).at(-1)!;
     assert.ok(!forward.body.includes(NUDGE_MARKER), "explicit-identity zero baseline must stay at 0 (self-heals via measured usage)");
     const tailMsgs = msgsOf(forward.body);
-    const last = tailMsgs.at(-1)!;
-    // Strip the outbound ACP anchor tag (proxy-mode wire format, AGENTS.md ยง2) before comparing.
-    const stripped = msgText(last).replace(/^\x3cacp\s[^>]*>[^\x3c]*\x3c\/acp\x3e/, "").trimStart();
-    assert.ok(stripped.startsWith("CODE_11_"), `last message must be the original last message (modulo the outbound ACP anchor tag): ${JSON.stringify(last).slice(0, 200)}`);
+    // #1611: the proxy appends an ephemeral conversation-id note after the client
+    // history, so the original last message is no longer at(-1). Locate the last
+    // real (non-note) user message by its CODE_ payload instead.
+    const stripTag = (m: (typeof tailMsgs)[number]) => msgText(m).replace(/^\x3cacp\s[^>]*>[^\x3c]*\x3c\/acp\x3e/, "").trimStart();
+    const last = [...tailMsgs].reverse().find((m) => stripTag(m).startsWith("CODE_"))!;
+    const stripped = stripTag(last);
+    assert.ok(stripped.startsWith("CODE_11_"), `last real message must be the original last message (modulo the outbound ACP anchor tag): ${JSON.stringify(last).slice(0, 200)}`);
 });
 
 // #1137: the anonymous-branch upper bound must carry the image term. An

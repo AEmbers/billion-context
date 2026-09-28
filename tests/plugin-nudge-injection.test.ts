@@ -102,7 +102,8 @@ async function forwardedTurn2Length(sessionId: string, extraHeaders: Record<stri
         await r1.text();
 
         // Turn 2: 78% of the declared window arms the nudge. Forwarded payload =
-        // 29 client msgs + 1 leading compress system message [+ 1 nudge].
+        // 29 client msgs + 1 leading compress system message [+ 1 nudge]
+        // [+ 1 ephemeral conversation-id note (#1611)].
         const r2 = await fetch(url, {
             method: "POST",
             headers,
@@ -123,10 +124,10 @@ async function forwardedTurn2Length(sessionId: string, extraHeaders: Record<stri
 
 test("#451 control: nudge injected in PROXY mode when armed", async () => {
     const len = await forwardedTurn2Length("nudge-ctrl", {});
-    assert.equal(len, 31, "proxy mode appends the nudge as a trailing user message at 78% of 64k");
+    assert.equal(len, 32, "proxy mode appends the nudge as a trailing user message at 78% of 64k (+ ephemeral conversation-id note)");
 });
 
 test("#451: nudge ALSO injected in PLUGIN mode when armed (regression)", async () => {
     const len = await forwardedTurn2Length("nudge-plugin", { "x-bili-plugin": "omp" });
-    assert.equal(len, 31, "plugin mode must append the nudge too — before the fix the !pluginMode gate suppressed it and this would be 30");
+    assert.equal(len, 32, "plugin mode must append the nudge too — before the #451 fix the !pluginMode gate suppressed it (this would be 31); +1 for the ephemeral conversation-id note (#1611)");
 });

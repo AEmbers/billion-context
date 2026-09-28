@@ -109,7 +109,8 @@ test("Codex official transport preserves OAuth headers, decodes bodies, and reba
             additional_tools: unknown[];
             tools: unknown[];
         };
-        assert.deepEqual(forwarded.input.map((item) => item.type), ["additional_tools", "message", "reasoning", "message"]);
+        // Trailing "message" = the ephemeral conversation-id note appended after the client history (#1611).
+        assert.deepEqual(forwarded.input.map((item) => item.type), ["additional_tools", "message", "reasoning", "message", "message"]);
         assert.match(String(forwarded.input[1].content), /Compression Philosophy/);
         assert.match(String(forwarded.input[1].content), /five context-management tools/);
         assert.match(String(forwarded.input[1].content), /keep native Codex instructions/);

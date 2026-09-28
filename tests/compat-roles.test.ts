@@ -180,7 +180,7 @@ test("e2e #552 A: responses developer role rewritten on forward", async () => {
         });
         assert.equal(res.status, 200);
         assert.equal(seen.length, 1);
-        assert.deepEqual(seen[0].roles, ["system", "user"]);
+        assert.deepEqual(seen[0].roles, ["system", "user", "user"]); // trailing user = ephemeral conversation-id note (#1611)
     } finally {
         await harness.stop();
         harness.cleanup();
@@ -260,7 +260,7 @@ test("e2e #552 D: per-provider compat.roles wins over global", async () => {
             body: JSON.stringify({ model: "test", input: [{ type: "message", role: "developer", content: "be terse" }] }),
         });
         assert.equal(res.status, 200);
-        assert.deepEqual(seen[0], ["user"], "provider compat entry wins per key");
+        assert.deepEqual(seen[0], ["user", "user"], "provider compat entry wins per key (+ conversation-id note, #1611)");
     } finally {
         await harness.stop();
         harness.cleanup();
@@ -355,9 +355,9 @@ test("e2e #552 E: role-rejection 400 auto-retries, learns session-scoped, skips 
         // 3 upstream hits total: req1 rejected (developer), req1-retried (system),
         // req2 rewritten BEFORE fetch via the learned session map (system).
         assert.equal(seen.length, 3, `expected 3 upstream hits, got ${JSON.stringify(seen)}`);
-        assert.deepEqual(seen[0], ["developer"], "first hit carries the client's developer role (no compat configured)");
-        assert.deepEqual(seen[1], ["system"], "auto-retry rewrote developer→system");
-        assert.deepEqual(seen[2], ["system"], "second request skipped the 400 round-trip (session learned)");
+        assert.deepEqual(seen[0], ["developer", "user"], "first hit carries the client's developer role + conversation-id note (#1611); no compat configured");
+        assert.deepEqual(seen[1], ["system", "user"], "auto-retry rewrote developer→system (+ conversation-id note, #1611)");
+        assert.deepEqual(seen[2], ["system", "user"], "second request skipped the 400 round-trip (session learned; + conversation-id note, #1611)");
     } finally {
         await harness.stop();
         harness.cleanup();
