@@ -65,6 +65,11 @@ test("handoff token round-trips ids through base64url", () => {
         assert.equal(found.token, token);
     }
     assert.throws(() => encodeHandoffToken(""), /empty session id/);
+    // Mint side must enforce the same payload floor as HANDOFF_TOKEN_RE: ids
+    // below it mint tokens findHandoffToken can never detect.
+    assert.throws(() => encodeHandoffToken("abcde"), /too short/);
+    const boundary = encodeHandoffToken("abcdef");
+    assert.equal(findHandoffToken(boundary)?.sessionId, "abcdef");
 });
 
 test("decodeHandoffPayload rejects non-canonical or malformed payloads", () => {

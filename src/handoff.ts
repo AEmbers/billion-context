@@ -50,6 +50,11 @@ const MAX_DECODED_ID_LENGTH = 4096;
 export function encodeHandoffToken(sessionId: string): string {
     if (!sessionId) throw new Error("handoff: empty session id");
     const payload = Buffer.from(sessionId, "utf8").toString("base64url");
+    // Must match HANDOFF_TOKEN_RE's payload floor: a shorter payload would mint
+    // a token findHandoffToken can never detect (silent adoption failure).
+    if (payload.length < 8) {
+        throw new Error("handoff: session id too short for a handoff token (needs at least 6 bytes)");
+    }
     return `[BILI_SESSION_HANDOFF v${HANDOFF_TOKEN_VERSION} ${payload}]`;
 }
 
