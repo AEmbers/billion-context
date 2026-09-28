@@ -888,7 +888,15 @@ Per-fold P&L verdicts are priced by the optional `compress.priceProfile`
 request model's models.dev price row applies in absolute $/Mtok (kernel ratio
 defaults only for unresolvable models) — breakeven/PAID BACK therefore reflect
 your upstream's actual economics out of the box; override per provider for
-relays with custom markup (CONFIGURATION.md, #1279).
+relays with custom markup (CONFIGURATION.md, #1279). Since #1535 the report
+ends with a `MODEL SWITCHES` section: changing models mid-session invalidates
+the provider's prefix cache, so the whole stable prefix is re-billed on the
+next request — each switch's unexplained residual (its `ttl` bucket minus new
+content) is charged to the switch instead of being indistinguishable from TTL
+expiry, with per-event `from → to`, hit %, and attributed tokens listed
+(`full` lists every event; the summary shows the last 8). The web UI sessions
+table (and the overview's recent list) gains a matching model-switch column:
+count · tokens re-billed by switching, next to the existing hit-rate column.
 
 The same seam carries `/acp-rule` (#1251/#1399) — the human entry point to
 the persistent-rules feature (identical output to the `acp_rule` tool):

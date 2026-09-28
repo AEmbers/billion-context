@@ -5,7 +5,7 @@ import {
     type CoreMessage,
 } from "acp-kernel";
 import { handleAcpStatus } from "../acp-status.js";
-import { handleAcpCache, recordCacheSample } from "../cache-ledger.js";
+import { handleAcpCache, settleUsageReport } from "../cache-ledger.js";
 import { lastCompressSuffix, withSessionLock, type Session } from "../session.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import {
@@ -128,6 +128,11 @@ export interface LoopCtx {
     session: Session;
     log: (msg: string) => void;
     proxyUrl?: string;
+    /** #1536: origin (scheme://host) of the LLM endpoint this loop forwards to
+     *  — part of the cache-invalidation target identity (rotating relays busts
+     *  the prefix even for the same model+wire). Distinct from proxyUrl, which
+     *  is the routing CONNECT-proxy, not the target. */
+    upstreamOrigin?: string;
     textProtocol?: boolean;
     debug?: boolean;
     /** #422: host hook that re-runs the kernel fold (processTurn) on the
@@ -267,34 +272,22 @@ function recordUsage(
     const prompt = usage.inputTokens;
     const cached = usage.cachedTokens;
     const out = usage.outputTokens;
+    // #1536: normalize undefined (provider reports no cache tokens) to null so
+    // the ledger quarantines the sample instead of booking its whole billed
+    // prefix as an unexplained ttlRepay residual (which reads as a 0% hit rate).
+    const reportedCached: number | null = typeof cached === "number" ? cached : null;
     const total = promptInputTotal(ctx.protocol, prompt, cached, usage.creationTokens);
-    if (total > 0) ctx.session.stats.inputTokens += total;
-    // Net out this turn's compress credit: the post-compress re-request
-    // re-sends the unfolded history, so its usage report over-reports the
-    // context the NEXT request will actually carry (see stream.ts applyRanges).
-    // #793: a zero-total sample (missing or placeholder input) must not
-    // clobber the last trusted value — mirrors applyUsageSample (plugin mode).
-    if (total > 0) {
-        ctx.session.stats.lastInputTokens = Math.max(0, total - (ctx.session.stats.compressCreditTokens ?? 0));
-        ctx.session.stats.lastInputTokensSource = "usage";
-        // #1110: a real usage report retires the one-shot overflow arm.
-        delete ctx.session.stats.overflowArmTokens;
-    }
-    if (typeof cached === "number" && total > 0) {
-        ctx.session.stats.cachedTokens += cached;
-        ctx.session.stats.cacheSamples += 1;
-    }
     if (typeof out === "number") ctx.session.stats.outputTokens += out;
     const hitPct =
-        typeof cached === "number" && total > 0 ? Math.round((cached / total) * 100) : 0;
-    warnCacheCollapse(ctx.session, total, cached ?? 0);
+        reportedCached !== null && total > 0 ? Math.round((reportedCached / total) * 100) : 0;
+    if (reportedCached !== null) warnCacheCollapse(ctx.session, total, reportedCached);
     const foldNew = ctx.session.stats.pendingFoldUsage === true;
     if (foldNew) ctx.session.stats.pendingFoldUsage = false;
     ctx.log(
-        `[acp-usage] round ${round} input=${total} cached=${cached ?? 0} (cache hit ${hitPct}%)${foldNew ? " fold=new" : ""}${total <= 0 ? " (zero-total: lastInputTokens kept)" : ""}${imageUsageSuffix(ctx.session)}`,
+        `[acp-usage] round ${round} input=${total} ${reportedCached !== null ? `cached=${reportedCached} (cache hit ${hitPct}%)` : "(no cache report)"}${foldNew ? " fold=new" : ""}${total <= 0 ? " (zero-total: lastInputTokens kept)" : ""}${imageUsageSuffix(ctx.session)}`,
     );
-    if (total > 0 || typeof cached === "number") {
-        recordCacheSample(ctx.session, { at: Date.now(), input: total, cached: cached ?? 0, output: out });
+    if (total > 0 || reportedCached !== null) {
+        settleUsageReport(ctx.session, { total, reportedCached, output: out, protocol: ctx.protocol, upstream: ctx.upstreamOrigin });
     }
 }
 
