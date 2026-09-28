@@ -395,10 +395,15 @@ test("stall guard: silent mid-stream upstream ends in in-band error + FIN, not a
 });
 
 test("stall guard: healthy stream longer than the budget survives — re-arm per byte (#1452)", async () => {
-    // 8 chunks at 80ms = ~640ms total > 400ms budget. A total-time deadline
-    // would cut this stream; per-byte re-arm must not.
-    const intervalMs = 80;
-    const totalChunks = 8;
+    // 10 chunks at 200ms = ~2000ms total > 1500ms budget. A total-time
+    // deadline would cut this stream; per-byte re-arm must not. Wide margin
+    // (#1607): the old 80ms-drip / 400ms-budget pair left only 320ms of
+    // timer-jitter headroom per inter-byte gap and flaked on loaded Windows
+    // runners; 200ms gaps against a 1500ms budget tolerate ~1.3s of per-gap
+    // drift while preserving both properties (total > budget, every gap <
+    // budget).
+    const intervalMs = 200;
+    const totalChunks = 10;
     const upstream = http.createServer((_req, res) => {
         res.writeHead(200, { "content-type": "text/event-stream", "connection": "close" });
         res.flushHeaders();
@@ -415,7 +420,7 @@ test("stall guard: healthy stream longer than the budget survives — re-arm per
         _req.on("close", () => clearInterval(t));
     });
     await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
-    const restoreStall = withEnv("BILI_STREAM_STALL_MS", "400");
+    const restoreStall = withEnv("BILI_STREAM_STALL_MS", "1500");
     const restoreIdle = withEnv("BILI_UPSTREAM_TIMEOUT_MS", "60000");
     let harness: Harness | null = null;
     try {
