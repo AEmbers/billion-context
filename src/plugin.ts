@@ -19,7 +19,7 @@ import { emitStreamError, emitUpstreamTruncation } from "./stream-error.js";
 import { degenerateTurnWarning } from "./degenerate-turn.js";
 import { PANEL_BOX_FOOTER } from "./acp-panel.js";
 import { warnCacheCollapse } from "./cache-warn.js";
-import { recordCacheSample } from "./cache-ledger.js";
+import { settleUsageReport } from "./cache-ledger.js";
 import { promptInputTotal, type WireProtocol } from "./util.js";
 import { stateDir } from "./paths.js";
 import { awaitDrain } from "./server/stream-io.js";
@@ -1124,18 +1124,7 @@ export function applyUsageSample(session: Session, sample: UsageSample, protocol
     if (sample.inputTokens !== undefined && total <= 0) {
         loggerLog("warn", `[${session.id}] [plugin] skipped zero-total usage sample (placeholder/echo) — keeping lastInputTokens=${session.stats.lastInputTokens}`);
     }
-    if (sample.cachedTokens !== undefined && total > 0) {
-        session.stats.cachedTokens += sample.cachedTokens;
-        session.stats.cacheSamples += 1;
-    }
     if (sample.inputTokens !== undefined && total > 0) {
-        session.stats.inputTokens += total;
-        // Net out pending compress savings (see stream.ts applyRanges): plugin
-        // compress tool results shrink the next request, not this report.
-        session.stats.lastInputTokens = Math.max(0, total - (session.stats.compressCreditTokens ?? 0));
-        session.stats.lastInputTokensSource = "usage";
-        // #1110: a real usage report retires the one-shot overflow arm.
-        delete session.stats.overflowArmTokens;
         // #1536: normalize undefined (provider reports no cache tokens) to null
         // so the ledger quarantines the sample instead of booking its whole
         // billed prefix as an unexplained ttlRepay residual (which reads as a
@@ -1149,7 +1138,7 @@ export function applyUsageSample(session: Session, sample: UsageSample, protocol
         const foldNew = session.stats.pendingFoldUsage === true;
         if (foldNew) session.stats.pendingFoldUsage = false;
         loggerLog("info", `[${session.id}] [plugin] [acp-usage] input=${total} ${reportedCached === null ? "(no cache report)" : `cached=${reportedCached} (cache hit ${hit}%)`}${foldNew ? " fold=new" : ""}${imageUsageSuffix(session)}`);
-        recordCacheSample(session, { at: Date.now(), input: total, cached: reportedCached, output: sample.outputTokens, protocol, upstream: upstreamOrigin });
+        settleUsageReport(session, { total, reportedCached, output: sample.outputTokens, protocol, upstream: upstreamOrigin });
     }
     if (sample.outputTokens !== undefined) session.stats.outputTokens += sample.outputTokens;
 }
