@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
     computeFoldEconomics,
     decomposeSample,
@@ -16,6 +17,11 @@ import type { Session } from "./session.js";
 // ledger itself is unbounded — this only bounds how many lines the text
 // listing shows so a marathon session cannot flood the caller's context.
 const FULL_DETAIL_LINES = 512;
+
+// #1536: identity of this daemon process boot. A session's first KNOWN sample under a
+// NEW boot id (with prior history) marks a proxy-restart / re-fork boundary (#499): its
+// upstream KV was dropped during downtime even though bili's message refs were preserved.
+const BOOT_ID = randomUUID();
 
 interface LedgerFold {
     seq: number;
@@ -43,6 +49,23 @@ interface LedgerLine {
     cr: number;
     tr: number;
     foldSeq: number | null;
+    model?: string;
+    /** #1536: wire protocol of this request — part of the target identity. */
+    proto?: string;
+    /** #1536: LLM endpoint origin of this request — part of the target identity. */
+    up?: string;
+    /** #1535: 1 iff `model` differs from the previous sample's KNOWN model
+     *  (unknown sides never flag); marks the re-billed stable prefix on the
+     *  first request after a model switch. Sparse: omitted unless set. */
+    sw?: 1;
+    /** #1536: 1 iff `proto` differs from the previous sample's KNOWN protocol. */
+    pw?: 1;
+    /** #1536: 1 iff `up` differs from the previous sample's KNOWN origin. */
+    uw?: 1;
+    /** #1536: 1 on the first KNOWN sample under a NEW daemon boot (#499 restart/refork). */
+    rs?: 1;
+    /** #1536: 1 when the provider reported NO cache tokens — unmeasurable, quarantined out of closure totals. */
+    unk?: 1;
 }
 
 export interface CacheLedger {
@@ -61,7 +84,21 @@ export interface CacheLedger {
         nc: number;
         cr: number;
         tr: number;
+        switches: number;
+        switchMissed: number;
+        wireSwitches: number;
+        wireSwitchMissed: number;
+        upstreamSwitches: number;
+        upstreamSwitchMissed: number;
+        restartDrops: number;
+        restartDropMissed: number;
+        attributedMissed: number;
+        unknownSamples: number;
+        unknownInput: number;
     };
+    /** #1536: BOOT_ID of the process that recorded the last line — a mismatch on
+     *  the next sample marks a proxy-restart boundary (#499). Absent pre-#1536. */
+    lastBoot?: string;
 }
 
 const LEDGER_KEY = "cacheLedger";
@@ -92,7 +129,19 @@ function prefixTokensBeforeRef(session: Session, ref: string): number {
 export function getCacheLedger(session: Session): CacheLedger {
     const meta = session.metadata ?? (session.metadata = {});
     const existing = meta[LEDGER_KEY] as CacheLedger | undefined;
-    if (existing && existing.v === 1) return existing;
+    if (existing && existing.v === 1) {
+        // Ledgers persisted before #1535/#1536 lack the newer counters — normalize
+        // in place so later arithmetic never sees undefined.
+        const g = existing.agg;
+        for (const key of [
+            "switches", "switchMissed", "wireSwitches", "wireSwitchMissed",
+            "upstreamSwitches", "upstreamSwitchMissed", "restartDrops",
+            "restartDropMissed", "attributedMissed", "unknownSamples", "unknownInput",
+        ] as const) {
+            if (typeof g[key] !== "number") g[key] = 0;
+        }
+        return existing;
+    }
     // Bootstrap: blocks already present predate ledger tracking — record
     // their high-water mark WITHOUT fold events (no usage baseline existed).
     const maxBlockId = (session.state?.blocks ?? []).reduce((n, b) => Math.max(n, refNum(b.blockId)), 0);
@@ -104,7 +153,7 @@ export function getCacheLedger(session: Session): CacheLedger {
         foldSeqCounter: 0,
         folds: [],
         lines: [],
-        agg: { requests: 0, input: 0, cached: 0, output: 0, nc: 0, cr: 0, tr: 0 },
+        agg: { requests: 0, input: 0, cached: 0, output: 0, nc: 0, cr: 0, tr: 0, switches: 0, switchMissed: 0, wireSwitches: 0, wireSwitchMissed: 0, upstreamSwitches: 0, upstreamSwitchMissed: 0, restartDrops: 0, restartDropMissed: 0, attributedMissed: 0, unknownSamples: 0, unknownInput: 0 },
     };
     meta[LEDGER_KEY] = led;
     return led;
@@ -153,8 +202,14 @@ function detectNewFolds(session: Session, led: CacheLedger): void {
 }
 
 /** Record one provider usage report into the session ledger. `input` must be
- *  NORMALIZED (cached included — promptInputTotal semantics). */
-export function recordCacheSample(session: Session, s: { at: number; input: number; cached: number; output?: number }): void {
+ *  NORMALIZED (cached included — promptInputTotal semantics). `cached === null`
+ *  means the provider reported NO cache-hit tokens (unmeasurable): such samples
+ *  are quarantined out of the closure totals instead of booking their whole
+ *  billed prefix as an unexplained ttlRepay residual (#1536). */
+export function recordCacheSample(
+    session: Session,
+    s: { at: number; input: number; cached: number | null; output?: number; protocol?: string; upstream?: string },
+): void {
     const led = getCacheLedger(session);
     detectNewFolds(session, led);
     const prevLine = led.lines[led.lines.length - 1];
@@ -170,27 +225,51 @@ export function recordCacheSample(session: Session, s: { at: number; input: numb
         viewBefore: f.V,
         viewAfter: f.Vp,
     }));
+    // #1536: unknown-cache samples still need a prev/cur pair so the fold chain
+    // stays consistent, but decompose with cached=0 then QUARANTINE every derived
+    // bucket (line missed/nc/cr/tr forced to 0 + excluded from agg below).
+    const known = s.cached !== null;
+    const effCached: number = s.cached ?? 0;
     const dec = decomposeSample(
         prevLine ? { at: prevLine.at, input: prevLine.input, cached: prevLine.cached } : null,
-        { at: s.at, input: s.input, cached: s.cached },
+        { at: s.at, input: s.input, cached: effCached },
         pending,
     );
     let foldSeq: number | null = null;
-    if (dec.foldIndex !== null) foldSeq = pendRefs[dec.foldIndex]?.seq ?? null;
-    if (pendRefs.length > 0) {
+    if (known && dec.foldIndex !== null) foldSeq = pendRefs[dec.foldIndex]?.seq ?? null;
+    // Advance the fold-consume cursor only for measurable samples: an unknown
+    // sample must not eat a fold, or its compRepay would never reach a fold owner.
+    if (known && pendRefs.length > 0) {
         let hi = 0;
         for (const f of pendRefs) hi = Math.max(hi, f.seq);
         led.consumedFoldSeq = Math.max(led.consumedFoldSeq, hi);
     }
-    const hitPct = s.input > 0 ? round1((s.cached / s.input) * 100) : 0;
+    const hitPct = known && s.input > 0 ? round1((effCached / s.input) * 100) : 0;
+    // Target identity (#1535 model, generalized to model|wire|upstream in #1536):
+    // each component flags only when BOTH sides are known (unknown never flags).
+    const model = typeof session.metadata?.lastModel === "string" && session.metadata.lastModel !== ""
+        ? session.metadata.lastModel
+        : undefined;
+    const proto = typeof s.protocol === "string" && s.protocol !== "" ? s.protocol : undefined;
+    const up = typeof s.upstream === "string" && s.upstream !== "" ? s.upstream : undefined;
+    const prevModel = prevLine?.model;
+    const prevProto = prevLine?.proto;
+    const prevUp = prevLine?.up;
+    const modelSwitched = model !== undefined && prevModel !== undefined && model !== prevModel;
+    const wireSwitched = proto !== undefined && prevProto !== undefined && proto !== prevProto;
+    const upstreamSwitched = up !== undefined && prevUp !== undefined && up !== prevUp;
+    // #499: first KNOWN sample under a fresh daemon boot with prior history →
+    // proxy-restart / re-fork boundary (upstream KV dropped during downtime).
+    const restarted = known && led.lines.length > 0 && led.lastBoot !== undefined && led.lastBoot !== BOOT_ID;
     // #1286: turn counting is decoupled from compRepay attribution — the
     // consumedFoldSeq gate above applies to the pending list only. Every
     // elapsed fold counts EVERY later sample, matching buildCacheReport's
-    // full post-fold requestsAfter window.
+    // full post-fold requestsAfter window. hPct seeds from the first KNOWN
+    // post-fold sample only (unknown samples carry no measurable hit rate).
     for (const f of led.folds) {
         if (f.at <= s.at) {
             f.requestsAfter += 1;
-            if (f.hPct === null) f.hPct = hitPct;
+            if (known && f.hPct === null) f.hPct = hitPct;
         }
     }
     if (foldSeq !== null) {
@@ -202,23 +281,91 @@ export function recordCacheSample(session: Session, s: { at: number; input: numb
         seq: led.sampleSeq,
         at: s.at,
         input: s.input,
-        cached: s.cached,
+        cached: effCached,
         output: s.output ?? 0,
         hitPct,
-        missed: dec.missed,
-        nc: dec.newContent,
-        cr: dec.compRepay,
-        tr: dec.ttlRepay,
+        missed: known ? dec.missed : 0,
+        nc: known ? dec.newContent : 0,
+        cr: known ? dec.compRepay : 0,
+        tr: known ? dec.ttlRepay : 0,
         foldSeq,
+        model,
+        proto,
+        up,
+        sw: modelSwitched ? 1 : undefined,
+        pw: wireSwitched ? 1 : undefined,
+        uw: upstreamSwitched ? 1 : undefined,
+        rs: restarted ? 1 : undefined,
+        unk: known ? undefined : 1,
     });
+    led.lastBoot = BOOT_ID;
     const agg = led.agg;
     agg.requests += 1;
-    agg.input += s.input;
-    agg.cached += s.cached;
     agg.output += s.output ?? 0;
+    if (!known) {
+        // Unmeasurable: quarantine the whole billed prefix out of the closure.
+        agg.unknownInput += s.input;
+        agg.unknownSamples += 1;
+        return;
+    }
+    agg.input += s.input;
+    agg.cached += effCached;
     agg.nc += dec.newContent;
     agg.cr += dec.compRepay;
     agg.tr += dec.ttlRepay;
+    if (modelSwitched) {
+        // #1535: charge only this sample's unexplained residual (tr) — compRepay stays booked to its fold.
+        agg.switches += 1;
+        agg.switchMissed += dec.ttlRepay;
+    }
+    if (wireSwitched) {
+        agg.wireSwitches += 1;
+        agg.wireSwitchMissed += dec.ttlRepay;
+    }
+    if (upstreamSwitched) {
+        agg.upstreamSwitches += 1;
+        agg.upstreamSwitchMissed += dec.ttlRepay;
+    }
+    if (restarted) {
+        agg.restartDrops += 1;
+        agg.restartDropMissed += dec.ttlRepay;
+    }
+    if (modelSwitched || wireSwitched || upstreamSwitched || restarted) {
+        // Union residual charged to ≥1 named cause (buckets may overlap each
+        // other; this one does not, keeping `remaining` non-negative).
+        agg.attributedMissed += dec.ttlRepay;
+    }
+}
+
+/** #1547: single settle path for one successful upstream turn's usage report.
+ *  All three response shapes — loop SSE (recordUsage), plugin pipes
+ *  (applyUsageSample) and the non-streaming rewriter (server.ts forward) —
+ *  route their input-side stats + ledger sample through here, so session.stats
+ *  and the cache ledger can never drift apart per response shape again. The
+ *  caller keeps its own settle-decision gate, log line, collapse watch and
+ *  outputTokens update; `reportedCached === null` means the provider reported
+ *  no cache tokens (recordCacheSample quarantines that sample). */
+export function settleUsageReport(
+    session: Session,
+    s: { total: number; reportedCached: number | null; output?: number; protocol?: string; upstream?: string },
+): void {
+    // #793: a zero-total sample carries no information (gateway placeholder or
+    // relay echo) — it must not clobber the last trusted lastInputTokens.
+    if (s.total > 0) {
+        session.stats.inputTokens += s.total;
+        // Net out this turn's compress credit: the post-compress re-request
+        // re-sends the unfolded history, so its usage report over-reports the
+        // context the NEXT request will actually carry (see stream.ts applyRanges).
+        session.stats.lastInputTokens = Math.max(0, s.total - (session.stats.compressCreditTokens ?? 0));
+        session.stats.lastInputTokensSource = "usage";
+        // #1110: a real usage report retires the one-shot overflow arm.
+        delete session.stats.overflowArmTokens;
+    }
+    if (s.reportedCached !== null && s.total > 0) {
+        session.stats.cachedTokens += s.reportedCached;
+        session.stats.cacheSamples += 1;
+    }
+    recordCacheSample(session, { at: Date.now(), input: s.total, cached: s.reportedCached, output: s.output, protocol: s.protocol, upstream: s.upstream });
 }
 
 /** [#1279] Price profile stamped by the last request (server.ts runPrepare).
@@ -237,7 +384,44 @@ function stampedPriceProfile(session: Session): PriceProfile | undefined {
     return Object.keys(out).length > 0 ? out : undefined;
 }
 
-export function buildSessionCacheReport(session: Session): CacheReport {
+export interface ModelSwitchEvent {
+    seq: number;
+    at: number;
+    from: string | null;
+    to: string;
+    input: number;
+    cached: number;
+    hitPct: number;
+    /** This sample's unexplained residual (tr) — the re-bill charged to the switch. */
+    attributed: number;
+}
+
+export interface ModelSwitchStats {
+    count: number;
+    missedTokens: number;
+    events: ModelSwitchEvent[];
+}
+
+export interface InvalidationTokenBreakdown {
+    model: number;
+    wire: number;
+    upstream: number;
+    restart: number;
+    /** Residual stable-prefix miss NOT charged to any named cause — the true
+     *  upstream TTL/eviction/wire-rewrite remainder (kernel cannot name it). */
+    remaining: number;
+}
+
+export interface BiliCacheReport extends CacheReport {
+    modelSwitches: ModelSwitchStats;
+    wireSwitches: ModelSwitchStats;
+    upstreamSwitches: ModelSwitchStats;
+    restartDrops: ModelSwitchStats;
+    unmeasured: { samples: number; inputTokens: number };
+    invalidation: InvalidationTokenBreakdown;
+}
+
+export function buildSessionCacheReport(session: Session): BiliCacheReport {
     const led = getCacheLedger(session);
     // Effective profile = stamped value over kernel defaults (w=1, r=0.1, q=4),
     // mirroring the per-field fallback inside computeFoldEconomics. Unstamped
@@ -271,13 +455,47 @@ export function buildSessionCacheReport(session: Session): CacheReport {
             turnsToNextFold: f.k,
         }, effective),
     );
+    // Unknown-cache samples are quarantined out of the rendered line set — they
+    // carry no measurable hit rate and would show as misleading 0% rows.
+    const knownLines = led.lines.filter((l) => l.unk !== 1);
+    const switchEvents = (flag: (l: LedgerLine) => boolean, value: (l: LedgerLine | undefined) => string | undefined): ModelSwitchEvent[] => {
+        const evs: ModelSwitchEvent[] = [];
+        for (let i = 0; i < led.lines.length; i++) {
+            const l = led.lines[i];
+            if (!l || l.unk === 1 || !flag(l)) continue;
+            const prev = i > 0 ? led.lines[i - 1] : undefined;
+            evs.push({
+                seq: l.seq,
+                at: l.at,
+                from: value(prev) ?? null,
+                to: value(l) ?? "?",
+                input: l.input,
+                cached: l.cached,
+                hitPct: l.hitPct,
+                attributed: l.tr,
+            });
+        }
+        return evs;
+    };
+    const restartEvents: ModelSwitchEvent[] = [];
+    for (const l of led.lines) {
+        if (l.rs !== 1 || l.unk === 1) continue;
+        restartEvents.push({ seq: l.seq, at: l.at, from: null, to: "(restart)", input: l.input, cached: l.cached, hitPct: l.hitPct, attributed: l.tr });
+    }
+    const invalidation: InvalidationTokenBreakdown = {
+        model: a.switchMissed,
+        wire: a.wireSwitchMissed,
+        upstream: a.upstreamSwitchMissed,
+        restart: a.restartDropMissed,
+        remaining: Math.max(0, a.tr - a.attributedMissed),
+    };
     return {
         generatedAt: Date.now(),
         profile: effective,
         totals,
         economics: summarizeFoldEconomics(folds),
         folds,
-        lines: led.lines.map((l) => ({
+        lines: knownLines.map((l) => ({
             seq: l.seq,
             at: l.at,
             input: l.input,
@@ -291,6 +509,25 @@ export function buildSessionCacheReport(session: Session): CacheReport {
             foldSeq: l.foldSeq,
         })),
         linesOmitted: led.sampleSeq - led.lines.length,
+        modelSwitches: { count: a.switches, missedTokens: a.switchMissed, events: switchEvents((l) => l.sw === 1 && l.model !== undefined, (l) => l?.model) },
+        wireSwitches: { count: a.wireSwitches, missedTokens: a.wireSwitchMissed, events: switchEvents((l) => l.pw === 1 && l.proto !== undefined, (l) => l?.proto) },
+        upstreamSwitches: { count: a.upstreamSwitches, missedTokens: a.upstreamSwitchMissed, events: switchEvents((l) => l.uw === 1 && l.up !== undefined, (l) => l?.up) },
+        restartDrops: { count: a.restartDrops, missedTokens: a.restartDropMissed, events: restartEvents },
+        unmeasured: { samples: a.unknownSamples, inputTokens: a.unknownInput },
+        invalidation,
+    };
+}
+
+/** Read-only switch stats for the web sessions table — returns null instead of
+ *  bootstrapping an empty ledger just to render zeros. */
+export function readModelSwitchStats(session: Session): { count: number; missedTokens: number } | null {
+    const raw = session.metadata?.[LEDGER_KEY];
+    if (!raw || typeof raw !== "object") return null;
+    const led = raw as CacheLedger;
+    if (led.v !== 1) return null;
+    return {
+        count: typeof led.agg?.switches === "number" ? led.agg.switches : 0,
+        missedTokens: typeof led.agg?.switchMissed === "number" ? led.agg.switchMissed : 0,
     };
 }
 
@@ -300,15 +537,61 @@ export function handleAcpCache(session: Session, args?: Record<string, unknown>)
         const report = buildSessionCacheReport(session);
         if (detail === "full" && report.lines.length > FULL_DETAIL_LINES) {
             const dropped = report.lines.length - FULL_DETAIL_LINES;
-            return formatCacheReport(
+            const capped = formatCacheReport(
                 { ...report, lines: report.lines.slice(-FULL_DETAIL_LINES), linesOmitted: report.linesOmitted + dropped },
                 session.id,
                 { detail },
             );
+            return capped + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report);
         }
-        return formatCacheReport(report, session.id, { detail });
+        return formatCacheReport(report, session.id, { detail }) + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report);
     } catch (err) {
         loggerLog("warn", `[${session.id}] [acp_cache] report failed: ${String(err)}`);
         return `[acp_cache FAILED: ${String(err)}]`;
     }
+}
+
+function fmtTok(n: number): string {
+    const v = Math.round(n);
+    return v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e4 ? `${(v / 1e3).toFixed(1)}K` : String(v);
+}
+
+function fmtTime(at: number): string {
+    const d = new Date(at);
+    const p = (x: number) => String(x).padStart(2, "0");
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+const SWITCH_LIST_CAP = 8;
+
+function formatModelSwitches(sw: ModelSwitchStats, detail: "summary" | "full"): string {
+    const out: string[] = ["MODEL SWITCHES"];
+    if (sw.count === 0) {
+        out.push("  none observed");
+        return out.join("\n");
+    }
+    out.push(`  ${sw.count} switch(es) · ${fmtTok(sw.missedTokens)} tok re-billed (stable-prefix miss charged to the model change)`);
+    const shown = detail === "full" ? sw.events : sw.events.slice(-SWITCH_LIST_CAP);
+    for (const e of shown) {
+        out.push(`  #${e.seq} ${fmtTime(e.at)} ${e.from ?? "?"} → ${e.to} · hit ${e.hitPct.toFixed(1)}% · attributed ${fmtTok(e.attributed)}`);
+    }
+    if (shown.length < sw.events.length) {
+        out.push(`  … ${sw.events.length - shown.length} earlier switch(es) omitted (detail:"full" lists all)`);
+    }
+    return out.join("\n");
+}
+
+function formatInvalidation(r: BiliCacheReport): string {
+    const b = r.invalidation;
+    const named = b.model + b.wire + b.upstream + b.restart;
+    const out: string[] = ["CACHE INVALIDATION"];
+    out.push(`  stable-prefix re-bill by cause: ${fmtTok(named)} tok charged · ${fmtTok(b.remaining)} tok unattributed (upstream TTL/eviction/wire rewrite)`);
+    out.push(`    model switch:    ${fmtTok(b.model)} (${r.modelSwitches.count})`);
+    out.push(`    wire switch:     ${fmtTok(b.wire)} (${r.wireSwitches.count})`);
+    out.push(`    upstream switch: ${fmtTok(b.upstream)} (${r.upstreamSwitches.count})`);
+    out.push(`    restart/refork:  ${fmtTok(b.restart)} (${r.restartDrops.count})`);
+    if (r.unmeasured.samples > 0) {
+        out.push(`  unmeasured (provider reported no cache tokens): ${r.unmeasured.samples} sample(s) · ${fmtTok(r.unmeasured.inputTokens)} tok — excluded from hit rate`);
+    }
+    return out.join("\n");
 }

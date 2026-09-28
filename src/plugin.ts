@@ -19,7 +19,7 @@ import { emitStreamError, emitUpstreamTruncation } from "./stream-error.js";
 import { degenerateTurnWarning } from "./degenerate-turn.js";
 import { PANEL_BOX_FOOTER } from "./acp-panel.js";
 import { warnCacheCollapse } from "./cache-warn.js";
-import { recordCacheSample } from "./cache-ledger.js";
+import { settleUsageReport } from "./cache-ledger.js";
 import { promptInputTotal, type WireProtocol } from "./util.js";
 import { stateDir } from "./paths.js";
 import { awaitDrain } from "./server/stream-io.js";
@@ -1109,7 +1109,7 @@ function usageFromSseEvent(obj: Record<string, unknown>): UsageSample | undefine
     return undefined;
 }
 
-export function applyUsageSample(session: Session, sample: UsageSample, protocol?: WireProtocol): void {
+export function applyUsageSample(session: Session, sample: UsageSample, protocol?: WireProtocol, upstreamOrigin?: string): void {
     // inputTokens is protocol-native: Anthropic reports it NEW-only (cached
     // separate); OpenAI/Responses report the TOTAL (cached already included).
     // promptInputTotal adds back every segment not part of inputTokens —
@@ -1124,26 +1124,21 @@ export function applyUsageSample(session: Session, sample: UsageSample, protocol
     if (sample.inputTokens !== undefined && total <= 0) {
         loggerLog("warn", `[${session.id}] [plugin] skipped zero-total usage sample (placeholder/echo) — keeping lastInputTokens=${session.stats.lastInputTokens}`);
     }
-    if (sample.cachedTokens !== undefined && total > 0) {
-        session.stats.cachedTokens += sample.cachedTokens;
-        session.stats.cacheSamples += 1;
-    }
     if (sample.inputTokens !== undefined && total > 0) {
-        session.stats.inputTokens += total;
-        // Net out pending compress savings (see stream.ts applyRanges): plugin
-        // compress tool results shrink the next request, not this report.
-        session.stats.lastInputTokens = Math.max(0, total - (session.stats.compressCreditTokens ?? 0));
-        session.stats.lastInputTokensSource = "usage";
-        // #1110: a real usage report retires the one-shot overflow arm.
-        delete session.stats.overflowArmTokens;
-        warnCacheCollapse(session, total, sample.cachedTokens ?? 0);
+        // #1536: normalize undefined (provider reports no cache tokens) to null
+        // so the ledger quarantines the sample instead of booking its whole
+        // billed prefix as an unexplained ttlRepay residual (which reads as a
+        // 0% hit rate) — mirrors recordUsage in loop/core.ts. A non-reporting
+        // provider must also never feed the collapse watch.
+        const reportedCached: number | null = typeof sample.cachedTokens === "number" ? sample.cachedTokens : null;
+        if (reportedCached !== null) warnCacheCollapse(session, total, reportedCached);
         // #695: per-request parity with the wire path's [acp-usage] — without
         // this, post-fold cache cliffs cannot be attributed from logs.
-        const hit = sample.cachedTokens === undefined ? undefined : Math.round((100 * (sample.cachedTokens ?? 0)) / total);
+        const hit = reportedCached === null ? undefined : Math.round((100 * reportedCached) / total);
         const foldNew = session.stats.pendingFoldUsage === true;
         if (foldNew) session.stats.pendingFoldUsage = false;
-        loggerLog("info", `[${session.id}] [plugin] [acp-usage] input=${total} cached=${sample.cachedTokens ?? "n/a"}${hit === undefined ? "" : ` (cache hit ${hit}%)`}${foldNew ? " fold=new" : ""}${imageUsageSuffix(session)}`);
-        recordCacheSample(session, { at: Date.now(), input: total, cached: sample.cachedTokens ?? 0, output: sample.outputTokens });
+        loggerLog("info", `[${session.id}] [plugin] [acp-usage] input=${total} ${reportedCached === null ? "(no cache report)" : `cached=${reportedCached} (cache hit ${hit}%)`}${foldNew ? " fold=new" : ""}${imageUsageSuffix(session)}`);
+        settleUsageReport(session, { total, reportedCached, output: sample.outputTokens, protocol, upstream: upstreamOrigin });
     }
     if (sample.outputTokens !== undefined) session.stats.outputTokens += sample.outputTokens;
 }
@@ -1196,6 +1191,7 @@ export async function pipePluginChatWithStrip(
     session?: Session,
     log?: (msg: string) => void,
     refetch?: () => Promise<ReadableStream<Uint8Array> | null>,
+    upstreamOrigin?: string,
 ): Promise<void> {
     let reader = stream.getReader();
     let decoder = new TextDecoder("utf-8");
@@ -1413,7 +1409,7 @@ export async function pipePluginChatWithStrip(
     // turn's value, corrupting every later nudge decision.
     const settleUsage = () => {
         if (session && (acc.inputTokens !== undefined || acc.outputTokens !== undefined || acc.cachedTokens !== undefined || acc.creationTokens !== undefined)) {
-            applyUsageSample(session, acc, protocol);
+            applyUsageSample(session, acc, protocol, upstreamOrigin);
             markDirty(session);
         }
     };
@@ -1983,6 +1979,7 @@ export async function pipePluginResponsesWithStrip(
     session?: Session,
     log?: (msg: string) => void,
     refetch?: () => Promise<ReadableStream<Uint8Array> | null>,
+    upstreamOrigin?: string,
 ): Promise<void> {
     let reader = stream.getReader();
     let decoder = new TextDecoder("utf-8");
@@ -2040,7 +2037,7 @@ export async function pipePluginResponsesWithStrip(
     // pipePluginChatWithStrip).
     const settleUsage = () => {
         if (session && (acc.inputTokens !== undefined || acc.outputTokens !== undefined || acc.cachedTokens !== undefined)) {
-            applyUsageSample(session, acc, "responses");
+            applyUsageSample(session, acc, "responses", upstreamOrigin);
             markDirty(session);
         }
     };
@@ -2527,6 +2524,7 @@ export async function pipePluginJson(
     res: import("node:http").ServerResponse,
     session?: Session,
     protocol?: WireProtocol,
+    upstreamOrigin?: string,
 ): Promise<void> {
     // Also serves proxy-mode JSON responses that skipped compress injection
     // (#460 residual) — pass no session there so usage accounting stays off.
@@ -2568,7 +2566,7 @@ export async function pipePluginJson(
                     outputTokens: num(usage["completion_tokens"]) ?? num(usage["output_tokens"]),
                     cachedTokens: cached,
                     creationTokens: creation,
-                }, protocol);
+                }, protocol, upstreamOrigin);
                 markDirty(session);
             }
         }
@@ -2579,7 +2577,7 @@ export async function pipePluginJson(
         if (session && !usage) {
             const sample = googleUsageSample(json);
             if (sample && sample.inputTokens !== undefined) {
-                applyUsageSample(session, sample, protocol);
+                applyUsageSample(session, sample, protocol, upstreamOrigin);
                 markDirty(session);
             }
         }
