@@ -629,11 +629,11 @@ export async function* runCompressLoop(
                     }
                 }
 
-                 // #732 (completes the auto-retry groundwork of #673/#674), extended by #821: a reasoning model can end a turn with ONLY a thinking block — zero visible text, zero tool calls, status completed — most often right after a post-compress re-request, where it sees the freshly-shrunk context and "wraps up" into a silent thought. The client then receives an empty completed turn and stalls until manually nudged. Retriable when no VISIBLE output reached the client yet (!forwardedVisible): on Responses rounds the framing is suppressed so nothing was forwarded at all; on openai/anthropic a thinking-only prefix WAS streamed verbatim, but it is invisible to host turn semantics and its chunks carry no finish_reason, so appending the retry's content to the same stream is safe. Re-fetch once with a continuation nudge (a plain re-fetch reproduces the same silent output deterministically). One-shot per request. A reasoning marker (`sawThinking`) OR a stripped chain-echo (`sawChainEcho`, #1565: the turn's only output was a bili-chain carrier echo) is mandatory so a genuinely empty (no-reasoning, no-echo) terminal turn is left untouched — only the "silent thought" and "echo-only" shapes retry.
-                 if (
-                     !degenerateRetried &&
-                     sawDone &&
-                     (sawThinking || sawChainEcho) &&
+                // #732 (completes the auto-retry groundwork of #673/#674), extended by #821: a reasoning model can end a turn with ONLY a thinking block — zero visible text, zero tool calls, status completed — most often right after a post-compress re-request, where it sees the freshly-shrunk context and "wraps up" into a silent thought. The client then receives an empty completed turn and stalls until manually nudged. Retriable when no VISIBLE output reached the client yet (!forwardedVisible): on Responses rounds the framing is suppressed so nothing was forwarded at all; on openai/anthropic a thinking-only prefix WAS streamed verbatim, but it is invisible to host turn semantics and its chunks carry no finish_reason, so appending the retry's content to the same stream is safe. Re-fetch once with a continuation nudge (a plain re-fetch reproduces the same silent output deterministically). One-shot per request. A reasoning marker (`sawThinking`) OR a stripped chain-echo (`sawChainEcho`, #1565: the turn's only output was a bili-chain carrier echo) is mandatory so a genuinely empty (no-reasoning, no-echo) terminal turn is left untouched — only the "silent thought" and "echo-only" shapes retry.
+                if (
+                    !degenerateRetried &&
+                    sawDone &&
+                    (sawThinking || sawChainEcho) &&
                     !truncatedDone &&
                     !suppressCompletion &&
                     typeof finishReason === "string" &&

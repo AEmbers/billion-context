@@ -495,7 +495,7 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
                     }
                     maybeWarnDegenerate(stopReason);
                     logChainDropsOnce();
-                yield { kind: "done", finishReason: stopReason ?? "end_turn", thinking: sawThinking, chainEcho: chainDrops > 0 } as ParsedStreamEvent;
+                    yield { kind: "done", finishReason: stopReason ?? "end_turn", thinking: sawThinking, chainEcho: chainDrops > 0 } as ParsedStreamEvent;
                 } else if (round === 1) {
                     yield { kind: "meta", chunk: rawBuf, firstRoundOnly: true } as ParsedStreamEvent;
                 }
