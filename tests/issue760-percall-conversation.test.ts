@@ -144,6 +144,22 @@ function toolNames(body: string): string[] {
     return (parsed.tools ?? []).map((t) => t.name ?? "");
 }
 
+// #1611: the conversation-id VALUE rides an ephemeral trailing user message,
+// not the static system part.
+function idNoteText(body: string): string {
+    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: unknown }[] };
+    for (let i = (parsed.messages ?? []).length - 1; i >= 0; i--) {
+        const m = parsed.messages![i];
+        const c = typeof m.content === "string"
+            ? m.content
+            : Array.isArray(m.content)
+                ? m.content.map((b) => (typeof b === "string" ? b : (b as { text?: string }).text ?? "")).join("")
+                : "";
+        if (c.includes("[Your bili conversation id: ")) return c;
+    }
+    return "";
+}
+
 type SchemaObj = { properties?: Record<string, unknown>; required?: string[] };
 
 function schemaOf(tool: unknown): SchemaObj | undefined {
@@ -190,7 +206,7 @@ test("plugin manifest advertises an optional conversation_id in all three tool f
     }
 });
 
-test("wire mode: proxy prints its own conversation id in the static system part, byte-stable across turns", async () => {
+test("wire mode: proxy prints its own conversation id in the ephemeral trailing user message; system stays id-free and byte-stable (#760/#1611)", async () => {
     const rig = await startRig();
     try {
         await postModel(rig, "conv-760-a");
@@ -198,8 +214,10 @@ test("wire mode: proxy prints its own conversation id in the static system part,
         await waitFor(() => rig.upstreamBodies.length >= 2, "two upstream bodies");
         const sys0 = sysText(rig.upstreamBodies[0]);
         const canon = canonicalOf("conv-760-a");
-        assert.match(sys0, new RegExp(`\\[Your bili conversation id: ${canon}\\.`), "id note carries the derived canonical pfa-* id");
-        assert.doesNotMatch(sys0, /\[Your bili conversation id: conv-760-a\./, "note no longer leaks the raw client session id");
+        assert.match(idNoteText(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canon}\\.`), "id note carries the derived canonical pfa-* id");
+        assert.doesNotMatch(idNoteText(rig.upstreamBodies[0]), /\[Your bili conversation id: conv-760-a\./, "note no longer leaks the raw client session id");
+        assert.doesNotMatch(sys0, /\[Your bili conversation id:/, "#1611: id value no longer rides the static system part");
+        assert.match(sys0, /conversation id is printed at the very end of this request/, "system keeps the byte-stable pointer");
         assert.equal(sysText(rig.upstreamBodies[1]), sys0, "system bytes stable across turns (prefix-cache anchor)");
     } finally {
         await rig.closeAll();
@@ -241,9 +259,8 @@ test("canonical pfa-* id (derived, not the client's own) routes to the right ses
     try {
         await postModel(rig, "conv-canonical");
         await waitFor(() => rig.upstreamBodies.length >= 1, "one upstream body");
-        const sys0 = sysText(rig.upstreamBodies[0]);
         const canon = canonicalOf("conv-canonical");
-        assert.match(sys0, new RegExp(`\\[Your bili conversation id: ${canon}\\.`), "note carries the derived canonical id");
+        assert.match(idNoteText(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canon}\\.`), "note carries the derived canonical id");
 
         // Route by the CANONICAL id — the value the model actually echoes back.
         const rCanon = await toolCall(rig, canon);
@@ -367,13 +384,13 @@ test("shared shim, no env/meta id: per-call ids route two sessions independently
         const canonB = canonicalOf("conv-mcp-b");
         // A's first request: wire mode — ephemeral compress tool injected, id note present.
         assert.ok(toolNames(rig.upstreamBodies[0]).includes("compress"), "wire request carries the ephemeral compress tool");
-        assert.match(sysText(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canonA}\\.`));
+        assert.match(idNoteText(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canonA}\\.`));
         // A's second request arrives AFTER the tool call landed:
         // pure plugin mode — no ephemeral tools, id note still flows.
         assert.ok(!toolNames(rig.upstreamBodies[2]).includes("compress"), "post-tool-call request drops the ephemeral compress tool");
-        assert.match(sysText(rig.upstreamBodies[2]), new RegExp(`\\[Your bili conversation id: ${canonA}\\.`), "id note flows in plugin mode too");
+        assert.match(idNoteText(rig.upstreamBodies[2]), new RegExp(`\\[Your bili conversation id: ${canonA}\\.`), "id note flows in plugin mode too");
         // B's requests carry B's id, not A's — no cross-talk.
-        assert.match(sysText(rig.upstreamBodies[3]), new RegExp(`\\[Your bili conversation id: ${canonB}\\.`));
+        assert.match(idNoteText(rig.upstreamBodies[3]), new RegExp(`\\[Your bili conversation id: ${canonB}\\.`));
 
         // Sticky plugin-mode flip, and the untouched sibling stays wire mode.
         const stA = await statusOf(rig, "conv-mcp-a");

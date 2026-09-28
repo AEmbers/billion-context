@@ -405,10 +405,27 @@ export function withMarkerIntegrityNote(text: string, visibilityMarkers = true):
 // process across several concurrent conversations (kimi web et al.) have no
 // env/meta session channel, so the proxy prints its own resolved session id
 // and the model echoes it back as the conversation_id argument of every
-// mcp__bili__ call. Session-stable, so it rides the static system-prompt part
-// (prefix-cache safe) next to MARKER_INTEGRITY_NOTE, in BOTH modes.
-export function withConversationIdNote(text: string, conversationId: string): string {
-    return text + `\n\n[Your bili conversation id: ${conversationId}. When calling the bili compression tools, pass this value as the conversation_id argument so a shared MCP process can route the call to THIS session.]`;
+// mcp__bili__ call. #1611: the id VALUE must not ride the static system
+// prompt — it differs per conversation id, so any fork/resume/session switch
+// renders a system that diverges in that one line and the upstream prefix
+// cache misses entirely despite byte-identical history. The system keeps only
+// this byte-stable pointer; the value rides the ephemeral trailing user
+// message (conversationIdTailNote), appended per request like the
+// nudge/imgNote/retrieveNote tails (never persisted, never re-sent by the
+// client, so it only churns at the already-cold tail).
+const CONVERSATION_ID_POINTER_NOTE =
+    "\n\n[Your bili conversation id is printed at the very end of this request, in the final user message. When calling the bili compression tools, pass that value as the conversation_id argument so a shared MCP process can route the call to THIS session.]";
+
+/** Append the byte-stable conversation-id pointer to a system-prompt text. */
+export function withConversationIdPointerNote(text: string): string {
+    return text + CONVERSATION_ID_POINTER_NOTE;
+}
+
+/** #760/#1611: the conversation-id VALUE as an ephemeral trailing user
+ *  message — same wire position as the nudge, so the system and the entire
+ *  history stay byte-identical across sessions. */
+export function conversationIdTailNote(conversationId: string): string {
+    return `[Your bili conversation id: ${conversationId}. When calling the bili compression tools, pass this value as the conversation_id argument so a shared MCP process can route the call to THIS session.]`;
 }
 
 // #888 per-summary length budget. acp-kernel rejects a compress call atomically
