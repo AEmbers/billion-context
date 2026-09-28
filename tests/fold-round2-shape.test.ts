@@ -57,6 +57,15 @@ const triggerArgs = (): string => {
     return JSON.stringify({ content: [{ startId: start, endId: end, topic: "hunt fold", summary: `Fold summary covering ${start}..${end}: turns exercised the pipeline, builds stayed green.` }] });
 };
 
+// #1611: every tools-injected request carries a trailing conversation-id
+// user message; like the nudge/chain slots it is volatile per request.
+const hasIdNote = (body: string): boolean => {
+    try {
+        const msgs = (JSON.parse(body) as { messages?: Array<{ role?: string; content?: unknown }> }).messages ?? [];
+        return msgs.some((m) => m.role === "user" && String(m.content ?? "").startsWith("[Your bili conversation id: "));
+    } catch { return false; }
+};
+
 test("#1592 chat fold round-2 renders the next turn's shape (no run separators, divergence only at the summary anchor)", async () => {
     const upstream = http.createServer((req, res) => {
         const chunks: Buffer[] = [];
@@ -143,7 +152,8 @@ test("#1592 chat fold round-2 renders the next turn's shape (no run separators, 
     // 3. any divergence must land either inside the fold-summary element of
     //    the LATER body (the covering-range text swap) or in the trailing
     //    volatile slots of the shorter body (plain growth: nudge / chain
-    //    stamp / new user turn). A mid-history landing is the #1592 bug.
+    //    stamp / conversation-id note / new user turn). A mid-history
+    //    landing is the #1592 bug.
     const lcp = (a: string, b: string): number => { const n = Math.min(a.length, b.length); let i = 0; while (i < n && a[i] === b[i]) i++; return i; };
     const elemCount = (s: string): number => (s.match(/"role"/g) ?? []).length;
     const elemIdxAt = (s: string, off: number): number => (s.slice(0, off).match(/"role"/g) ?? []).length;
@@ -152,7 +162,7 @@ test("#1592 chat fold round-2 renders the next turn's shape (no run separators, 
         if (a === b) continue;
         const p = lcp(a, b);
         const idxB = elemIdxAt(b, p);
-        const tailSlots = elemCount(b) - 3;
+        const tailSlots = elemCount(b) - 3 - (hasIdNote(b) ? 1 : 0);
         const inVolatileTail = idxB >= tailSlots;
         let inSummaryElem = false;
         const anchor = b.indexOf(SUMMARY_MARKER);

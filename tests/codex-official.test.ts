@@ -109,7 +109,11 @@ test("Codex official transport preserves OAuth headers, decodes bodies, and reba
             additional_tools: unknown[];
             tools: unknown[];
         };
-        assert.deepEqual(forwarded.input.map((item) => item.type), ["additional_tools", "message", "reasoning", "message"]);
+        // #1611: the trailing message is the proxy-emitted conversation-id
+        // note (a volatile user-role item, never persisted client-side).
+        assert.deepEqual(forwarded.input.map((item) => item.type), ["additional_tools", "message", "reasoning", "message", "message"]);
+        assert.equal(forwarded.input[4]!.role, "user");
+        assert.match(String(forwarded.input[4]!.content), /^\[Your bili conversation id: /);
         assert.match(String(forwarded.input[1].content), /Compression Philosophy/);
         assert.match(String(forwarded.input[1].content), /five context-management tools/);
         assert.match(String(forwarded.input[1].content), /keep native Codex instructions/);

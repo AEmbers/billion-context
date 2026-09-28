@@ -31,6 +31,11 @@ function okJson(promptTokens: number): string {
 // 29-message history shaped so the OVER-LIMIT nudge is viable: a long text far
 // outside the protected recent zone (so compressible ranges exist) plus filler
 // that pushes the tail past preserveRecentMessages/preserveRecentTokens.
+// The trailing conversation-id note rides every tools-injected request
+// (#1611); it is transport metadata, orthogonal to the nudge counts below.
+const isIdNote = (m: { content?: unknown }): boolean =>
+    String(m.content ?? "").startsWith("[Your bili conversation id: ");
+
 function turn2Messages(): Record<string, unknown>[] {
     const longText = "y".repeat(20_000);
     const filler: { role: "user" | "assistant"; content: string }[] = [];
@@ -55,7 +60,7 @@ async function forwardedTurn2Length(sessionId: string, extraHeaders: Record<stri
         req.on("data", (c: Buffer) => chunks.push(c));
         req.on("end", () => {
             const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            received.push(body.messages ?? []);
+            received.push((body.messages ?? []).filter((m) => !isIdNote(m)));
             res.writeHead(200, { "content-type": "application/json" });
             res.end(okJson(50_000));
         });

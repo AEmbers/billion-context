@@ -165,10 +165,16 @@ async function startProxy(upstream: http.Server, { compatJson, bareWire }: Start
     };
 }
 
+// #1611: the proxy appends a trailing conversation-id user message to every
+// tools-injected request. It is proxy-emitted metadata, not a client message
+// subject to compat role rewriting — keep it out of the role observations.
+const isIdNote = (m: { role?: string; content?: unknown }): boolean =>
+    m.role === "user" && String(m.content ?? "").startsWith("[Your bili conversation id: ");
+
 test("e2e #552 A: responses developer role rewritten on forward", async () => {
     const seen: Array<{ path: string; roles: string[] }> = [];
     const upstream = await upstreamServer(200, (path, body) => {
-        const roles = ((body as { input?: Array<{ role?: string }> })?.input ?? []).map((i) => i.role ?? "?");
+        const roles = ((body as { input?: Array<{ role?: string; content?: unknown }> })?.input ?? []).filter((i) => !isIdNote(i)).map((i) => i.role ?? "?");
         seen.push({ path, roles });
     });
     const harness = await startProxy(upstream, { compatJson: `{"compat":{"roles":{"developer":"system"}}}` });
@@ -243,7 +249,7 @@ test("e2e #552 D: per-provider compat.roles wins over global", async () => {
     const upstreamPortHolder: { port: number } = { port: 0 };
     const upstream = await upstreamServer(200, (_path, body) => {
         const items = (body as { messages?: Array<{ role?: string }>; input?: Array<{ role?: string }> });
-        seen.push([...(items.messages ?? []), ...(items.input ?? [])].map((m) => m.role ?? "?"));
+        seen.push([...(items.messages ?? []), ...(items.input ?? [])].filter((m) => !isIdNote(m)).map((m) => m.role ?? "?"));
     });
     upstreamPortHolder.port = (upstream.address() as { port: number }).port;
     const config = {
@@ -319,8 +325,8 @@ function roleRejectingUpstream(): Promise<{ server: http.Server; seen: string[][
         req.on("end", () => {
             let roles: string[] = [];
             try {
-                const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { input?: Array<{ role?: string }>; messages?: Array<{ role?: string }> };
-                roles = [...(parsed.input ?? []), ...(parsed.messages ?? [])].map((m) => m.role ?? "?");
+                const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { input?: Array<{ role?: string; content?: unknown }>; messages?: Array<{ role?: string; content?: unknown }> };
+                roles = [...(parsed.input ?? []), ...(parsed.messages ?? [])].filter((m) => !isIdNote(m)).map((m) => m.role ?? "?");
             } catch { /* ignore */ }
             seen.push(roles);
             if (roles.includes("developer")) {

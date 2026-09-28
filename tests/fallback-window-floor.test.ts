@@ -21,6 +21,11 @@ import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 // nudge). The nudge is observable as a trailing user message appended to the
 // forwarded payload.
 
+// The trailing conversation-id note rides every tools-injected request
+// (#1611); it is transport metadata, orthogonal to the nudge counts below.
+const isIdNote = (m: { content?: unknown }): boolean =>
+    String(m.content ?? "").startsWith("[Your bili conversation id: ");
+
 function okJson(promptTokens: number): string {
     return JSON.stringify({
         id: "chatcmpl-1",
@@ -37,7 +42,7 @@ test("e2e: fallback-derived window is floored at 100k after output-headroom rese
         req.on("data", (c: Buffer) => chunks.push(c));
         req.on("end", () => {
             const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            received.push(body.messages ?? []);
+            received.push((body.messages ?? []).filter((m) => !isIdNote(m)));
             res.writeHead(200, { "content-type": "application/json" });
             res.end(okJson(50_000));
         });
@@ -135,7 +140,7 @@ test("e2e: per-route context declaration is operator-owned and never floored", a
         req.on("data", (c: Buffer) => chunks.push(c));
         req.on("end", () => {
             const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            received.push(body.messages ?? []);
+            received.push((body.messages ?? []).filter((m) => !isIdNote(m)));
             res.writeHead(200, { "content-type": "application/json" });
             res.end(okJson(50_000));
         });

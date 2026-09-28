@@ -181,7 +181,9 @@ test("e2e: explicit-identity zero-baseline session with the same conversation �
     assert.equal(calls.filter((c) => !c.stream).length, 0);
     const forward = calls.filter((c) => c.stream).at(-1)!;
     assert.ok(!forward.body.includes(NUDGE_MARKER), "explicit-identity zero baseline must stay at 0 (self-heals via measured usage)");
-    const tailMsgs = msgsOf(forward.body);
+    // #1611: drop the proxy-emitted trailing conversation-id note before
+    // taking the last message — the check targets the client's last message.
+    const tailMsgs = msgsOf(forward.body).filter((m) => !String(m.content ?? "").startsWith("[Your bili conversation id: "));
     const last = tailMsgs.at(-1)!;
     // Strip the outbound ACP anchor tag (proxy-mode wire format, AGENTS.md §2) before comparing.
     const stripped = msgText(last).replace(/^\x3cacp\s[^>]*>[^\x3c]*\x3c\/acp\x3e/, "").trimStart();

@@ -39,6 +39,11 @@ function okJson(promptTokens: number): string {
     });
 }
 
+// The trailing conversation-id note rides every tools-injected request
+// (#1611); it is transport metadata, orthogonal to the nudge counts below.
+const isIdNote = (m: { content?: unknown }): boolean =>
+    String(m.content ?? "").startsWith("[Your bili conversation id: ");
+
 function turn2Messages(): { role: "user" | "assistant"; content: string }[] {
     const longText = "x".repeat(20_000);
     const filler: { role: "user" | "assistant"; content: string }[] = [];
@@ -75,7 +80,7 @@ async function turn2MessageCount(s: Scenario): Promise<number> {
         req.on("data", (c: Buffer) => chunks.push(c));
         req.on("end", () => {
             const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            received.push(body.messages ?? []);
+            received.push((body.messages ?? []).filter((m) => !isIdNote(m)));
             res.writeHead(200, { "content-type": "application/json" });
             res.end(okJson(120_000));
         });

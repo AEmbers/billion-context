@@ -115,6 +115,11 @@ function compressArgs(refs) {
 // or the carrier masks the real prompt and the scripted compress never fires.
 const isChainCarrierMsg = (m) =>
     m?.role === "user" && /^\s*\x3cbili-chain\s[\s\S]*\/\x3e\s*$/.test(String(flatContent(m.content)));
+// #1611: the proxy appends a trailing conversation-id user message to every
+// tools-injected request — transport metadata like the chain carrier, and it
+// must not claim the "last user message" slot either.
+const isIdNoteMsg = (m) =>
+    m?.role === "user" && String(flatContent(m.content)).startsWith("[Your bili conversation id: ");
 
 function answerFor(convKey, firstUserText, body) {
     // Directives are parsed from the LAST user message: a `pi -p --continue`
@@ -126,7 +131,7 @@ function answerFor(convKey, firstUserText, body) {
     // the FIRST user message when the last one carries no markers — pi's
     // prompt always owns the last slot, so pi-lane behavior is unchanged.
     const messages = body.messages ?? [];
-    const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x));
+    const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x) && !isIdNoteMsg(x));
     // opencode fires a side-channel title-generation call (v1: separate
     // "Generate a title..." user message; v2: "You are a title generator"
     // system prompt) whose LAST user message is the real prompt — scripting
@@ -179,7 +184,7 @@ const server = http.createServer((req, res) => {
                 try { parsed = JSON.parse(raw || "{}"); } catch { /* noop */ }
                 if (process.env.FAKE_DUMP) { try { fs.appendFileSync(process.env.FAKE_DUMP, raw + "\n"); } catch { /* noop */ } }
                 const messages = parsed.messages ?? [];
-                const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x));
+                const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x) && !isIdNoteMsg(x));
                 const firstUserText = users.length > 0 ? flatContent(users[0].content) : "";
                 // ACP tag prefix of the LAST user message: lets suites cite the
                 // exact ref of a known message (e.g. run-one's filler) without
