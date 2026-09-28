@@ -251,6 +251,8 @@ curl -s http://localhost:8787/__bili/stats
 ![网页会话页：缓存命中率折线图 + 归因（中文界面）](docs/cache-web-session.zh-CN.png)
 报告四块，一眼定位：**GRAND LEDGER**（总账：总输入/总命中/hit%，直接给出 `HEALTHY` 或异常判定；miss 拆解为 new content 新增内容 / compress re-pay 压缩重付 / upstream-ttl-or-client-rewrite 上游 TTL 或客户端重写）· **FOLD ECONOMICS**（每次折叠的经济账：净省多少、是否回本）· **LINE ITEMS**（只列异常行：hit<85% 或 miss≥5000）。经验值：**压缩本身只吃掉 ≤2%**，健康会话稳在 **95–97%**；低于这个值时，归因按概率排序：①上游缓存 TTL 到期（报告里表现为 stable-prefix miss，top spikes 会点出闲置时长）②切换了模型 ③bili 的 bug（带报告页提 issue）④其他/未知。`/acp-cache [full]` 列每一折每一行；自 #1535 起报告末尾多一节 `MODEL SWITCHES`：会话中途换模型会让提供商的前缀缓存整体失效，下一次请求把整个稳定前缀全额重付——每次切换的未解释残差（其 `ttl` 桶减去新增内容）记在这次切换头上，而不是伪装成 TTL 到期；逐事件列出 `from → to`、hit% 与归因 token（`full` 列全部事件，摘要列最近 8 条），网页会话表也有对应的模型切换列。HTTP 同款：`GET /__bili/cache-report`；每个请求的 `[acp-usage]` 行仍会落日志，供深挖。
 
+**一个会话固定一个模型。** 上游前缀缓存按模型隔离命名空间，中途切模型会使已缓存的前缀整体失效、下一次请求全额重付（上面 `MODEL SWITCHES` 小节记的就是这笔账）。另一个成本杠杆：Claude 模型走 OpenAI-format 中继（翻译后的 `/v1/responses` 通道）时，Anthropic 缓存依赖中继显式放置的 `cache_control` 断点——若报告显示输入在涨而 cached 钉在 system head 附近，问下你的中继运维能否为该通道启用多个断点（或自动缓存）(#1613)。
+
 **`/acp` 显示什么?** 带原生插件的客户端(opencode、dsh)里,`/acp` 直接从代理取当前会话的 ACP 状态面板(会话、块、可压缩区间、用量);首个模型请求到来前显示空闲提示。`/acp-cache [full]` 打印上面的缓存报告。
 
 **能用网页查会话和配置吗?** 能 —— 打开 [http://localhost:8787](http://localhost:8787):总览仪表盘、会话列表(含逐会话详情)、实时日志、配置编辑器、上游连通性测试。全部功能同样以纯 JSON 提供(`/__bili/stats`、`/__bili/sessions`、`/__bili/config`、…),方便脚本化。
