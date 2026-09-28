@@ -2204,13 +2204,17 @@ test("#957: omp reports runtime-info via before_provider_request (omp has no hea
         // the FIRST request (previously round 1 left before toolsReady flipped
         // and reported nothing — a race artifact, not a policy).
         await pi.events.get("before_provider_request")!({}, ctxA);
-        await waitForRuntimeInfoCount(proxy, 1);
+        // #1531: the handler AWAITs the report, so by the time it resolves
+        // (i.e. before the model request dispatches) the POST has landed —
+        // no polling needed, and the ordering is asserted directly.
+        assert.equal(proxy.runtimeInfos.length, 1, "report lands before the request dispatches (#1531)");
         assert.deepEqual(proxy.runtimeInfos[0], {
             agent: "omp",
             model: "omp-rt-model-a",
             contextWindow: 200000,
             maxOutput: 32768,
             baseURL: `${proxy.origin}/bili/https://api.example.com/v1`,
+            conversationId: "omp-rt-1",
             source: "client-config",
         });
         // same model again → deduped, no second POST
@@ -2226,6 +2230,7 @@ test("#957: omp reports runtime-info via before_provider_request (omp has no hea
             contextWindow: 128000,
             maxOutput: 16384,
             baseURL: `${proxy.origin}/bili/https://api.example.com/v1`,
+            conversationId: "omp-rt-1",
             source: "client-config",
         });
     } finally {

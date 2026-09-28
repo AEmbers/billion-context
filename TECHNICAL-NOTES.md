@@ -26,13 +26,20 @@ table in the context-window chain:
 | Channel | When | Fields |
 |---|---|---|
 | Per-request headers (gated on `x-bili-plugin`) | every model request | `x-bili-plugin-context-window`, `x-bili-plugin-max-output`, `x-bili-plugin-model` |
-| `POST /__bili/plugin/runtime-info` (loopback) | plugin bootstrap + model switch | `{agent, model, contextWindow?, maxOutput?, baseURL?, source}` |
+| `POST /__bili/plugin/runtime-info` (loopback) | plugin bootstrap + any reported-config change | `{agent, model, contextWindow?, maxOutput?, baseURL?, conversationId?, source}` |
 
 Resolution order for the window: `anthropic-beta` negotiation > per-request
-plugin header > runtime-info table (agent+model must match) > launcher
-env > route config > models.dev registry > built-in table. A reported
-`maxOutput` only stands in when the request body carries no output budget
-of its own. Implementations: `src/agent/pi.ts` (covers pi and omp),
+plugin header > runtime-info > launcher env > route config > models.dev
+registry > built-in table. The runtime-info step reads the **per-agent
+entry** when the request carries an `x-bili-plugin` header (agent+model must
+match); requests without one resolve the **conversation-scoped entry**
+recorded with a `conversationId`, keyed by the same conversation signal the
+session binds on (client conversation header, custom session header, or the
+body's `prompt_cache_key`) — model must match either way (#1531: omp stamps
+`prompt_cache_key` but no plugin header, and main/subagent sessions share
+the agent name while running different models). A reported `maxOutput` only
+stands in when the request body carries no output budget of its own.
+Implementations: `src/agent/pi.ts` (covers pi and omp),
 `src/agent/opencode-native.ts` (v1), `src/agent/opencode-v2.ts`,
 `src/agent/dsh-native.ts`, `src/kimi/native-mcp.ts` (bootstrap-time report
 only — kimi's provider `custom_headers` are static, so per-request headers

@@ -5,6 +5,7 @@ import type { ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { acquireInFlight, effectiveConfig, findSessionByCanonicalId, listSessions, markCompactionBoundary, markDirty, peekSession, releaseInFlight, withSessionLock, type Session } from "./session.js";
+import { clientConversationHeader } from "./session-id.js";
 import { ABSORB_TOOL_NAME, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, PROXY_TOOL_NAMES, RETRIEVE_TOOL_NAME, RULE_TOOL, RULE_TOOL_NAME, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, SEARCH_CONTEXT_CONVERSATION_ID_PARAM, SEARCH_CONTEXT_TOOL_NAME, absorbToolsFor, retrieveToolsFor } from "./compress-tool.js";
 import { absorbEnabled, effectiveAbsorbConfig, isProxyToolFor } from "./absorb.js";
 import { effectiveRulesEnabled, rulesEnabled } from "./rules-feature.js";
@@ -307,29 +308,41 @@ export type PendingPluginRegister = { conversationId: string; agent: string; ts:
  *  will run — reported at plugin bootstrap and on model switch, before (and
  *  independent of) any model request. Ranked in the native-window chain
  *  directly under the per-request header report; entries carry their model
- *  id and the table is only consulted when that id matches the request's
- *  model (a stale post-switch entry must never size a different model). */
+ *  id and are only usable when that id matches the request's model (a stale
+ *  post-switch entry must never size a different model). Entries carrying a
+ *  conversationId are keyed by it (#1531), not by agent — one process runs
+ *  many sessions (main + subagents) that share the agent name but report
+ *  different windows, and a single per-agent slot let the last reporter
+ *  clobber everyone else's entry. */
 export type PluginRuntimeInfo = {
     agent: string;
     model: string;
     contextWindow?: number;
     maxOutput?: number;
     baseURL?: string;
+    conversationId?: string;
     source: string;
     ts: number;
 };
 
 const pluginRuntimeTable = new Map<string, PluginRuntimeInfo>();
+const pluginRuntimeByConversation = new Map<string, PluginRuntimeInfo>();
 const MAX_PLUGIN_RUNTIME_ENTRIES = 32;
 
-export function recordPluginRuntimeInfo(entry: PluginRuntimeInfo): void {
-    pluginRuntimeTable.delete(entry.agent);
-    pluginRuntimeTable.set(entry.agent, entry);
-    while (pluginRuntimeTable.size > MAX_PLUGIN_RUNTIME_ENTRIES) {
-        const oldest = pluginRuntimeTable.keys().next().value;
+function evictOldestRuntimeEntries(map: Map<string, PluginRuntimeInfo>): void {
+    while (map.size > MAX_PLUGIN_RUNTIME_ENTRIES) {
+        const oldest = map.keys().next().value;
         if (oldest === undefined) break;
-        pluginRuntimeTable.delete(oldest);
+        map.delete(oldest);
     }
+}
+
+export function recordPluginRuntimeInfo(entry: PluginRuntimeInfo): void {
+    const conv = entry.conversationId !== undefined && entry.conversationId.length > 0 ? entry.conversationId : undefined;
+    const table = conv !== undefined ? pluginRuntimeByConversation : pluginRuntimeTable;
+    table.delete(conv ?? entry.agent);
+    table.set(conv ?? entry.agent, entry);
+    evictOldestRuntimeEntries(table);
 }
 
 /** Latest runtime-info for an agent, usable for `model` only (undefined =
@@ -339,6 +352,31 @@ export function pluginRuntimeInfoFor(agent: string | undefined, model: string | 
     const entry = pluginRuntimeTable.get(agent);
     if (entry === undefined || entry.model !== model) return undefined;
     return entry;
+}
+
+/** Latest runtime-info registered under a conversation id, usable for
+ *  `model` only (#1531). */
+export function pluginRuntimeInfoForConversation(conversationId: string | undefined, model: string | undefined): PluginRuntimeInfo | undefined {
+    if (conversationId === undefined || model === undefined) return undefined;
+    const entry = pluginRuntimeByConversation.get(conversationId);
+    if (entry === undefined || entry.model !== model) return undefined;
+    return entry;
+}
+
+/** The narrow conversation signal a header-less runtime-info lookup can
+ *  match on (#1531): client conversation header → custom session header →
+ *  body prompt_cache_key. Mirrors the identity chain's precedence at exactly
+ *  the points where a reported conversationId could have been minted (omp
+ *  stamps prompt_cache_key with its session uuid, #957/#1230); any divergence
+ *  from the full binding identity degrades to a miss — legacy behavior —
+ *  never a wrong hit. */
+export function runtimeConversationId(headers: Record<string, string | string[] | undefined>, parsed: unknown, sessionHeaderName?: string): string | undefined {
+    const fromClient = clientConversationHeader(headers);
+    if (fromClient !== undefined && fromClient.length > 0) return fromClient;
+    const custom = sessionHeaderName !== undefined ? headerValue(headers, sessionHeaderName) : undefined;
+    if (custom !== undefined) return custom;
+    const pck = typeof parsed === "object" && parsed !== null ? (parsed as { prompt_cache_key?: unknown }).prompt_cache_key : undefined;
+    return typeof pck === "string" && pck.trim().length > 0 ? pck.trim() : undefined;
 }
 
 /** Accept the bootstrap/model-switch report. Body:
@@ -355,7 +393,7 @@ export function handlePluginRuntimeInfo(payload: string, res: import("node:http"
         res.end(JSON.stringify({ ok: false, error: "invalid JSON" }));
         return;
     }
-    const body = parsed as { agent?: unknown; model?: unknown; contextWindow?: unknown; maxOutput?: unknown; baseURL?: unknown; source?: unknown };
+    const body = parsed as { agent?: unknown; model?: unknown; contextWindow?: unknown; maxOutput?: unknown; baseURL?: unknown; conversationId?: unknown; source?: unknown };
     const str = (v: unknown, max: number) => (typeof v === "string" && v.length > 0 && v.length <= max ? v : undefined);
     const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined);
     const agent = str(body.agent, 64);
@@ -365,12 +403,14 @@ export function handlePluginRuntimeInfo(payload: string, res: import("node:http"
         res.end(JSON.stringify({ ok: false, error: "agent and model are required" }));
         return;
     }
+    const conversationId = str(body.conversationId, 256);
     recordPluginRuntimeInfo({
         agent,
         model,
         contextWindow: num(body.contextWindow),
         maxOutput: num(body.maxOutput),
         baseURL: str(body.baseURL, 2048),
+        ...(conversationId !== undefined ? { conversationId } : {}),
         source: str(body.source, 64) ?? "client-config",
         ts: Date.now(),
     });
@@ -746,7 +786,7 @@ export function handlePluginStatus(conversationId: string, res: import("node:htt
         // agent-keyed runtime table so /acp works pre-first-request. Clients
         // without a stable conversation id before their first request probe
         // with their agent name (dsh's fetchStatusLatest sends "dsh").
-        const pre = pluginRuntimeTable.get(conversationId);
+        const pre = pluginRuntimeTable.get(conversationId) ?? pluginRuntimeByConversation.get(conversationId);
         if (pre !== undefined) {
             res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: true, conversationId, phase: "pre-first-request", model: pre.model, contextLimit: pre.contextWindow ?? null, runtimeInfo: pre, panel: null }));
@@ -831,7 +871,9 @@ export function handlePluginStatus(conversationId: string, res: import("node:htt
         pluginAgent: session.metadata.pluginAgent ?? null,
         model: session.metadata.lastModel ?? null,
         windowSource: session.metadata.lastWindowSource ?? null,
-        runtimeInfo: pluginRuntimeInfoFor(typeof session.metadata.pluginAgent === "string" ? session.metadata.pluginAgent : undefined, typeof session.metadata.lastModel === "string" ? session.metadata.lastModel : undefined) ?? null,
+        runtimeInfo: pluginRuntimeInfoFor(typeof session.metadata.pluginAgent === "string" ? session.metadata.pluginAgent : undefined, typeof session.metadata.lastModel === "string" ? session.metadata.lastModel : undefined)
+            ?? pluginRuntimeInfoForConversation(conversationIdForSession(session.id), typeof session.metadata.lastModel === "string" ? session.metadata.lastModel : undefined)
+            ?? null,
         contextLimit: typeof limit === "number" ? limit : null,
         contextTokens: session.stats.lastInputTokens,
         inputTokens: session.stats.inputTokens,
@@ -2499,6 +2541,7 @@ export function _resetPluginStateForTest(): void {
     pendingRegisters.length = 0;
     registeredIds.clear();
     pluginRuntimeTable.clear();
+    pluginRuntimeByConversation.clear();
     warnedNoModelRequests.clear();
 }
 
