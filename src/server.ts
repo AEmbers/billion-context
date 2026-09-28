@@ -71,7 +71,7 @@ import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
-import { buildSessionCacheReport, handleAcpCache, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
+import { buildSessionCacheReport, handleAcpCache, noteForwardedBody, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
 import { warnCacheCollapse } from "./cache-warn.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
@@ -3390,6 +3390,7 @@ async function prepareOpenai(
         // tokenCount = upstream's real input_tokens from the previous turn
         // (see anthropic branch comment + its #553-follow-up exception).
         const tokenCount = effectiveTokenCount(session, msgs, imageTokensInParsedBody("openai", parsed, imageBillingFor(opts, billingUpstream ?? upstreamOrigin)));
+
         const activeBefore = new Set(session.state.blocks.filter((b) => b.active).map((b) => b.blockId));
         // Absorb markers ride in the kernel's processTurn output (gated by
         // config.absorb). Title-gen requests skip ALL injection for
@@ -5847,8 +5848,15 @@ async function forward(
             const absorbBlock = effectiveAbsorbBlock(prepared.pluginMode === true, config, opts.compress.absorb);
             const absorbActive = absorbBlock?.enabled === true && opts.compress.injectTool && !textProtocol;
             const loopConfig = ccrLoopConfig(prepared.session, { ...config, absorb: absorbActive ? absorbBlock : undefined });
+            // Cache-seam: the compress<->absorb join must be byte-identical to
+            // the steady prepare* paths. Every steady wire joins the absorb
+            // section with a plain "\n\n" (sysParts.join / injectSystem parts
+            // join); the historical "---" divider here existed ONLY on round-2
+            // and broke the system-element prefix on every fold while absorb
+            // was armed (probe: cache-seam-probes P1+P2, chat wire diverged at
+            // the absorb boundary char).
             const absorbSection = absorbActive
-                ? `\n\n---\n\n${buildAbsorbSystemPrompt(absorbToolName(loopConfig))}`
+                ? `\n\n${buildAbsorbSystemPrompt(absorbToolName(loopConfig))}`
                 : "";
             const visibilityMarkers = resolveCompress(opts.routes, route?.rewrittenUrl, (parsedReq as { model?: string }).model, opts.compress).visibilityMarkers ?? true;
             const systemPrompt = withConversationIdNote(withMarkerIntegrityNote(withSummaryBudgetNote(textProtocol ? buildCompressHybridSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections) : buildCompressSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections)), visibilityMarkers), ensureCanonicalId(prepared.session)) + absorbSection;
@@ -5863,13 +5871,31 @@ async function forward(
                         messages: prepared.originalMessages,
                         state: prepared.session.state,
                         config: loopConfig,
-                        tokenCount: prepared.session.stats.lastInputTokens,
+                        // #1492 doctrine (secondary processTurn feeds): the round-2
+                        // re-render must never light the kernel's emergency bands on
+                        // an estimate-grade poison — e.g. a fake/zeroed usage report
+                        // (lastInput=0 after the compress credit nets out) falls
+                        // through to the inflated pre-fold estimate, arms
+                        // emergency-truncate against a context the fold just
+                        // shrank, and the truncation marker oscillates per fold
+                        // cycle (round-2 truncated, next steady full) — a
+                        // mid-history cache break on every fold (#1592 family).
+                        // Usage-grade baselines pass through; estimate-grade reads
+                        // as 0 ("unknown") and leaves the bands dark.
+                        tokenCount: usageGradeInputBaseline(prepared.session),
                         renderTags: prepared.renderTags ?? "text-only",
                         contentStore: contentStoreOf(prepared.session),
                     });
                     prepared.session.state = turn.state;
                     adoptContentStore(prepared.session, turn.contentStore);
-                    const viewed = applyAbsorbView(turn.messages, turn.state, loopConfig, prepared.session.stats.lastInputTokens);
+                    // #1592-family seam: the absorb view must be fed by the SAME
+                    // token-count source the steady prepare* paths use. Feeding
+                    // raw lastInputTokens here made round-2 and the neighboring
+                    // steady requests disagree across absorb.contextThresholdPct
+                    // crossings — absorb prompts appeared/disappeared mid-history
+                    // and broke the prefix cache on every fold while the
+                    // threshold was being straddled (probe: cache-seam-probes).
+                    const viewed = applyAbsorbView(turn.messages, turn.state, loopConfig, effectiveTokenCount(prepared.session, turn.messages));
                     const records = current.filter((m) => typeof m.id === "string" && m.id.startsWith("acp_loop_"));
                     // #1548: strip only when the compress call rides INBOUND history (client persists
                     // it). Ephemeral acp_loop_* pairs are never re-sent by proxy-mode clients; stripping
@@ -5983,6 +6009,7 @@ async function forward(
                 const reportedCached: number | null = typeof cached === "number" ? cached : null;
                 const billed = typeof total === "number" ? total : 0;
                 if (billed > 0 || reportedCached !== null) {
+                    noteForwardedBody(prepared.session, typeof prepared.body === "string" ? prepared.body : String(prepared.body));
                     settleUsageReport(prepared.session, { total: billed, reportedCached, output: out, protocol: prepared.protocol, upstream: targetOrigin });
                     if (reportedCached !== null) warnCacheCollapse(prepared.session, billed, reportedCached);
                     const hitPct = reportedCached !== null && billed > 0 ? Math.round((100 * reportedCached) / billed) : undefined;

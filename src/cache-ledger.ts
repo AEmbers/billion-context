@@ -54,6 +54,10 @@ interface LedgerLine {
     proto?: string;
     /** #1536: LLM endpoint origin of this request — part of the target identity. */
     up?: string;
+    /** #1592-family seam detector: 1 iff this sample's unexplained residual
+     *  tripped the mid-history-break suspicion (no fold/switch/restart
+     *  attribution AND a large ttlRepay). Sparse: omitted unless set. */
+    seam?: 1;
     /** #1535: 1 iff `model` differs from the previous sample's KNOWN model
      *  (unknown sides never flag); marks the re-billed stable prefix on the
      *  first request after a model switch. Sparse: omitted unless set. */
@@ -95,7 +99,13 @@ export interface CacheLedger {
         attributedMissed: number;
         unknownSamples: number;
         unknownInput: number;
+        seamSuspects: number;
+        seamMissed: number;
     };
+    /** #1592-family: bounded forensic log of suspected mid-history cache-seam
+     *  breaks (consecutive outbound bodies diverged with no structural
+     *  attribution). Purely diagnostic — never part of the closure math. */
+    seamEvents?: SeamEvent[];
     /** #1536: BOOT_ID of the process that recorded the last line — a mismatch on
      *  the next sample marks a proxy-restart boundary (#499). Absent pre-#1536. */
     lastBoot?: string;
@@ -126,6 +136,82 @@ function prefixTokensBeforeRef(session: Session, ref: string): number {
     return n;
 }
 
+/** #1592-family seam forensics: where two consecutive outbound bodies first
+ *  diverged, for samples whose miss has no structural attribution. */
+export interface SeamEvent {
+    seq: number;
+    at: number;
+    input: number;
+    hitPct: number;
+    /** Byte offset of the first differing byte (a LOWER bound — bodies are
+     *  capped at SEAM_BODY_CAP for storage, so huge prefixes report the cap). */
+    lcpBytes: number;
+    /** Index of the first message element whose serialized form differs. */
+    msgIndex: number;
+    prevMsgs: number;
+    curMsgs: number;
+}
+
+const SEAM_BODY_CAP = 512 * 1024;
+const SEAM_EVENTS_CAP = 8;
+const seamLastSent = new WeakMap<Session, string>();
+const seamLastSettled = new WeakMap<Session, string>();
+
+/** Record the body of the upstream round that is about to be sent. Called at
+ *  the single send chokepoints (loop fetchUpstream, non-streaming forward);
+ *  the next settleUsageReport pairs it with the usage report it produced. */
+export function noteForwardedBody(session: Session, body: string): void {
+    seamLastSent.set(session, body.length > SEAM_BODY_CAP ? body.slice(0, SEAM_BODY_CAP) : body);
+}
+
+function seamLcp(a: string, b: string): { lcpBytes: number; msgIndex: number; prevMsgs: number; curMsgs: number } {
+    let lcp = 0;
+    const n = Math.min(a.length, b.length);
+    while (lcp < n && a.charCodeAt(lcp) === b.charCodeAt(lcp)) lcp++;
+    const msgsOf = (s: string): unknown[] => {
+        try {
+            const arr = (JSON.parse(s) as { messages?: unknown }).messages;
+            return Array.isArray(arr) ? arr : [];
+        } catch {
+            return [];
+        }
+    };
+    const ma = msgsOf(a);
+    const mb = msgsOf(b);
+    let i = 0;
+    const eq = (x: unknown, y: unknown): boolean => JSON.stringify(x) === JSON.stringify(y);
+    while (i < Math.min(ma.length, mb.length) && eq(ma[i], mb[i])) i++;
+    return { lcpBytes: lcp, msgIndex: i, prevMsgs: ma.length, curMsgs: mb.length };
+}
+
+function detectSeam(session: Session, led: CacheLedger): void {
+    const line = led.lines[led.lines.length - 1];
+    if (!line || line.unk === 1 || line.missed <= 0) return;
+    // Structural attributions already explain the miss — not a seam candidate.
+    if (line.sw === 1 || line.pw === 1 || line.uw === 1 || line.rs === 1 || line.foldSeq !== null) return;
+    // Substantive unexplained residual only: a big ttlRepay slice of a big bill.
+    if (!(line.tr > 8192 && line.tr > 0.3 * line.input)) return;
+    const agg = led.agg;
+    agg.seamSuspects += 1;
+    agg.seamMissed += line.tr;
+    line.seam = 1;
+    const cur = seamLastSent.get(session);
+    const prev = seamLastSettled.get(session);
+    if (cur !== undefined && prev !== undefined && led.seamEvents !== undefined && led.seamEvents.length >= SEAM_EVENTS_CAP) {
+        led.seamEvents.shift();
+    }
+    if (cur !== undefined && prev !== undefined) {
+        const f = seamLcp(prev, cur);
+        const ev: SeamEvent = { seq: line.seq, at: line.at, input: line.input, hitPct: line.hitPct, ...f };
+        (led.seamEvents ?? (led.seamEvents = [])).push(ev);
+        if (agg.seamSuspects === 1) {
+            loggerLog("warn", `[${session.id}] [cache-seam] suspected mid-history prefix break: hit ${line.hitPct}% (input=${line.input}, unexplained=${Math.round(line.tr)} tok, no fold/switch/restart attribution); first divergence at byte ${ev.lcpBytes}, message[${ev.msgIndex}] of ${ev.prevMsgs}→${ev.curMsgs} — see /acp-cache for the seam section`);
+        }
+    } else if (agg.seamSuspects === 1) {
+        loggerLog("warn", `[${session.id}] [cache-seam] suspected mid-history prefix break: hit ${line.hitPct}% (input=${line.input}, unexplained=${Math.round(line.tr)} tok, no fold/switch/restart attribution); outbound body pair unavailable (lane without body capture) — aggregate flag only`);
+    }
+}
+
 export function getCacheLedger(session: Session): CacheLedger {
     const meta = session.metadata ?? (session.metadata = {});
     const existing = meta[LEDGER_KEY] as CacheLedger | undefined;
@@ -137,6 +223,7 @@ export function getCacheLedger(session: Session): CacheLedger {
             "switches", "switchMissed", "wireSwitches", "wireSwitchMissed",
             "upstreamSwitches", "upstreamSwitchMissed", "restartDrops",
             "restartDropMissed", "attributedMissed", "unknownSamples", "unknownInput",
+            "seamSuspects", "seamMissed",
         ] as const) {
             if (typeof g[key] !== "number") g[key] = 0;
         }
@@ -153,7 +240,7 @@ export function getCacheLedger(session: Session): CacheLedger {
         foldSeqCounter: 0,
         folds: [],
         lines: [],
-        agg: { requests: 0, input: 0, cached: 0, output: 0, nc: 0, cr: 0, tr: 0, switches: 0, switchMissed: 0, wireSwitches: 0, wireSwitchMissed: 0, upstreamSwitches: 0, upstreamSwitchMissed: 0, restartDrops: 0, restartDropMissed: 0, attributedMissed: 0, unknownSamples: 0, unknownInput: 0 },
+        agg: { requests: 0, input: 0, cached: 0, output: 0, nc: 0, cr: 0, tr: 0, switches: 0, switchMissed: 0, wireSwitches: 0, wireSwitchMissed: 0, upstreamSwitches: 0, upstreamSwitchMissed: 0, restartDrops: 0, restartDropMissed: 0, attributedMissed: 0, unknownSamples: 0, unknownInput: 0, seamSuspects: 0, seamMissed: 0 },
     };
     meta[LEDGER_KEY] = led;
     return led;
@@ -366,6 +453,13 @@ export function settleUsageReport(
         session.stats.cacheSamples += 1;
     }
     recordCacheSample(session, { at: Date.now(), input: s.total, cached: s.reportedCached, output: s.output, protocol: s.protocol, upstream: s.upstream });
+    // #1592-family seam forensics: pair this settle with the body that was
+    // actually sent (noteForwardedBody), then keep it as the next pair's
+    // baseline. Lanes without body capture still get the aggregate flag.
+    detectSeam(session, getCacheLedger(session));
+    const seamBody = seamLastSent.get(session);
+    if (seamBody !== undefined) seamLastSettled.set(session, seamBody);
+    seamLastSent.delete(session);
 }
 
 /** [#1279] Price profile stamped by the last request (server.ts runPrepare).
@@ -419,6 +513,7 @@ export interface BiliCacheReport extends CacheReport {
     restartDrops: ModelSwitchStats;
     unmeasured: { samples: number; inputTokens: number };
     invalidation: InvalidationTokenBreakdown;
+    seam: { suspects: number; missed: number; events: SeamEvent[] };
 }
 
 export function buildSessionCacheReport(session: Session): BiliCacheReport {
@@ -515,6 +610,7 @@ export function buildSessionCacheReport(session: Session): BiliCacheReport {
         restartDrops: { count: a.restartDrops, missedTokens: a.restartDropMissed, events: restartEvents },
         unmeasured: { samples: a.unknownSamples, inputTokens: a.unknownInput },
         invalidation,
+        seam: { suspects: a.seamSuspects, missed: a.seamMissed, events: led.seamEvents ?? [] },
     };
 }
 
@@ -542,9 +638,9 @@ export function handleAcpCache(session: Session, args?: Record<string, unknown>)
                 session.id,
                 { detail },
             );
-            return capped + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report);
+            return capped + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report) + (report.seam.suspects > 0 ? "\n\n" + formatSeam(report) : "");
         }
-        return formatCacheReport(report, session.id, { detail }) + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report);
+        return formatCacheReport(report, session.id, { detail }) + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report) + (report.seam.suspects > 0 ? "\n\n" + formatSeam(report) : "");
     } catch (err) {
         loggerLog("warn", `[${session.id}] [acp_cache] report failed: ${String(err)}`);
         return `[acp_cache FAILED: ${String(err)}]`;
@@ -578,6 +674,20 @@ function formatModelSwitches(sw: ModelSwitchStats, detail: "summary" | "full"): 
     if (shown.length < sw.events.length) {
         out.push(`  … ${sw.events.length - shown.length} earlier switch(es) omitted (detail:"full" lists all)`);
     }
+    return out.join("\n");
+}
+
+function formatSeam(r: BiliCacheReport): string {
+    if (r.seam.suspects === 0) return "";
+    const out: string[] = ["⚠ CACHE SEAM (suspected mid-history prefix breaks)"];
+    out.push(`  ${r.seam.suspects} sample(s) · ${fmtTok(r.seam.missed)} tok re-billed with no fold/switch/restart attribution`);
+    for (const e of r.seam.events) {
+        out.push(`    #${e.seq} ${fmtTime(e.at)} hit ${e.hitPct.toFixed(1)}% · input ${fmtTok(e.input)} · divergence ≥${fmtTok(e.lcpBytes)}B at message[${e.msgIndex}] of ${e.prevMsgs}→${e.curMsgs}`);
+    }
+    if (r.seam.events.length === 0) {
+        out.push("    (no body-pair forensics on this lane — aggregate flag only; report the session + log if this persists)");
+    }
+    out.push("  if reproducible: /acp-cache detail:\"full\" + bili.log around the timestamps above (likely a #1548-family round-2/steady render seam)");
     return out.join("\n");
 }
 
