@@ -145,14 +145,6 @@ export const WEB_CLIENT = `(function () {
         });
         return '<td class="num"><span class="hitc" title="' + escapeHtml(t("ses.drop_ph")) + '">(' + parts.join("/") + ")</span></td>";
     }
-    // MODEL SWITCHES column (#1535): mid-session model changes re-bill the stable prefix;
-    // shows count · dropped tokens, honest dash when none.
-    function switchTd(s) {
-        if (!s.modelSwitches) return '<td class="num dim">' + t("common.none") + "</td>";
-        const tip = escapeHtml(t("ses.th_switches_tip"));
-        if (!s.switchMissedTokens) return '<td class="num" title="' + tip + '">' + s.modelSwitches + "</td>";
-        return '<td class="num" title="' + tip + '">' + s.modelSwitches + " · " + fmtW(s.switchMissedTokens) + "</td>";
-    }
 
     function sessionRow(s, compact) {
         const tr = document.createElement("tr");
@@ -160,7 +152,7 @@ export const WEB_CLIENT = `(function () {
         if (compact) {
             tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + protoBadge(s.protocol) + '</span></td><td class="num">' + fmtW(s.contextTokens) + '</td>' + savedTd(s) + '<td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         } else {
-            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td><span class="mono dim small clip w-up">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + hitTd(s) + switchTd(s) + '<td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
+            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td><span class="mono dim small clip w-up">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + hitTd(s) + '<td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         }
         let navTimer = null;
         tr.addEventListener("click", (ev) => {
@@ -219,7 +211,7 @@ export const WEB_CLIENT = `(function () {
             const rb = $("recent-body");
             rb.innerHTML = "";
             const recent = (o.recent || []).slice(0, 8);
-            if (!recent.length) rb.innerHTML = '<tr><td colspan="13" class="dim">' + t("common.empty") + "</td></tr>";
+            if (!recent.length) rb.innerHTML = '<tr><td colspan="12" class="dim">' + t("common.empty") + "</td></tr>";
             recent.forEach((s) => rb.appendChild(sessionRow(s, false)));
             renderBanners(d);
         } catch (e) {
@@ -303,7 +295,7 @@ export const WEB_CLIENT = `(function () {
         const tb = $("sessions-body");
         tb.innerHTML = "";
         if (!rows.length) {
-            tb.innerHTML = '<tr><td colspan="13"><div class="empty"><div class="big">🗂</div>' + t("ses.empty") + "<br>" + t("ses.empty_hint") + "</div></td></tr>";
+            tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">🗂</div>' + t("ses.empty") + "<br>" + t("ses.empty_hint") + "</div></td></tr>";
             return;
         }
         rows.forEach((s) => tb.appendChild(sessionRow(s, false)));
