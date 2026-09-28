@@ -66,12 +66,13 @@ import {
 import { ABSORB_TOOL_NAME, COMPRESS_TOOL, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_GOOGLE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, BILI_ACP_READONLY_TOOLS_RESPONSES, COMPRESS_TOOL_NAME, IMAGE_FULL_TOOL, IMAGE_FULL_TOOL_GOOGLE, IMAGE_FULL_TOOL_OPENAI, IMAGE_FULL_TOOL_RESPONSES, RULE_TOOL, RULE_TOOL_GOOGLE, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, absorbToolsFor, retrieveToolsFor, buildAbsorbSystemPrompt, buildCompressSystemPrompt, buildCompressHybridSystemPrompt, withConversationIdNote, withMarkerIntegrityNote, withStagedCompressGuidance, withSummaryBudgetNote } from "./compress-tool.js";
 import { applyAbsorbView, absorbEnabled, absorbToolName, storeEffectiveAbsorb } from "./absorb.js";
 import { adoptContentStore, ccrEnabled, ccrLoopConfig, ccrPluginWireOk, commitRetrievals, commitRetrievalNotes, contentStoreOf, dropRetrievals, executeRetrieve, pruneExpiredRetrievals, reconcileReloadedRetrievals, renderRetrievalNotes, retrieveToolName, snapshotPendingRetrievals, snapshotRetrievalNotes, storeEffectiveCcr, type CcrSettings } from "./store.js";
-import { applyImageCompressionPass, imageCompressionEnabled, imageFullTrailingNote, storeEffectiveImageCompression, type ImageCompressionSettings } from "./image-compress.js";
+import { applyImageCompressionPass, imageCompressionEnabled, imageFullTrailingNote, imageUsageSuffix, storeEffectiveImageCompression, type ImageCompressionSettings } from "./image-compress.js";
 import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
-import { buildSessionCacheReport, handleAcpCache } from "./cache-ledger.js";
+import { buildSessionCacheReport, handleAcpCache, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
+import { warnCacheCollapse } from "./cache-warn.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
@@ -5534,6 +5535,12 @@ async function forward(
         }
         return;
     }
+    // #1536: origin of the URL fetched for THIS request — cache-invalidation
+    // attribution identity shared by the plugin pipes below and the compress
+    // loop further down (proxyUrl is the routing CONNECT-proxy, not the
+    // endpoint; the outer upstreamOrigin is the configured route target).
+    let targetOrigin: string | undefined;
+    try { targetOrigin = new URL(upstreamUrl).origin; } catch { targetOrigin = undefined; }
     // Plugin mode: the agent's native loop owns the tool surface — pass the
     // response through VERBATIM (a model-emitted compress call must reach the
     // plugin untouched) while sniffing usage so lastInputTokens (the input to
@@ -5581,6 +5588,7 @@ async function forward(
                             log,
                             label: prepared.session.id,
                         }),
+                        targetOrigin,
                     );
                 } else {
                     // #732/#821: the plugin pipe re-issues the agent's own body
@@ -5604,10 +5612,11 @@ async function forward(
                             log,
                             label: prepared.session.id,
                         }),
+                        targetOrigin,
                     );
                 }
             } else {
-                await pipePluginJson(pluginBody, res, prepared.session, prepared.protocol);
+                await pipePluginJson(pluginBody, res, prepared.session, prepared.protocol, targetOrigin);
             }
         } finally {
             clearUpstreamTimer();
@@ -5848,7 +5857,7 @@ async function forward(
             const loopDumpDir = opts.dumpSse;
             const loop = runCompressLoop(
                 streamToRead,
-                { core, config, messages: prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages, compressMessages: prepared.originalMessages, session: prepared.session, log: ctx.log, proxyUrl, protocol: prepared.protocol, textProtocol, debug: opts.debug, refreshFolded, visibilityMarkers, dumpSse: loopDumpDir ? (name, stream) => dumpStreamToFile(stream, loopDumpDir, name) : undefined },
+                { core, config, messages: prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages, compressMessages: prepared.originalMessages, session: prepared.session, log: ctx.log, proxyUrl, upstreamOrigin: targetOrigin, protocol: prepared.protocol, textProtocol, debug: opts.debug, refreshFolded, visibilityMarkers, dumpSse: loopDumpDir ? (name, stream) => dumpStreamToFile(stream, loopDumpDir, name) : undefined },
                 parsedReq,
                 { url: upstreamUrl, headers: reqHeaders, wireTransform },
                 adapter,
@@ -5922,25 +5931,21 @@ async function forward(
                 const rawUsage = prepared.protocol === "google" ? json.usageMetadata ?? json.usage : json.usage;
                 const u = (rawUsage ?? {}) as Record<string, unknown>;
                 const { total, cached } = usageTotals(prepared.protocol, u);
-                if (typeof total === "number") {
-                    prepared.session.stats.inputTokens += total;
-                    // lastInputTokens = true TOTAL context (protocol-correct),
-                    // net of this turn's compress savings (see stream.ts
-                    // applyRanges — the fold lands on the NEXT request).
-                    prepared.session.stats.lastInputTokens = Math.max(
-                        0,
-                        total - (prepared.session.stats.compressCreditTokens ?? 0),
-                    );
-                    prepared.session.stats.lastInputTokensSource = "usage";
-                    // #1110: a real usage report retires the one-shot overflow arm.
-                    delete prepared.session.stats.overflowArmTokens;
-                    if (typeof cached === "number") {
-                        prepared.session.stats.cachedTokens += cached;
-                        prepared.session.stats.cacheSamples += 1;
-                    }
-                    const out = usageOutputTotal(prepared.protocol, u);
-                    if (typeof out === "number") prepared.session.stats.outputTokens += out;
+                const out = usageOutputTotal(prepared.protocol, u);
+                // #1547: settle through the shared path — stats AND the cache
+                // ledger. Before this, this branch updated stats only, so
+                // stream:false sessions produced zero ledger lines and were
+                // invisible to /acp-cache, __bili/cache-report and the
+                // invalidation attribution built on them (#1536).
+                const reportedCached: number | null = typeof cached === "number" ? cached : null;
+                const billed = typeof total === "number" ? total : 0;
+                if (billed > 0 || reportedCached !== null) {
+                    settleUsageReport(prepared.session, { total: billed, reportedCached, output: out, protocol: prepared.protocol, upstream: targetOrigin });
+                    if (reportedCached !== null) warnCacheCollapse(prepared.session, billed, reportedCached);
+                    const hitPct = reportedCached !== null && billed > 0 ? Math.round((100 * reportedCached) / billed) : undefined;
+                    loggerLog("info", `[${prepared.session.id}] [acp-usage] input=${billed} ${hitPct === undefined ? "(no cache report)" : `cached=${reportedCached} (cache hit ${hitPct}%)`}${billed <= 0 ? " (zero-total: lastInputTokens kept)" : ""}${imageUsageSuffix(prepared.session)}`);
                 }
+                if (typeof out === "number") prepared.session.stats.outputTokens += out;
                 if (prepared.protocol === "openai") {
                     await withSessionLock(prepared.session, () => rewriteOpenaiJsonResponse(json, ctx));
                 } else if (prepared.protocol === "responses") {
@@ -6105,26 +6110,32 @@ function reapOrphansLogged(session: Session, msgs: CoreMessage[], log: (level: s
 
 function sendStats(res: http.ServerResponse): void {
     const all = listSessions();
-    const sessions = all.map((s) => ({
-        id: s.id,
-        protocol: s.meta.protocol,
-        upstream: s.meta.upstreamOrigin,
-        label: s.meta.label,
-        title: s.meta.title,
-        requests: s.stats.requests,
-        contextTokens: s.stats.contextTokens,
-        inputTokens: s.stats.inputTokens,
-        cachedTokens: s.stats.cachedTokens,
-        outputTokens: s.stats.outputTokens,
-        cacheSamples: s.stats.cacheSamples,
-        cacheHitPct: s.stats.cacheSamples > 0 && s.stats.inputTokens > 0 ? Math.round(s.stats.cachedTokens / s.stats.inputTokens * 100) : null,
-        // #901: window credibility — trusted (configured/registry) window vs the
-        // largest input recent successful turns actually got through. A wide gap
-        // means the provider overstates its window.
-        contextWindow: typeof s.metadata.effectiveContextLimit === "number" ? s.metadata.effectiveContextLimit : undefined,
-        lastSeen: new Date(s.lastSeen).toISOString(),
-        restored: s.restored === true,
-    }));
+    const sessions = all.map((s) => {
+        const sw = readModelSwitchStats(s);
+        return {
+            id: s.id,
+            protocol: s.meta.protocol,
+            upstream: s.meta.upstreamOrigin,
+            label: s.meta.label,
+            title: s.meta.title,
+            requests: s.stats.requests,
+            contextTokens: s.stats.contextTokens,
+            inputTokens: s.stats.inputTokens,
+            cachedTokens: s.stats.cachedTokens,
+            outputTokens: s.stats.outputTokens,
+            cacheSamples: s.stats.cacheSamples,
+            cacheHitPct: s.stats.cacheSamples > 0 && s.stats.inputTokens > 0 ? Math.round(s.stats.cachedTokens / s.stats.inputTokens * 100) : null,
+            lastModel: typeof s.metadata.lastModel === "string" ? s.metadata.lastModel : undefined,
+            modelSwitches: sw?.count ?? 0,
+            switchMissedTokens: sw?.missedTokens ?? 0,
+            // #901: window credibility — trusted (configured/registry) window vs the
+            // largest input recent successful turns actually got through. A wide gap
+            // means the provider overstates its window.
+            contextWindow: typeof s.metadata.effectiveContextLimit === "number" ? s.metadata.effectiveContextLimit : undefined,
+            lastSeen: new Date(s.lastSeen).toISOString(),
+            restored: s.restored === true,
+        };
+    });
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ sessions, blindTunnels: getBlindTunnelStats(), unrecognizedPaths: getUnrecognizedPathStats(), conflicts: summarizeConflicts(all) }, null, 2));
 }

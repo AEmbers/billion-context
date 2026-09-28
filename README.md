@@ -292,6 +292,13 @@ you which of the usual suspects it was, in this order: ① upstream cache TTL
 expiry (shows up as stable-prefix misses — the top-spikes line names idle
 times), ② a model switch, ③ a bili bug (report it with the page attached),
 ④ other/unknown. `/acp-cache [full]` lists every fold & line; same report over
+Since #1535 the report ends with a `MODEL SWITCHES` section: a mid-session
+model change invalidates the provider's prefix cache, so the whole stable
+prefix is re-billed on the next request — each switch's unexplained residual
+(its `ttl` bucket minus new content) is charged to the switch instead of
+masquerading as TTL expiry; per-event `from → to`, hit %, and attributed
+tokens are listed (`full` lists every event, the summary the last 8), and
+the web sessions table gains a matching model-switch column.
 HTTP: `GET /__bili/cache-report`; the raw per-request `[acp-usage]` lines still
 land in the log file for deep dives.
 
