@@ -528,14 +528,18 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
             log("debug", `[conn#${rec.id}] ${rec.kind} closed reason=${reason} age=${now - rec.openedAt}ms reqs=${rec.requests}`);
         });
     });
-    // #1452: Node's default client-error disposition (no listener) destroys
-    // the socket. Depending on residual kernel recv-buffer state that makes
-    // the OS answer RST (peer reads ECONNRESET — the #1452 incident
-    // signature) or leave the peer's pooled connection hanging with neither
-    // FIN nor RST ever (verified behavior matrix). Drain whatever is left,
-    // then end cleanly — never destroy a data-bearing socket. One handler
-    // covers both plain TCP and MITM TLS legs: the MITM socket enters through
-    // this same server instance.
+    // #1452: Node's default client-error disposition (no listener) writes a
+    // bare `HTTP/1.1 400 Bad Request` / Connection: close reply and then
+    // destroys the socket (measured Linux/Node 25). Depending on platform
+    // and residual kernel recv-buffer state, that destroy surfaces as RST
+    // (peer reads ECONNRESET — the #1452 incident signature) or strands the
+    // peer's pooled connection with neither FIN nor RST ever (verified
+    // matrix; Node 22/Linux measures as the strand case). We replace all of
+    // it with drain-then-end: an immediate clean FIN, never destroy a
+    // data-bearing socket. Wire delta vs Node default: a malformed request
+    // gets a FIN instead of a 400 — intentional (unparseable input; PR
+    // #1528 discloses it). One handler covers both plain TCP and MITM TLS
+    // legs: the MITM socket enters through this same server instance.
     server.on("clientError", (err, socket) => {
         if (socket.destroyed) return;
         log("warn", `[conn] clientError: ${err.message} — draining then closing`);
