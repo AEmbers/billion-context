@@ -71,7 +71,7 @@ import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
-import { buildSessionCacheReport, handleAcpCache, noteForwardedBody, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
+import { buildSessionCacheReport, handleAcpCache, noteClientAbort, noteForwardedBody, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
 import { warnCacheCollapse } from "./cache-warn.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
@@ -4834,7 +4834,10 @@ async function preflightCompressIfNeeded(
     const clientAbort = new AbortController();
     registerRequestAbort(res, clientAbort);
     res.on("close", () => {
-        if (!res.writableEnded) clientAbort.abort();
+        if (!res.writableEnded) {
+            clientAbort.abort();
+            noteClientAbort(session);
+        }
     });
     const started = Date.now();
     let stopHold: (() => void) | undefined;
@@ -5176,7 +5179,10 @@ async function forward(
     const clientAbort = new AbortController();
     registerRequestAbort(res, clientAbort);
     res.on("close", () => {
-        if (!res.writableEnded) clientAbort.abort();
+        if (!res.writableEnded) {
+            clientAbort.abort();
+            if (prepared?.session) noteClientAbort(prepared.session);
+        }
     });
     let upstreamResult: Awaited<ReturnType<typeof fetchWithTimeout>>;
     try {

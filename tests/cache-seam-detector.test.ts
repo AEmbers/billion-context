@@ -6,7 +6,7 @@
 // in /acp-cache. Purely diagnostic — the closure math is untouched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { noteForwardedBody, settleUsageReport, getCacheLedger, buildSessionCacheReport, handleAcpCache } from "../src/cache-ledger.ts";
+import { noteForwardedBody, noteClientAbort, settleUsageReport, getCacheLedger, buildSessionCacheReport, handleAcpCache } from "../src/cache-ledger.ts";
 import type { Session } from "../src/session.ts";
 
 let seq = 0;
@@ -121,4 +121,49 @@ test("seam events are bounded (ring keeps the last 8)", () => {
     const led = getCacheLedger(s);
     assert.equal(led.seamEvents?.length, 8, "bounded ring");
     assert.equal(led.agg.seamSuspects, 12, "aggregate counts all");
+});
+
+test("seam detector: client rewind (fewer messages) attributes to HISTORY REWOUND, not a seam", () => {
+    const s = makeSession();
+    noteForwardedBody(s, body(["a", "b", "c"]));
+    settle(s, T0, 100_000, 99_000);
+    // Client reverted to message 1 — big miss, fewer elements.
+    noteForwardedBody(s, body(["a"]));
+    settle(s, T0 + 1000, 100_000, 20_000);
+    const led = getCacheLedger(s);
+    assert.equal(led.agg.rewinds, 1);
+    assert.ok(led.agg.rewindMissed > 0);
+    assert.equal(led.agg.seamSuspects, 0, "rewind must not cry seam");
+    const text = handleAcpCache(s);
+    assert.match(text, /HISTORY REWOUND/);
+    assert.ok(!/CACHE SEAM \(/.test(text), "no seam section for a pure rewind");
+});
+
+test("seam detector: byte-stable resend attributes to PROVIDER-SIDE MISS, not a seam", () => {
+    const s = makeSession();
+    const same = body(["a", "b"]);
+    noteForwardedBody(s, same);
+    settle(s, T0, 100_000, 99_000);
+    noteForwardedBody(s, same);
+    settle(s, T0 + 1000, 100_000, 20_000);
+    const led = getCacheLedger(s);
+    assert.equal(led.agg.providerSideMisses, 1);
+    assert.ok(led.agg.providerSideMissed > 0);
+    assert.equal(led.agg.seamSuspects, 0, "stable wire must not cry seam");
+    assert.match(handleAcpCache(s), /PROVIDER-SIDE MISS/);
+});
+
+test("seam detector: abort correlation marks missed samples near a client abort", () => {
+    const s = makeSession();
+    noteForwardedBody(s, body(["a", "b"]));
+    settle(s, T0, 100_000, 99_000);
+    noteClientAbort(s);
+    noteForwardedBody(s, body(["a", "B"]));
+    settle(s, T0 + 500, 100_000, 20_000);
+    const led = getCacheLedger(s);
+    assert.equal(led.agg.abortCorrelated, 1);
+    const line = led.lines[led.lines.length - 1]!;
+    assert.equal(line.abortedNear, 1);
+    assert.equal(line.seam, 1, "still a seam candidate — correlation is orthogonal");
+    assert.match(handleAcpCache(s), /ABORT-CORRELATED/);
 });

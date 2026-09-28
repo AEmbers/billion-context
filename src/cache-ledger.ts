@@ -58,6 +58,9 @@ interface LedgerLine {
      *  tripped the mid-history-break suspicion (no fold/switch/restart
      *  attribution AND a large ttlRepay). Sparse: omitted unless set. */
     seam?: 1;
+    /** #1592 follow-up: 1 iff this sample settled within 30s of a client
+     *  mid-stream abort in the same session (abort/retry churn correlation). */
+    abortedNear?: 1;
     /** #1535: 1 iff `model` differs from the previous sample's KNOWN model
      *  (unknown sides never flag); marks the re-billed stable prefix on the
      *  first request after a model switch. Sparse: omitted unless set. */
@@ -101,6 +104,21 @@ export interface CacheLedger {
         unknownInput: number;
         seamSuspects: number;
         seamMissed: number;
+        /** #1592 follow-up: misses whose current body was byte-stable vs the
+         *  previous request — the upstream simply did not serve its cache
+         *  (TTL expiry / eviction / relay node rotation). Not a rebuild seam. */
+        providerSideMisses: number;
+        providerSideMissed: number;
+        /** #1592 follow-up: misses right after the client rewound history
+         *  (revert/trim — fewer message elements than the previous request).
+         *  Sanctioned client intent; recorded so the one-time re-bill is
+         *  attributed instead of landing in the unexplained residual. */
+        rewinds: number;
+        rewindMissed: number;
+        /** #1592 follow-up: samples settled within 30s of a client abort —
+         *  abort/retry churn correlates with prefix misses (the retried
+         *  request carries a rewritten tail). Correlation, not causation. */
+        abortCorrelated: number;
     };
     /** #1592-family: bounded forensic log of suspected mid-history cache-seam
      *  breaks (consecutive outbound bodies diverged with no structural
@@ -156,6 +174,14 @@ const SEAM_BODY_CAP = 512 * 1024;
 const SEAM_EVENTS_CAP = 8;
 const seamLastSent = new WeakMap<Session, string>();
 const seamLastSettled = new WeakMap<Session, string>();
+const lastClientAbort = new WeakMap<Session, number>();
+
+/** #1592 follow-up: stamp the wall-clock time of a client mid-stream abort
+ *  (wired at both forward abort chokepoints). The next settle in the same
+ *  session reads it to mark abort-correlated samples. */
+export function noteClientAbort(session: Session): void {
+    lastClientAbort.set(session, Date.now());
+}
 
 /** Record the body of the upstream round that is about to be sent. Called at
  *  the single send chokepoints (loop fetchUpstream, non-streaming forward);
@@ -187,16 +213,40 @@ function seamLcp(a: string, b: string): { lcpBytes: number; msgIndex: number; pr
 function detectSeam(session: Session, led: CacheLedger): void {
     const line = led.lines[led.lines.length - 1];
     if (!line || line.unk === 1 || line.missed <= 0) return;
+    // Abort correlation is counted for EVERY missed sample, independent of
+    // structural attribution — abort/retry churn is orthogonal evidence.
+    const abortAt = lastClientAbort.get(session);
+    if (abortAt !== undefined && Math.abs(line.at - abortAt) < 30_000) {
+        line.abortedNear = 1;
+        led.agg.abortCorrelated += 1;
+    }
     // Structural attributions already explain the miss — not a seam candidate.
     if (line.sw === 1 || line.pw === 1 || line.uw === 1 || line.rs === 1 || line.foldSeq !== null) return;
     // Substantive unexplained residual only: a big ttlRepay slice of a big bill.
     if (!(line.tr > 8192 && line.tr > 0.3 * line.input)) return;
     const agg = led.agg;
+    const cur = seamLastSent.get(session);
+    const prev = seamLastSettled.get(session);
+    if (cur !== undefined && prev !== undefined) {
+        const f = seamLcp(prev, cur);
+        if (f.curMsgs < f.prevMsgs) {
+            // Client reverted/trimmed history: the miss is the sanctioned
+            // one-time re-bill of the retained prefix (or the gap's TTL).
+            agg.rewinds += 1;
+            agg.rewindMissed += line.tr;
+            return;
+        }
+        if (f.lcpBytes >= cur.length) {
+            // Wire was byte-stable against the previous request — the
+            // upstream simply did not serve its cache. Provider-side.
+            agg.providerSideMisses += 1;
+            agg.providerSideMissed += line.tr;
+            return;
+        }
+    }
     agg.seamSuspects += 1;
     agg.seamMissed += line.tr;
     line.seam = 1;
-    const cur = seamLastSent.get(session);
-    const prev = seamLastSettled.get(session);
     if (cur !== undefined && prev !== undefined && led.seamEvents !== undefined && led.seamEvents.length >= SEAM_EVENTS_CAP) {
         led.seamEvents.shift();
     }
@@ -240,7 +290,7 @@ export function getCacheLedger(session: Session): CacheLedger {
         foldSeqCounter: 0,
         folds: [],
         lines: [],
-        agg: { requests: 0, input: 0, cached: 0, output: 0, nc: 0, cr: 0, tr: 0, switches: 0, switchMissed: 0, wireSwitches: 0, wireSwitchMissed: 0, upstreamSwitches: 0, upstreamSwitchMissed: 0, restartDrops: 0, restartDropMissed: 0, attributedMissed: 0, unknownSamples: 0, unknownInput: 0, seamSuspects: 0, seamMissed: 0 },
+        agg: { requests: 0, input: 0, cached: 0, output: 0, nc: 0, cr: 0, tr: 0, switches: 0, switchMissed: 0, wireSwitches: 0, wireSwitchMissed: 0, upstreamSwitches: 0, upstreamSwitchMissed: 0, restartDrops: 0, restartDropMissed: 0, attributedMissed: 0, unknownSamples: 0, unknownInput: 0, seamSuspects: 0, seamMissed: 0, providerSideMisses: 0, providerSideMissed: 0, rewinds: 0, rewindMissed: 0, abortCorrelated: 0 },
     };
     meta[LEDGER_KEY] = led;
     return led;
@@ -513,7 +563,7 @@ export interface BiliCacheReport extends CacheReport {
     restartDrops: ModelSwitchStats;
     unmeasured: { samples: number; inputTokens: number };
     invalidation: InvalidationTokenBreakdown;
-    seam: { suspects: number; missed: number; events: SeamEvent[] };
+    seam: { suspects: number; missed: number; events: SeamEvent[]; providerSide: { count: number; missed: number }; rewinds: { count: number; missed: number }; abortCorrelated: number };
 }
 
 export function buildSessionCacheReport(session: Session): BiliCacheReport {
@@ -610,7 +660,7 @@ export function buildSessionCacheReport(session: Session): BiliCacheReport {
         restartDrops: { count: a.restartDrops, missedTokens: a.restartDropMissed, events: restartEvents },
         unmeasured: { samples: a.unknownSamples, inputTokens: a.unknownInput },
         invalidation,
-        seam: { suspects: a.seamSuspects, missed: a.seamMissed, events: led.seamEvents ?? [] },
+        seam: { suspects: a.seamSuspects, missed: a.seamMissed, events: led.seamEvents ?? [], providerSide: { count: a.providerSideMisses, missed: a.providerSideMissed }, rewinds: { count: a.rewinds, missed: a.rewindMissed }, abortCorrelated: a.abortCorrelated },
     };
 }
 
@@ -638,9 +688,9 @@ export function handleAcpCache(session: Session, args?: Record<string, unknown>)
                 session.id,
                 { detail },
             );
-            return capped + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report) + (report.seam.suspects > 0 ? "\n\n" + formatSeam(report) : "");
+            return capped + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report) + (formatSeam(report) ? "\n\n" + formatSeam(report) : "");
         }
-        return formatCacheReport(report, session.id, { detail }) + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report) + (report.seam.suspects > 0 ? "\n\n" + formatSeam(report) : "");
+        return formatCacheReport(report, session.id, { detail }) + "\n\n" + formatModelSwitches(report.modelSwitches, detail) + "\n\n" + formatInvalidation(report) + (formatSeam(report) ? "\n\n" + formatSeam(report) : "");
     } catch (err) {
         loggerLog("warn", `[${session.id}] [acp_cache] report failed: ${String(err)}`);
         return `[acp_cache FAILED: ${String(err)}]`;
@@ -678,17 +728,31 @@ function formatModelSwitches(sw: ModelSwitchStats, detail: "summary" | "full"): 
 }
 
 function formatSeam(r: BiliCacheReport): string {
-    if (r.seam.suspects === 0) return "";
-    const out: string[] = ["⚠ CACHE SEAM (suspected mid-history prefix breaks)"];
-    out.push(`  ${r.seam.suspects} sample(s) · ${fmtTok(r.seam.missed)} tok re-billed with no fold/switch/restart attribution`);
-    for (const e of r.seam.events) {
-        out.push(`    #${e.seq} ${fmtTime(e.at)} hit ${e.hitPct.toFixed(1)}% · input ${fmtTok(e.input)} · divergence ≥${fmtTok(e.lcpBytes)}B at message[${e.msgIndex}] of ${e.prevMsgs}→${e.curMsgs}`);
+    const out: string[] = [];
+    if (r.seam.suspects > 0) {
+        out.push("⚠ CACHE SEAM (suspected mid-history prefix breaks)");
+        out.push(`  ${r.seam.suspects} sample(s) · ${fmtTok(r.seam.missed)} tok re-billed with no fold/switch/restart attribution`);
+        for (const e of r.seam.events) {
+            out.push(`    #${e.seq} ${fmtTime(e.at)} hit ${e.hitPct.toFixed(1)}% · input ${fmtTok(e.input)} · divergence ≥${fmtTok(e.lcpBytes)}B at message[${e.msgIndex}] of ${e.prevMsgs}→${e.curMsgs}`);
+        }
+        if (r.seam.events.length === 0) {
+            out.push("    (no body-pair forensics on this lane — aggregate flag only; report the session + log if this persists)");
+        }
+        out.push("  if reproducible: /acp-cache detail:\"full\" + bili.log around the timestamps above (likely a #1548-family round-2/steady render seam)");
     }
-    if (r.seam.events.length === 0) {
-        out.push("    (no body-pair forensics on this lane — aggregate flag only; report the session + log if this persists)");
+    if (r.seam.rewinds.count > 0) {
+        out.push("↩ HISTORY REWOUND (client revert/trim)");
+        out.push(`  ${r.seam.rewinds.count} sample(s) · ${fmtTok(r.seam.rewinds.missed)} tok re-billed once for the retained prefix — sanctioned client intent, not a rebuild seam`);
     }
-    out.push("  if reproducible: /acp-cache detail:\"full\" + bili.log around the timestamps above (likely a #1548-family round-2/steady render seam)");
-    return out.join("\n");
+    if (r.seam.providerSide.count > 0) {
+        out.push("▲ PROVIDER-SIDE MISS (wire was byte-stable)");
+        out.push(`  ${r.seam.providerSide.count} sample(s) · ${fmtTok(r.seam.providerSide.missed)} tok — the outbound body matched the previous request's prefix; the upstream did not serve its cache (TTL expiry / eviction / relay node rotation). Not a bili rebuild seam.`);
+    }
+    if (r.seam.abortCorrelated > 0) {
+        out.push("⏻ ABORT-CORRELATED");
+        out.push(`  ${r.seam.abortCorrelated} missed sample(s) within 30s of a client mid-stream abort — abort/retry churn rewrites the resent tail; correlation, not causation (see bili.log 'client aborted mid-stream')`);
+    }
+    return out.length > 0 ? out.join("\n") : "";
 }
 
 function formatInvalidation(r: BiliCacheReport): string {
