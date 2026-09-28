@@ -116,6 +116,15 @@ function compressArgs(refs) {
 const isChainCarrierMsg = (m) =>
     m?.role === "user" && /^\s*\x3cbili-chain\s[\s\S]*\/\x3e\s*$/.test(String(flatContent(m.content)));
 
+// The per-conversation id (#1611) rides an ephemeral trailing USER message
+// ("[Your bili conversation id: …]") that the proxy appends after the client
+// history on every tool-injecting request. Same transport-metadata class as
+// the chain carrier: "last user message" semantics below must skip it, or it
+// masks the real prompt and the directive queue / lastUserRef oracle desync.
+const stripAcps = (s) => s.replace(/\x3cacp\b[^>]*\x3e[\s\S]*?\x3c\/acp\x3e/g, "");
+const isConvNoteMsg = (m) =>
+    m?.role === "user" && /^\s*\[Your bili conversation id:[^\]]*\]\s*$/.test(stripAcps(String(flatContent(m.content))));
+
 function answerFor(convKey, firstUserText, body) {
     // Directives are parsed from the LAST user message: a `pi -p --continue`
     // follow-up run re-sends the whole history, and its fresh prompt must
@@ -126,14 +135,13 @@ function answerFor(convKey, firstUserText, body) {
     // the FIRST user message when the last one carries no markers — pi's
     // prompt always owns the last slot, so pi-lane behavior is unchanged.
     const messages = body.messages ?? [];
-    const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x));
+    const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x) && !isConvNoteMsg(x));
     // opencode fires a side-channel title-generation call (v1: separate
     // "Generate a title..." user message; v2: "You are a title generator"
     // system prompt) whose LAST user message is the real prompt — scripting
     // through it desyncs the queue before the main loop runs. Answer it
     // inertly, never touching queues. Contents carry ACP render-tag prefixes
     // (\x3cacp … \x3c/acp\x3e spans injected by the proxy), stripped before matching.
-    const stripAcps = (s) => s.replace(/\x3cacp\b[^>]*\x3e[\s\S]*?\x3c\/acp\x3e/g, "");
     const isTitleCall =
         messages.some((m) => m?.role === "system" && /title generator/i.test(stripAcps(flatContent(m.content)))) ||
         users.some((u) => /^generate a title\b/i.test(stripAcps(flatContent(u.content)).trim()));
@@ -179,7 +187,7 @@ const server = http.createServer((req, res) => {
                 try { parsed = JSON.parse(raw || "{}"); } catch { /* noop */ }
                 if (process.env.FAKE_DUMP) { try { fs.appendFileSync(process.env.FAKE_DUMP, raw + "\n"); } catch { /* noop */ } }
                 const messages = parsed.messages ?? [];
-                const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x));
+                const users = messages.filter((x) => x?.role === "user" && !isChainCarrierMsg(x) && !isConvNoteMsg(x));
                 const firstUserText = users.length > 0 ? flatContent(users[0].content) : "";
                 // ACP tag prefix of the LAST user message: lets suites cite the
                 // exact ref of a known message (e.g. run-one's filler) without
