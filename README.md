@@ -278,7 +278,10 @@ Everything that doesn't fit in one Quickstart line — how each client's lanes a
 **How do I check my cache hit rate?** Don't dig through logs — `/acp-cache`
 prints a **text summary report right in the client**, headed by a clickable
 **Web UI link**: open it for the web version of the session page — the cache
-hit-rate **line chart** plus per-break **attribution**. The report has four
+hit-rate **line chart** plus per-break **attribution**:
+
+![web session page: cache hit-rate chart + attribution](docs/cache-web-session.png)
+The report has four
 blocks that pin things down at a glance: **GRAND LEDGER** (totals + hit% with
 an explicit `HEALTHY` verdict; misses decomposed into new content /
 compress re-pay / upstream-ttl-or-client-rewrite) · **FOLD ECONOMICS** (per-fold
