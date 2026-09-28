@@ -70,7 +70,7 @@ import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
-import { buildSessionCacheReport, handleAcpCache } from "./cache-ledger.js";
+import { buildSessionCacheReport, handleAcpCache, readModelSwitchStats } from "./cache-ledger.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
@@ -6095,26 +6095,32 @@ function reapOrphansLogged(session: Session, msgs: CoreMessage[], log: (level: s
 
 function sendStats(res: http.ServerResponse): void {
     const all = listSessions();
-    const sessions = all.map((s) => ({
-        id: s.id,
-        protocol: s.meta.protocol,
-        upstream: s.meta.upstreamOrigin,
-        label: s.meta.label,
-        title: s.meta.title,
-        requests: s.stats.requests,
-        contextTokens: s.stats.contextTokens,
-        inputTokens: s.stats.inputTokens,
-        cachedTokens: s.stats.cachedTokens,
-        outputTokens: s.stats.outputTokens,
-        cacheSamples: s.stats.cacheSamples,
-        cacheHitPct: s.stats.cacheSamples > 0 && s.stats.inputTokens > 0 ? Math.round(s.stats.cachedTokens / s.stats.inputTokens * 100) : null,
-        // #901: window credibility — trusted (configured/registry) window vs the
-        // largest input recent successful turns actually got through. A wide gap
-        // means the provider overstates its window.
-        contextWindow: typeof s.metadata.effectiveContextLimit === "number" ? s.metadata.effectiveContextLimit : undefined,
-        lastSeen: new Date(s.lastSeen).toISOString(),
-        restored: s.restored === true,
-    }));
+    const sessions = all.map((s) => {
+        const sw = readModelSwitchStats(s);
+        return {
+            id: s.id,
+            protocol: s.meta.protocol,
+            upstream: s.meta.upstreamOrigin,
+            label: s.meta.label,
+            title: s.meta.title,
+            requests: s.stats.requests,
+            contextTokens: s.stats.contextTokens,
+            inputTokens: s.stats.inputTokens,
+            cachedTokens: s.stats.cachedTokens,
+            outputTokens: s.stats.outputTokens,
+            cacheSamples: s.stats.cacheSamples,
+            cacheHitPct: s.stats.cacheSamples > 0 && s.stats.inputTokens > 0 ? Math.round(s.stats.cachedTokens / s.stats.inputTokens * 100) : null,
+            lastModel: typeof s.metadata.lastModel === "string" ? s.metadata.lastModel : undefined,
+            modelSwitches: sw?.count ?? 0,
+            switchMissedTokens: sw?.missedTokens ?? 0,
+            // #901: window credibility — trusted (configured/registry) window vs the
+            // largest input recent successful turns actually got through. A wide gap
+            // means the provider overstates its window.
+            contextWindow: typeof s.metadata.effectiveContextLimit === "number" ? s.metadata.effectiveContextLimit : undefined,
+            lastSeen: new Date(s.lastSeen).toISOString(),
+            restored: s.restored === true,
+        };
+    });
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ sessions, blindTunnels: getBlindTunnelStats(), unrecognizedPaths: getUnrecognizedPathStats(), conflicts: summarizeConflicts(all) }, null, 2));
 }
