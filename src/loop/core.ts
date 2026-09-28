@@ -5,7 +5,7 @@ import {
     type CoreMessage,
 } from "acp-kernel";
 import { handleAcpStatus } from "../acp-status.js";
-import { handleAcpCache, settleUsageReport } from "../cache-ledger.js";
+import { handleAcpCache, noteForwardedBody, settleUsageReport } from "../cache-ledger.js";
 import { lastCompressSuffix, withSessionLock, type Session } from "../session.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import {
@@ -319,8 +319,11 @@ export async function* runCompressLoop(
     // but one copy per request is enough signal for humans).
     const seenMarkers = new Set<string>();
 
-    const fetchUpstream = (body: Record<string, unknown>) =>
-        fetchWithRetry(
+    const fetchUpstream = (body: Record<string, unknown>) => {
+        // #1592-family seam forensics: remember the body actually sent so the
+        // next usage settle can pair it with the previous one (LCP on miss).
+        noteForwardedBody(ctx.session, JSON.stringify(requestOptions.wireTransform ? requestOptions.wireTransform(body) : body));
+        return fetchWithRetry(
             requestOptions.url,
             {
                 method: "POST",
@@ -338,6 +341,7 @@ export async function* runCompressLoop(
                 loggerLog("warn", `[acp-loop] upstream rejected replay (HTTP ${info.status}); retrying in ${info.delayMs}ms (attempt ${info.attempt}/${info.maxAttempts})${lc}`);
             },
         );
+    };
 
     // #1455: single adoption point for every loop-originated upstream body so
     // the ACP_DUMP_SSE tee covers re-requests and retries, not just the first

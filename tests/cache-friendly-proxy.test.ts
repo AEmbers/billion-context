@@ -70,11 +70,16 @@ function parseRefIds(body: string): string[] {
 
 /** Normalized comparable element list for one outbound body, per wire. */
 function normOf(wire: Wire, p: Item): unknown[] {
+    // The tools array is part of the upstream prefix too (it is hashed into
+    // the cached prefix by every provider): a per-turn tool-list mutation
+    // breaks the cache at element 0. Pin it by placing it FIRST in the
+    // comparable element list.
+    const tools = p.tools ?? null;
     switch (wire) {
-        case "responses": return asArr(p.input);
-        case "chat": return asArr(p.messages);
-        case "anthropic": return [p.system ?? null, ...asArr(p.messages)];
-        case "google": return [p.systemInstruction ?? null, ...asArr(p.contents)];
+        case "responses": return [tools, ...asArr(p.input)];
+        case "chat": return [tools, ...asArr(p.messages)];
+        case "anthropic": return [tools, p.system ?? null, ...asArr(p.messages)];
+        case "google": return [tools, p.systemInstruction ?? null, ...asArr(p.contents)];
     }
 }
 
