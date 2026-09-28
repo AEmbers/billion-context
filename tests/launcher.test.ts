@@ -3227,9 +3227,14 @@ test("runLaunch dsh: non-loopback upstreams ride proxy envs, loopback keeps the 
     );
     fs.mkdirSync(path.join(dshHome, "profiles"));
     const original = fs.readFileSync(path.join(dshHome, "settings.yaml"), "utf8");
-    // A differently-named package.json above the anchor: os.tmpdir() sits
-    // inside this repo, so without it Node's self-name resolution would
-    // "find" billion-context in the checkout instead of the fixture below.
+    // A differently-named package.json above the probe anchor: os.tmpdir()
+    // can sit inside a billion-context checkout (as it does in this sandbox),
+    // and tsx's resolver checks the nearest enclosing package.json for a
+    // self-name match BEFORE walking node_modules — without the guard the
+    // probe would resolve against the checkout's own package.json instead of
+    // the fixture/shim below. It must sit on the overlay anchor's walk-up
+    // chain (home root), not merely beside it.
+    fs.writeFileSync(path.join(home, "package.json"), JSON.stringify({ name: "bili-dsh-launch-fixture", version: "0.0.0" }));
     const dshTree = path.join(home, "dshhost");
     fs.mkdirSync(path.join(dshTree, "bin"), { recursive: true });
     fs.writeFileSync(path.join(dshTree, "package.json"), JSON.stringify({ name: "dsh-fake-host", version: "0.0.0" }));
