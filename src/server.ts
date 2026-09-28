@@ -776,9 +776,8 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
             // only feed it.
             if (suppressedWriteErrors === 0) {
                 log("error", `uncaughtException (stream-write; suppressing repeats): ${String(err?.stack ?? err)}`);
-            } else {
-                suppressedWriteErrors += 1;
             }
+            suppressedWriteErrors += 1;
             return;
         }
         if (isBenignSocketRaceError(err)) {
