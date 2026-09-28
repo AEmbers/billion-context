@@ -274,6 +274,7 @@ export function getCacheLedger(session: Session): CacheLedger {
             "upstreamSwitches", "upstreamSwitchMissed", "restartDrops",
             "restartDropMissed", "attributedMissed", "unknownSamples", "unknownInput",
             "seamSuspects", "seamMissed",
+            "providerSideMisses", "providerSideMissed", "rewinds", "rewindMissed", "abortCorrelated",
         ] as const) {
             if (typeof g[key] !== "number") g[key] = 0;
         }

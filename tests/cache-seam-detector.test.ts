@@ -167,3 +167,27 @@ test("seam detector: abort correlation marks missed samples near a client abort"
     assert.equal(line.seam, 1, "still a seam candidate — correlation is orthogonal");
     assert.match(handleAcpCache(s), /ABORT-CORRELATED/);
 });
+
+test("seam detector: pre-upgrade ledger shape normalizes attribution counters (no NaN after reload)", () => {
+    const s = makeSession();
+    const led = getCacheLedger(s);
+    const agg = led.agg as Partial<typeof led.agg>;
+    delete agg.providerSideMisses;
+    delete agg.providerSideMissed;
+    delete agg.rewinds;
+    delete agg.rewindMissed;
+    delete agg.abortCorrelated;
+    const norm = getCacheLedger(s);
+    noteForwardedBody(s, body(["a", "b"]));
+    settle(s, T0, 100_000, 99_000);
+    noteClientAbort(s);
+    noteForwardedBody(s, body(["a"]));
+    settle(s, T0 + 500, 100_000, 20_000);
+    assert.equal(norm.agg.rewinds, 1, "rewind counter works after normalization");
+    assert.equal(norm.agg.abortCorrelated, 1, "abort counter works after normalization");
+    assert.ok(Number.isFinite(norm.agg.providerSideMisses), "untouched counters stay numeric");
+    const report = buildSessionCacheReport(s);
+    for (const v of [report.seam.providerSide.count, report.seam.providerSide.missed, report.seam.rewinds.count, report.seam.rewinds.missed, report.seam.abortCorrelated]) {
+        assert.ok(Number.isFinite(v), `report value finite: ${v}`);
+    }
+});
