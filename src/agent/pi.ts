@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { wrapCacheReport, wrapRuleReport } from "../acp-panel.js";
 import { awaitNativeProxyOrigin } from "./native-bootstrap.js";
+import { isModelApiUrl, nativeInterceptInstalled } from "./native-intercept.js";
 import { detectProxyBase, destinationRoutedThroughProxy, fetchManifest, forwardTool, fetchStatus, fetchProxyVersion, postIdentityRegister, reportRuntimeInfoOnChange, armedIdleNotice, noSessionWarning, type ManifestTool } from "./shared.js";
 
 type Ctx = {
@@ -143,9 +144,28 @@ export function parentConversationIdOf(ctx: Ctx): string | undefined {
 // permitted") 400 the whole request. Unrouted destinations degrade to the
 // proxy's anonymous prefix-affinity sessions (#309): compression still works,
 // /acp lookup by session id does not — acceptable vs a guaranteed 400.
-function stampPromptCacheKey(event: unknown, ctx: Ctx, agent: string): Record<string, unknown> | undefined {
+export function stampPromptCacheKey(event: unknown, ctx: Ctx, agent: string): Record<string, unknown> | undefined {
     if (agent !== "omp") return undefined;
-    if (!destinationRoutedThroughProxy(ctx.model?.baseUrl)) return undefined;
+    if (!destinationRoutedThroughProxy(ctx.model?.baseUrl)) {
+        // #1579: native omp mode routes at the FETCH layer — the model
+        // baseUrl stays the real upstream, so the launcher-shaped checks
+        // (a /bili/-wrapped URL, the BILLION_CONTEXT_PROXY origin, the MITM
+        // whitelist) can never match and #1403's gate silently killed the
+        // identity stamp for EVERY native session. Mirror the interceptor's
+        // own predicate instead: when the native intercept is installed it
+        // WILL rewrite any isModelApiUrl request URL to <proxy>/bili/<url>.
+        // The interceptor judges the FULL request URL while ctx carries only
+        // the baseUrl prefix (".../v1" — not suffix-matched by itself), so
+        // probe both the bare baseUrl and its natural chat-completions
+        // expansion; the proxy consumes (and strips) the stamped pck exactly
+        // as on the launcher lanes. Anything the interceptor would NOT
+        // rewrite keeps #1403's guarantee — never stamp where the proxy
+        // cannot see it.
+        if (!nativeInterceptInstalled()) return undefined;
+        const base = ctx.model?.baseUrl ?? "";
+        const expanded = /\/v\d+\/?$/.test(base) ? `${base.replace(/\/+$/, "")}/chat/completions` : base;
+        if (!isModelApiUrl(base) && !isModelApiUrl(expanded)) return undefined;
+    }
     const payload = (event as { payload?: unknown } | undefined)?.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
     const p = payload as Record<string, unknown>;
@@ -244,7 +264,8 @@ const RETRY_INTERVAL_MS = 10000;
 type RegisterState = { sid?: string; toolsFor?: string; toolsReady?: boolean; pending?: Promise<void>; retryAt?: number; identityAt?: string; carriedSids?: Set<string>; retryIntervalMs: number; manifestPrime?: { base: string; tools: Promise<ManifestTool[] | undefined> } };
 
 async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, agent: string): Promise<void> {
-    const proxyBase = proxyBaseForCtx(ctx);
+    let proxyBase = proxyBaseForCtx(ctx);
+    if (proxyBase === undefined) proxyBase = await awaitNativeProxyOrigin();
     if (proxyBase === undefined) return;
     // Cache on the session id; "" (host has no sessionManager) still caches,
     // so a successful registration is not re-fetched on every provider
