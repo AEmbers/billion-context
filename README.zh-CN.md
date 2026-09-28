@@ -86,17 +86,18 @@ QQ群:
    真实模型 API (Anthropic / OpenAI / 兼容厂商)
 ```
 
-代理向对话注入四个上下文管理工具(`compress`、`decompress`、`search_context`、`acp_status`)。模型在对话增长时调用 `compress`,代理在服务端执行 —— 压缩后的范围在下一轮之前折叠进对话历史。
+### 上下文管理工具
 
-可选的第五个工具 `absorb`(`compress.absorb.enabled: true` —— 见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md))对**各个工具结果即时压缩**:大结果(构建、日志、grep)被附带强制吸收指令,模型将各自蒸馏为紧凑摘要,原配对从下一轮起从线上隐藏 —— 使折叠轮之间的中间会话压力更低(#605)。
+代理向对话注入四个上下文管理工具;模型在上下文增长时自行调用,代理在服务端执行 `compress`,折叠后的范围在历史中保持摘要形态、直到被恢复:
 
-第六个工具 `acp_rule`(默认关闭;设 `compress.rules: true` 显式开启 —— 见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md)。开启后模型对会话规则有全权、可未经提示自主调用,#1399)记录**持久化的原则级提醒**:模型记录的简短规则(用户强调的教训、要求记住的行为、撞到的大坑)受硬性保护不被压缩——调用及结果在每次折叠中都保留在上下文中——省略参数则列出已记录规则;传入 `delete`(规则 id,如 `"rule3"`)删除单条规则,传入 `clear: true` 清空全部规则([ranxianglei/billion-context-pi#433](https://github.com/ranxianglei/billion-context-pi/issues/433))。
+- **`compress`** —— 把一段消息范围折叠成详细摘要。
+- **`decompress`** —— 需要精确细节时恢复某个已压缩范围。
+- **`search_context`** —— 在压缩摘要与可见消息中做关键词检索。
+- **`acp_status`** —— 上下文用量概览 + 哪些区间仍可压缩。
 
-第七个工具 `acp_retrieve`(全车道默认关闭、显式开启 —— 任意层级设 `compress.ccr.enabled: true` 方可启用,建议先本地验证;插件车道需全局显式 `true` 才会在 manifest 广播工具,#1271/#1273;见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md))支撑**内容寻址消息存储**(内置 CCR,#1097/#1179):超大工具结果**在到达时改为 ID 引用,而非强制蒸馏**——线上保留字节稳定的占位符,原文进入按会话的内容存储信封(按内容哈希去重),模型通过一次廉价工具调用按需取回。v2 让折叠同样无损:折叠落定时被覆盖的原文会存入存储,`decompress` 可按区间恢复(`startId`/`endId` ref)而无需整块展开,`search_context` 命中条目携带覆盖的 `mNNNNN` ref,让你精确取回所需内容。默认无损:未执行的 retrieve 只花一次调用;而被 absorb 蒸馏掉的细节则永久丢失。仅代理模式、仅原生工具线(marker/文本协议没有执行 retrieve 的通道,存储在这些场景下自动解除武装,而不是静默丢失内容)。
+四个可选扩展各自默认关闭,完整语义(开启开关、作用域、注意事项)见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md):**`absorb`** 对超大工具结果(构建、日志、grep)在到达时即时蒸馏为紧凑摘要,不必等折叠轮(#605);**`acp_rule`** 记录原则级提醒(教训、要求记住的行为、撞到的大坑),硬性受保护、每次折叠都保留在上下文中(#1399、[billion-context-pi#433](https://github.com/ranxianglei/billion-context-pi/issues/433));**`acp_retrieve`** 把超大结果放入内容寻址存储、线上只留字节稳定的 ID 引用,折叠同样无损、按需取回(#1097/#1179);**`image_full`** 对截图类图像在到达时降采样一次,降低进入 wire 的计费像素,可按会话恢复原始分辨率(#1095)。
 
-可选工具 `image_full`(`compress.imageCompression.enabled: true` —— 见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md))支撑**图像预压缩**(#1095):工具结果中的截图类图像在到达时降采样一次——内核做路由决策与 recipe,宿主经可选的 `sharp` 执行编码——在进入 wire 前降低计费像素(供应商按像素面积计费;尺寸减半约省 4 倍计费 token)。非截图图像逐字节原样透传。天然有损:模型看不清细节时用消息 ref 调用 `image_full`,为整个会话恢复原始分辨率——无需代理侧存储原图(客户端自己的历史仍持有原始字节,它从未见过降采样形态)。默认关闭。
-
-同族的保护开关 `compress.protectedLatestTools`(见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md))让累积型工具(客户端的 todo/任务清单,如 `["todo_list", "TodoWrite"]`)的**最新**快照永远不被压缩,旧实例照常折叠 —— agent 的活跃任务清单不会在折叠中丢失(#639)。其全历史对应项 `compress.protectedTools` 对工具的**全部实例**做硬排除 —— 适用于各次结果相互独立、后续结果不会取代旧结果的内容(如 opencode/pi 的 `skill` 加载);对高频或累积快照型工具保护全部实例会让上下文无界增长(#639),请只用于低频高价值工具。反向旋钮 `compress.neverPreserveRecentTools`(见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md),需 `acp-kernel` >= 0.0.92)则把工具从软保护的最近区移除,让它们的结果立即可压 —— 默认列表为 `decompress`/`search_context`/`read`/`bash`(这 4 个工具的结果不受最近区保护、立即可压);从该列表只移除 `read` 是批量读文件「折叠→重读」死循环(#1198/#1277)的推荐解法。其正向镜像旋钮 `compress.preserveRecentTools`(见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md),需 `acp-kernel` >= 0.0.93)是该解法更优的单条形式 —— `{ "compress": { "preserveRecentTools": ["read"] } }` 从生效排除表中减去 `read`,无需重述或冻结内置默认列表。
+保护开关决定哪些工具结果能穿过折叠:`compress.protectedLatestTools` 让累积型工具(todo/任务清单)的最新快照不被折叠(#639);`compress.protectedTools` 对低频高价值工具的全部实例硬排除;`compress.neverPreserveRecentTools` / `compress.preserveRecentTools` 调整最近区豁免表 —— 例如批量读文件「折叠→重读」死循环的推荐解法是 `["read"]`(#1198/#1277)。均详见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md)。
 
 **如何确认压缩真的生效了。** 代理执行 `compress` 后会以普通 assistant 文本发出确认标记(`📦 [ACP] Compressed …`)—— 但曾观察到模型在持续上下文压力下*自行书写该标记格式*而从未调用工具(#717):约 2 小时内 17 次假"压缩",真实用量一路爬到 89%。因此对话中看到的标记行本身不是持久化完成的证据 —— 请先用 `acp_status` 复核(块数 +1、可压缩区间起点前移)再采信。作为兜底,代理会剥离模型自发的标记形文本并记录 `[marker-echo]` 警告;注入的 nudge 与系统提示词也明确声明标记只由代理发出。
 
