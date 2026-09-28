@@ -7,13 +7,15 @@ import path from "node:path";
 import {
     activateZcodePluginMode,
     bootstrapZcodeNative,
+    handoffZcodeRoutingOnExit,
     planNativeZcode,
     probeProxyHealth,
+    repairSharedStoreDrift,
     restoreZcodeBackup,
     routeZcodeConfig,
     unrouteZcode,
 } from "../src/zcode/native.ts";
-import { zcodeStoreCandidates } from "../src/zcode/json-edit.ts";
+import { detectCurrentZcodeOrigin, zcodeStoreCandidates } from "../src/zcode/json-edit.ts";
 
 // #1145: the per-session bootstrap lifecycle — plan decision table, health
 // probe, routing with #1002 snapshot discipline, stamp, unroute, restore.
@@ -280,5 +282,181 @@ test("bootstrap honors ZCODE_PERSONAL_PROVIDER_CONFIG_FILE overrides (#1151)", a
     } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(alt, { recursive: true, force: true });
+    }
+});
+
+// #1623: the shared provider store is a last-writer-wins pointer across all
+// instances; an instance that dies without handoff leaves it pointing at a
+// dead port. Drift repair + exit handoff must keep that pointer live.
+
+const DEAD_SELF = "http://127.0.0.1:1";
+const NO_LOG = () => {};
+
+function storeFile(dir: string): string {
+    return zcodeStoreCandidates(dir, "legacy", {})[0];
+}
+
+test("detectCurrentZcodeOrigin reads back the managed wrapper origin (#1623)", async () => {
+    const dir = dataDir();
+    try {
+        assert.equal(detectCurrentZcodeOrigin(dir), undefined);
+        await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: NO_LOG });
+        assert.equal(detectCurrentZcodeOrigin(dir), "http://127.0.0.1:18787");
+        unrouteZcode({ dataDir: dir, log: NO_LOG });
+        assert.equal(detectCurrentZcodeOrigin(dir), undefined);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("repairSharedStoreDrift no-ops for unmanaged and self pointers (#1623)", async () => {
+    const dir = dataDir();
+    try {
+        assert.equal(
+            await repairSharedStoreDrift({ selfOrigin: DEAD_SELF, dataDir: dir, log: NO_LOG, probe: async () => true }),
+            "unmanaged",
+        );
+        await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: NO_LOG });
+        assert.equal(
+            await repairSharedStoreDrift({ selfOrigin: "http://127.0.0.1:18787", dataDir: dir, log: NO_LOG, probe: async () => true }),
+            "self",
+        );
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("repairSharedStoreDrift repoints a dead foreign pointer at the healthy self (#1623)", async () => {
+    await withHealthServer(async (selfOrigin) => {
+        const dir = dataDir();
+        try {
+            const dead = await deadOrigin();
+            await routeZcodeConfig({ origin: dead, dataDir: dir, log: NO_LOG });
+            assert.equal(await repairSharedStoreDrift({ selfOrigin, dataDir: dir, log: NO_LOG }), "repointed-self");
+            assert.equal(detectCurrentZcodeOrigin(dir), selfOrigin);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+test("repairSharedStoreDrift leaves a live foreign pointer alone (#1623)", async () => {
+    await withHealthServer(async (foreign) => {
+        const dir = dataDir();
+        try {
+            await routeZcodeConfig({ origin: foreign, dataDir: dir, log: NO_LOG });
+            const before = readFileSync(storeFile(dir), "utf8");
+            assert.equal(
+                await repairSharedStoreDrift({ selfOrigin: DEAD_SELF, dataDir: dir, log: NO_LOG, probe: async (o) => o === foreign }),
+                "foreign-live",
+            );
+            assert.equal(readFileSync(storeFile(dir), "utf8"), before);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+test("repairSharedStoreDrift falls through to a live replacement when self is down (#1623)", async () => {
+    await withHealthServer(async (replacement) => {
+        const dir = dataDir();
+        try {
+            await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: NO_LOG });
+            assert.equal(
+                await repairSharedStoreDrift({
+                    selfOrigin: DEAD_SELF,
+                    dataDir: dir,
+                    log: NO_LOG,
+                    probe: async (o) => o === replacement,
+                    findReplacement: async () => ({ origin: replacement }),
+                }),
+                "repointed-replacement",
+            );
+            assert.equal(detectCurrentZcodeOrigin(dir), replacement);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+test("repairSharedStoreDrift reverts to direct when nothing live remains (#1623)", async () => {
+    const dir = dataDir();
+    try {
+        await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: NO_LOG });
+        assert.equal(
+            await repairSharedStoreDrift({
+                selfOrigin: DEAD_SELF,
+                dataDir: dir,
+                log: NO_LOG,
+                probe: async () => false,
+                findReplacement: async () => undefined,
+            }),
+            "reverted-direct",
+        );
+        const text = readFileSync(storeFile(dir), "utf8");
+        assert.ok(text.includes(UPSTREAM));
+        assert.doesNotMatch(text, /\/bili\//);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("handoffZcodeRoutingOnExit leaves a foreign pointer untouched (#1623)", async () => {
+    const dir = dataDir();
+    try {
+        await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: NO_LOG });
+        const before = readFileSync(storeFile(dir), "utf8");
+        assert.equal(
+            await handoffZcodeRoutingOnExit({
+                ownOrigin: DEAD_SELF,
+                dataDir: dir,
+                log: NO_LOG,
+                findReplacement: async () => ({ origin: "http://127.0.0.1:28787" }),
+            }),
+            "not-ours",
+        );
+        assert.equal(readFileSync(storeFile(dir), "utf8"), before);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("handoffZcodeRoutingOnExit hands our pointer to a live replacement (#1623)", async () => {
+    const dir = dataDir();
+    try {
+        await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: NO_LOG });
+        assert.equal(
+            await handoffZcodeRoutingOnExit({
+                ownOrigin: "http://127.0.0.1:18787",
+                dataDir: dir,
+                log: NO_LOG,
+                findReplacement: async () => ({ origin: "http://127.0.0.1:28787" }),
+            }),
+            "handed-off",
+        );
+        assert.equal(detectCurrentZcodeOrigin(dir), "http://127.0.0.1:28787");
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("handoffZcodeRoutingOnExit reverts to direct when no replacement lives (#1623)", async () => {
+    const dir = dataDir();
+    try {
+        await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: NO_LOG });
+        assert.equal(
+            await handoffZcodeRoutingOnExit({
+                ownOrigin: "http://127.0.0.1:18787",
+                dataDir: dir,
+                log: NO_LOG,
+                findReplacement: async () => undefined,
+            }),
+            "reverted-direct",
+        );
+        const text = readFileSync(storeFile(dir), "utf8");
+        assert.ok(text.includes(UPSTREAM));
+        assert.doesNotMatch(text, /\/bili\//);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
     }
 });

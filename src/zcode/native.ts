@@ -7,19 +7,20 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { LAUNCHER_DEFAULT_HOST, ensureProxyRunning } from "../launcher.js";
+import { LAUNCHER_DEFAULT_HOST, ensureProxyRunning, findLiveAttachableInstance } from "../launcher.js";
 import { isPidAlive } from "../instance.js";
 import { nativeAttachOrigin, nativeProxyScriptPath, proxyEnvOrigin } from "../agent/native-bootstrap.js";
 import { reportRuntimeInfo, type RuntimeInfoReport } from "../agent/shared.js";
 import {
     applyZcodeRouting,
+    detectCurrentZcodeOrigin,
     detectZcodeStore,
     resolveZcodeDataDir,
     stampZcodePluginHeader,
     unrouteZcodeText,
     zcodeStoreCandidates,
-    type ZcodeStoreKind,
-    type ZcodeWrappedEntry,
+    ZcodeStoreKind,
+    ZcodeWrappedEntry,
 } from "./json-edit.js";
 
 export type ZcodeNativePlan =
@@ -29,8 +30,11 @@ export type ZcodeNativePlan =
 
 // Kill-switches > attach (BILLION_CONTEXT_ATTACH ?? BILLION_CONTEXT_PROXY) >
 // spawn. A preset BILLION_CONTEXT_PROXY is the launcher (or a user attach):
-// routing is already owned, so we attach — never rewrite, never spawn. Same
-// contract as planNativeKimi (#963) / planNativeDsh (#941).
+// we ATTACH to it instead of spawning. The shared provider store is still
+// rewritten to the attached origin on every bootstrap (#1623: last-writer-
+// wins across all instances; watchdog drift repair keeps the pointer alive),
+// so an external store pin only survives when it matches the attached origin.
+// Same contract as planNativeKimi (#963) / planNativeDsh (#941).
 export function planNativeZcode(env: NodeJS.ProcessEnv = process.env): ZcodeNativePlan {
     if (env.BILLION_CONTEXT_PLUGIN === "0" || env.BILI_NATIVE_ZCODE === "0") return { mode: "off" };
     if (env.BILI_PROVIDER_REWRITES !== undefined) return { mode: "off" };
@@ -336,4 +340,106 @@ async function defaultEnsureProxy(): Promise<{ origin: string; attached: boolean
         { scriptPath: nativeProxyScriptPath() },
     );
     return { origin: handle.origin, attached: !!handle.attached };
+}
+
+// #1623 — shared-store drift repair & exit handoff. The provider store is a
+// LAST-WRITER-WINS pointer across all instances (attach AND spawn rewrites it);
+// an instance that dies without handoff leaves it pointing at a dead port, and
+// every fresh reader then routes into ECONNREFUSED until the next bootstrap
+// happens to rewrite it. These two entry points close that gap from the mcp-
+// entry process: on exit we hand our own pointer off, and the watchdog tick
+// repairs a dead pointer left by ANYONE (including hard-killed processes whose
+// JS exit handlers never run).
+
+export type StoreDriftOutcome =
+    | "unmanaged"
+    | "self"
+    | "foreign-live"
+    | "repointed-self"
+    | "repointed-replacement"
+    | "reverted-direct";
+
+export interface StoreDriftOptions {
+    readonly selfOrigin: string;
+    readonly env?: NodeJS.ProcessEnv;
+    readonly dataDir?: string;
+    readonly log?: (msg: string) => void;
+    /** Test seam: liveness probe (default: probeProxyHealth). */
+    readonly probe?: (origin: string) => Promise<boolean>;
+    /** Test seam: find a live replacement instance (default: findLiveAttachableInstance). */
+    readonly findReplacement?: () => Promise<{ origin: string } | undefined>;
+}
+
+async function defaultFindReplacement(): Promise<{ origin: string } | undefined> {
+    // Built lazily: launcher.ts and this module are cycle-adjacent (via the
+    // plugin-install lane), so no module-level reference to its exports.
+    const inst = await findLiveAttachableInstance(
+        { host: LAUNCHER_DEFAULT_HOST, port: 0, passthrough: false, debug: false, lane: "zcode" },
+        { scriptPath: nativeProxyScriptPath() },
+    );
+    return inst ? { origin: inst.origin } : undefined;
+}
+
+export async function repairSharedStoreDrift(opts: StoreDriftOptions): Promise<StoreDriftOutcome> {
+    const env = opts.env ?? process.env;
+    const log = opts.log ?? defaultLog;
+    const probe = opts.probe ?? probeProxyHealth;
+    const dataDir = opts.dataDir ?? resolveZcodeDataDir(env);
+    const current = detectCurrentZcodeOrigin(dataDir, env);
+    if (!current) return "unmanaged";
+    if (current === opts.selfOrigin) return "self";
+    if (await probe(current)) return "foreign-live";
+    log(`shared store points at dead instance ${current} — repairing`);
+    if (await probe(opts.selfOrigin)) {
+        const routed = await routeZcodeConfig({ origin: opts.selfOrigin, env, dataDir: opts.dataDir, log });
+        if (routed) {
+            await activateZcodePluginMode(routed, { env, dataDir: opts.dataDir, log });
+            log(`store repaired → ${opts.selfOrigin}`);
+            return "repointed-self";
+        }
+    } else {
+        const replacement = await (opts.findReplacement ?? defaultFindReplacement)();
+        if (replacement) {
+            const routed = await routeZcodeConfig({ origin: replacement.origin, env, dataDir: opts.dataDir, log });
+            if (routed) {
+                await activateZcodePluginMode(routed, { env, dataDir: opts.dataDir, log });
+                log(`store repaired → ${replacement.origin}`);
+                return "repointed-replacement";
+            }
+        }
+    }
+    unrouteZcode({ env, dataDir: opts.dataDir, log });
+    log(`store reverted to direct upstream (${current} is dead)`);
+    return "reverted-direct";
+}
+
+export type ExitHandoffOutcome = "not-ours" | "handed-off" | "reverted-direct";
+
+export interface ExitHandoffOptions {
+    readonly ownOrigin: string;
+    readonly env?: NodeJS.ProcessEnv;
+    readonly dataDir?: string;
+    readonly log?: (msg: string) => void;
+    /** Test seam: find a live replacement instance (default: findLiveAttachableInstance). */
+    readonly findReplacement?: () => Promise<{ origin: string } | undefined>;
+}
+
+export async function handoffZcodeRoutingOnExit(opts: ExitHandoffOptions): Promise<ExitHandoffOutcome> {
+    const env = opts.env ?? process.env;
+    const log = opts.log ?? defaultLog;
+    const dataDir = opts.dataDir ?? resolveZcodeDataDir(env);
+    const current = detectCurrentZcodeOrigin(dataDir, env);
+    if (!current || current !== opts.ownOrigin) return "not-ours";
+    const replacement = await (opts.findReplacement ?? defaultFindReplacement)();
+    if (replacement) {
+        const routed = await routeZcodeConfig({ origin: replacement.origin, env, dataDir: opts.dataDir, log });
+        if (routed) {
+            await activateZcodePluginMode(routed, { env, dataDir: opts.dataDir, log });
+            log(`exit handoff: store → ${replacement.origin}`);
+            return "handed-off";
+        }
+    }
+    unrouteZcode({ env, dataDir: opts.dataDir, log });
+    log("exit handoff: store reverted to direct upstream");
+    return "reverted-direct";
 }

@@ -220,10 +220,25 @@ two small node scripts that do the work around the client:
   attach mode it waits forever (it never touches a user-owned proxy); in spawn
   mode a dead proxy is respawned and the routing rewritten to the new origin.
   If recovery fails, the managed rewrite is removed so traffic degrades back
-  to direct upstream rather than hitting a dead port. When a session ends,
-  ZCode kills the MCP child and the parent-pid watchdog tears down the spawned
-  proxy. Concurrent sessions share the first-spawned proxy; when it goes away
-  the remaining sessions respawn and re-route automatically.
+   to direct upstream rather than hitting a dead port. When a session ends,
+   ZCode kills the MCP child and the parent-pid watchdog tears down the spawned
+   proxy; before the MCP child exits (SIGTERM/SIGINT/normal exit) it hands off
+   under the lock — if the shared provider store still points at its own proxy,
+   it re-points at another live compatible instance, or removes the managed
+   rewrite back to direct when none exists (#1623), so a dead instance never
+   leaves a dead port in the shared config. The watchdog also checks the shared
+   store on every tick: if a dead port from another instance is left behind
+   (hard-kill cases where the handoff never ran — e.g. Windows' TerminateProcess
+   skips JS handlers), it takes over the repair (live instance preferred,
+   otherwise revert to direct); it only acts while the store points at a dead
+   port and never steals routing away from a live instance. Concurrent sessions
+   share the first-spawned proxy; when it goes away the remaining sessions
+   respawn and re-route automatically. Boundary: ZCode caches the provider
+   baseURL per session, so the repairs above only take effect on FRESH reads
+   (new sessions/queries) — an in-flight session keeps retrying its cached old
+   port until it re-reads. To avoid this structurally, pin `BILLION_CONTEXT_PROXY`
+   at a resident proxy (`bili start`) and let every session attach to it
+   (attach mode never touches a user-owned proxy).
 - **Known limitations:** ZCode's anti-fraud fingerprinting (#661) applies to
   MITM-rebuilt bodies on `zcode.z.ai` login traffic — native mode does not
   touch that surface (model traffic flows through the provider store, not the
