@@ -106,7 +106,8 @@ import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
 import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
-import { evaluateChain, extractChainCarriers, stampOutbound } from "./chain-checkpoint.js";
+import { evaluateChain, extractChainCarriers, stampOutbound, stampOutboundWithTag } from "./chain-checkpoint.js";
+import { scrubChainEchoHistory } from "./loop/chain-echo-filter.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "./util.js";
 
@@ -3113,6 +3114,16 @@ async function prepareAnthropic(
     if (strippedMarkerLines > 0) {
         log("info", `[${sessionId}] stripped ${strippedMarkerLines} ACP status marker line(s) from incoming history (ephemeral proxy status, issue #1029)`);
     }
+    // #1565 P1: post-verdict inbound scrub — chainSkip relays return before
+    // prepare, so only requests continuing into THIS pipeline are cleaned and
+    // the current request's legitimate trailing carrier (a user slot) is
+    // never touched: assistant prose spans are stripped, user text kept+counted.
+    if (opts.chainContentDetection !== false) {
+        const chainScrub = scrubChainEchoHistory(parsed.messages);
+        if (chainScrub.strippedSpans > 0 || chainScrub.userKept > 0) {
+            log("info", `[${sessionId}] [chain-echo] history scrub: ${chainScrub.strippedSpans} span(s) stripped from assistant prose, ${chainScrub.userKept} user message(s) kept (#1565, count-only)`);
+        }
+    }
 
     try {
         const { msgs, cacheControls } = anthropicToCore(parsed);
@@ -3342,6 +3353,13 @@ async function prepareOpenai(
     const strippedMarkerLines = stripAcpStatusMarkers(parsed.messages);
     if (strippedMarkerLines > 0) {
         log("info", `[${sessionId}] stripped ${strippedMarkerLines} ACP status marker line(s) from incoming history (ephemeral proxy status, issue #1029)`);
+    }
+    // #1565 P1: post-verdict inbound scrub (see prepareAnthropic twin).
+    if (opts.chainContentDetection !== false) {
+        const chainScrub = scrubChainEchoHistory(parsed.messages);
+        if (chainScrub.strippedSpans > 0 || chainScrub.userKept > 0) {
+            log("info", `[${sessionId}] [chain-echo] history scrub: ${chainScrub.strippedSpans} span(s) stripped from assistant prose, ${chainScrub.userKept} user message(s) kept (#1565, count-only)`);
+        }
     }
 
     try {
@@ -3598,6 +3616,15 @@ async function prepareGoogle(
     const shouldInject = opts.compress.injectTool && !isTitleGen;
     const injectTools = shouldInject && !pluginMode;
 
+    // #1565 P1: post-verdict inbound scrub (see prepareAnthropic twin); Google
+    // carries text in parts[].
+    if (opts.chainContentDetection !== false) {
+        const chainScrub = scrubChainEchoHistory(parsed.contents);
+        if (chainScrub.strippedSpans > 0 || chainScrub.userKept > 0) {
+            log("info", `[${sessionId}] [chain-echo] history scrub: ${chainScrub.strippedSpans} span(s) stripped from assistant prose, ${chainScrub.userKept} user message(s) kept (#1565, count-only)`);
+        }
+    }
+
     try {
         const { msgs, systemText } = googleToCore(parsed);
         googleClientSystem = systemText;
@@ -3830,6 +3857,14 @@ async function prepareResponses(
     const strippedMarkerLines = stripAcpStatusMarkers(parsed.input);
     if (strippedMarkerLines > 0) {
         log("info", `[${sessionId}] stripped ${strippedMarkerLines} ACP status marker line(s) from incoming history (ephemeral proxy status, issue #1029)`);
+    }
+    // #1565 P1: post-verdict inbound scrub (see prepareAnthropic twin); role
+    // filtering skips non-message input items (function_call, compaction_trigger…).
+    if (opts.chainContentDetection !== false) {
+        const chainScrub = scrubChainEchoHistory(parsed.input);
+        if (chainScrub.strippedSpans > 0 || chainScrub.userKept > 0) {
+            log("info", `[${sessionId}] [chain-echo] history scrub: ${chainScrub.strippedSpans} span(s) stripped from assistant prose, ${chainScrub.userKept} user message(s) kept (#1565, count-only)`);
+        }
     }
 
     const shouldInject = opts.compress.injectTool;
@@ -4958,6 +4993,10 @@ async function forward(
     // items). Opt-in via compat.roles (global + per-provider); empty map =
     // byte-for-byte passthrough.
     let wireBody: Buffer | string = body;
+    // #1565 P0-1: exact bytes of the stamped chain carrier for THIS forward,
+    // used to remove only the byte-exact item if a Responses upstream echoes
+    // the request back in response.input. Null when no stamp was applied.
+    let chainCarrierTag: string | null = null;
     // #552 resolved compat map + protocol, shared with the compress-retry
     // loops below (re-sent bodies must carry the same rewrite as the initial
     // forward, or a developer-role 400 would hit mid-stream on retry).
@@ -5020,8 +5059,11 @@ async function forward(
     // empty) claims processing, per the first-processor-wins contract.
     if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainContentDetection !== false) {
         try {
-            const stamped = stampOutbound(JSON.parse(wireBody), prepared.protocol, instanceId);
-            if (stamped !== null) wireBody = JSON.stringify(stamped);
+            const stamped = stampOutboundWithTag(JSON.parse(wireBody), prepared.protocol, instanceId);
+            if (stamped !== null) {
+                wireBody = JSON.stringify(stamped.body);
+                chainCarrierTag = stamped.tag;
+            }
         } catch (err) {
             log("debug", `[${prepared.session.id}] [chain] outbound stamping failed (${String(err)}); forwarding unstamped`);
         }
@@ -5811,7 +5853,7 @@ async function forward(
                 : "";
             const visibilityMarkers = resolveCompress(opts.routes, route?.rewrittenUrl, (parsedReq as { model?: string }).model, opts.compress).visibilityMarkers ?? true;
             const systemPrompt = withConversationIdNote(withMarkerIntegrityNote(withSummaryBudgetNote(textProtocol ? buildCompressHybridSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections) : buildCompressSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections)), visibilityMarkers), ensureCanonicalId(prepared.session)) + absorbSection;
-            const adapter = pickAdapter(prepared.protocol, parsedReq, textProtocol, prepared.responsesProjection, prepared.anthropicSystem, prepared.openaiSystemText, absorbActive ? absorbToolName(loopConfig) : undefined, prepared.google, prepared.systemNotes, opts.streamErrorShape);
+            const adapter = pickAdapter(prepared.protocol, parsedReq, textProtocol, prepared.responsesProjection, prepared.anthropicSystem, prepared.openaiSystemText, absorbActive ? absorbToolName(loopConfig) : undefined, prepared.google, prepared.systemNotes, opts.streamErrorShape, chainCarrierTag ?? undefined);
             const refreshFolded = async (current: CoreMessage[]): Promise<CoreMessage[]> => {
                 return withSessionLock(prepared.session, async () => {
                     // #422: mirror the prepare's fold with the post-compress state so
@@ -5943,7 +5985,7 @@ async function forward(
                 if (prepared.protocol === "openai") {
                     await withSessionLock(prepared.session, () => rewriteOpenaiJsonResponse(json, ctx));
                 } else if (prepared.protocol === "responses") {
-                    await withSessionLock(prepared.session, () => rewriteResponsesJsonResponse(json, ctx));
+                    await withSessionLock(prepared.session, () => rewriteResponsesJsonResponse(json, ctx, chainCarrierTag ?? undefined));
                 } else if (prepared.protocol === "google") {
                     await withSessionLock(prepared.session, () => rewriteGoogleJsonResponse(json, ctx));
                 } else {

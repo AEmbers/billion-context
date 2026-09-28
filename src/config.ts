@@ -637,14 +637,17 @@ export type ProxyOptions = {
      *  derivedFrom lineage. Disable with `resumeInheritance: false` or env
      *  BILI_RESUME_INHERITANCE=0. */
     resumeInheritance?: boolean;
-    /** Content detection of the bili→bili chain awareness: when an inbound
-     *  request carries ACP artifacts (render tags / ACP tool-call history)
-     *  but no x-bili-hop header and no local compression state for the
-     *  session, record one advisory observation and process normally (#1086,
-     *  advisory-only since #1357) — never verbatim passthrough.
-     *  Default ON; escape valve via env BILI_CHAIN_CONTENT=0 or
-     *  `chainContentDetection: false` in the config file (env wins). The
-     *  x-bili-hop signal is unaffected by this switch. */
+    /** bili→bili chain content checkpoint (#1086/#1421): stamp outbound
+     *  conversation bodies with a bare machine-readable bili-chain carrier
+     *  (self-closing tag carrying a JCS sha256 digest) and detect it on
+     *  inbound requests — digest-valid / fresh interop checkpoints relay
+     *  verbatim to the first processor, unmatched-stale or invalid carriers
+     *  are stripped/untrusted and the request processes locally. Echoed
+     *  carriers are stripped from model-visible paths (#1565). Default ON;
+     *  escape valve via env BILI_CHAIN_CONTENT=0 or
+     *  `chainContentDetection: false` in the config file (env wins) disables
+     *  stamping AND detection. The x-bili-hop signal is unaffected by this
+     *  switch. */
     chainContentDetection?: boolean;
     /** #1085: freeze the client's head-system text into a per-session sticky
      *  anchor and append detected changes to the conversation as trailing

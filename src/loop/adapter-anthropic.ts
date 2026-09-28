@@ -2,6 +2,7 @@ import type { CoreMessage } from "acp-kernel";
 import { coreToAnthropic, extractSystem, buildSystem, type AnthropicRequestBody } from "acp-kernel/wire";
 import { buildVisibilityMarker } from "./core.js";
 import { composeStreamFilters, createMarkerLineFilter, createTagEchoFilter } from "./tag-echo-filter.js";
+import { createChainEchoFilter } from "./chain-echo-filter.js";
 import { degenerateTurnWarning } from "../degenerate-turn.js";
 import { log as loggerLog } from "../logger.js";
 import type {
@@ -257,12 +258,26 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
             // they reach the client (and before coreText accumulates them for
             // re-request rounds). Flush at the owning block's stop so held-back
             // fragments still emit while the block is open.
+            // #1565: chain-carrier echoes ride through the same delta path;
+            // count-only telemetry (never the tag content itself).
+            let chainDrops = 0;
+            let chainLogged = false;
+            const logChainDropsOnce = () => {
+                if (chainDrops === 0 || chainLogged) return;
+                chainLogged = true;
+                loggerLog("warn", `[chain-echo] stripped ${chainDrops} chain carrier echo span(s) from model prose this response (#1565, count-only)`);
+            };
             const tagFilter = composeStreamFilters(
-                createTagEchoFilter((snippet) => {
-                    loggerLog("warn", `[tag-echo] stripped model-emitted render tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
-                }),
-                createMarkerLineFilter((snippet) => {
-                    loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                composeStreamFilters(
+                    createTagEchoFilter((snippet) => {
+                        loggerLog("warn", `[tag-echo] stripped model-emitted render tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                    }),
+                    createMarkerLineFilter((snippet) => {
+                        loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                    }),
+                ),
+                createChainEchoFilter(() => {
+                    chainDrops++;
                 }),
             );
             let lastTextIndex: number | null = null;
@@ -458,7 +473,8 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
                         } as ParsedStreamEvent;
                     }
                     maybeWarnDegenerate(stopReason);
-                    yield { kind: "done", finishReason: stopReason, thinking: sawThinking } as ParsedStreamEvent;
+                    logChainDropsOnce();
+                    yield { kind: "done", finishReason: stopReason, thinking: sawThinking, chainEcho: chainDrops > 0 } as ParsedStreamEvent;
                 } else if (type === "message_stop") {
                     if (lastTextIndex !== null) {
                         const tail = tagFilter.flush();
@@ -478,7 +494,8 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
                         } as ParsedStreamEvent;
                     }
                     maybeWarnDegenerate(stopReason);
-                    yield { kind: "done", finishReason: stopReason ?? "end_turn", thinking: sawThinking } as ParsedStreamEvent;
+                    logChainDropsOnce();
+                yield { kind: "done", finishReason: stopReason ?? "end_turn", thinking: sawThinking, chainEcho: chainDrops > 0 } as ParsedStreamEvent;
                 } else if (round === 1) {
                     yield { kind: "meta", chunk: rawBuf, firstRoundOnly: true } as ParsedStreamEvent;
                 }

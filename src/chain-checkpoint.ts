@@ -446,14 +446,27 @@ export function insertCheckpointCarrier(parsed: unknown, wire: WireProtocol, tag
  *  so any downstream bili verifying the same bytes recomputes the same value.
  *  requestId derives from the digest — deterministic, constant-size, and it
  *  correlates the stamp with the exact body it covers. */
-export function stampOutbound(parsed: unknown, wire: WireProtocol, processor: string, nowMs: number = Date.now()): unknown | null {
+export interface StampedOutbound {
+    body: unknown;
+    /** The exact carrier tag inserted into `body` — recorded so an upstream
+     *  response that echoes the request back can have it removed byte-exact
+     *  (#1565 P0-1). */
+    tag: string;
+}
+
+export function stampOutboundWithTag(parsed: unknown, wire: WireProtocol, processor: string, nowMs: number = Date.now()): StampedOutbound | null {
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     const placeholder: Pick<ChainCheckpoint, "v" | "processor" | "issuedAt" | "requestId"> = { v: SUPPORTED_CHECKPOINT_VERSION, processor, issuedAt: nowMs, requestId: "-" };
     const digest = computeCheckpointDigest(parsed, wire, placeholder);
     if (digest === null) return null;
     const requestId = digest.slice("sha256:".length, "sha256:".length + 8);
     const tag = renderChainCheckpoint({ v: SUPPORTED_CHECKPOINT_VERSION, processor, issuedAt: nowMs, requestId, digest });
-    return insertCheckpointCarrier(parsed, wire, tag);
+    const body = insertCheckpointCarrier(parsed, wire, tag);
+    return body === null ? null : { body, tag };
+}
+
+export function stampOutbound(parsed: unknown, wire: WireProtocol, processor: string, nowMs: number = Date.now()): unknown | null {
+    return stampOutboundWithTag(parsed, wire, processor, nowMs)?.body ?? null;
 }
 
 // Generation-side digest (step 3 stamps with this): insert a zero-digest

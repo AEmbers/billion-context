@@ -6,6 +6,7 @@ import { executeProxyTool } from "./loop/core.js";
 import { drainPendingRetrievals } from "./store.js";
 import type { RewriteCtx } from "./stream.js";
 import { containsMarkerLineText, containsRenderTagText, stripAcpTags } from "./loop/tag-echo-filter.js";
+import { containsChainEchoText, stripChainEchoTags } from "./loop/chain-echo-filter.js";
 
 export function rewriteGoogleJsonResponse(body: unknown, ctx: RewriteCtx): unknown {
     if (!body || typeof body !== "object") return body;
@@ -30,9 +31,9 @@ export function rewriteGoogleJsonResponse(body: unknown, ctx: RewriteCtx): unkno
             continue;
         }
         if (fc) sawReal = true;
-        if (typeof part.text === "string" && (containsRenderTagText(part.text) || containsMarkerLineText(part.text))) {
-            ctx.log(`[warn: tag echo] non-stream google output contains ACP echo (render tags/markers), stripped: ${part.text.slice(0, 120).replace(/\n/g, " ")}`);
-            part.text = stripAcpTags(part.text);
+        if (typeof part.text === "string" && (containsRenderTagText(part.text) || containsMarkerLineText(part.text) || containsChainEchoText(part.text))) {
+            ctx.log(`[warn: tag echo] non-stream google output contains ACP echo (render tags/markers/chain carrier), stripped: ${part.text.slice(0, 120).replace(/\n/g, " ")}`);
+            part.text = stripChainEchoTags(stripAcpTags(part.text));
         }
         keptParts.push(part);
     }

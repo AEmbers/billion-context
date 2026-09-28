@@ -8,6 +8,7 @@ import { executeSearchContextTarget, resolveDecompress } from "./decompress-shar
 import { adoptContentStore, contentStoreOf, ccrEnabled, drainPendingRetrievals, executeRetrieve, retrieveToolName } from "./store.js";
 import { IMAGE_FULL_TOOL_NAME, executeImageFull, imageCompressionEnabled } from "./image-compress.js";
 import { containsMarkerLineText, containsRenderTagText, stripAcpTags } from "./loop/tag-echo-filter.js";
+import { containsChainEchoText, stripChainEchoTags } from "./loop/chain-echo-filter.js";
 import { maxShrinkPerCompress } from "./fetch-util.js";
 
 export type RewriteCtx = {
@@ -513,9 +514,9 @@ export function rewriteJsonResponse(body: unknown, ctx: RewriteCtx): unknown {
     if (converted && !sawRealToolUse) b.stop_reason = "end_turn";
     for (const blk of newContent) {
         const t = (blk as { type?: string; text?: string }).text;
-        if (typeof t === "string" && (containsRenderTagText(t) || containsMarkerLineText(t))) {
-            ctx.log(`[warn: tag echo] non-stream model output contains ACP echo (render tags/markers), stripped: ${t.slice(0, 120).replace(/\n/g, " ")}`);
-            (blk as { text?: string }).text = stripAcpTags(t);
+        if (typeof t === "string" && (containsRenderTagText(t) || containsMarkerLineText(t) || containsChainEchoText(t))) {
+            ctx.log(`[warn: tag echo] non-stream model output contains ACP echo (render tags/markers/chain carrier), stripped: ${t.slice(0, 120).replace(/\n/g, " ")}`);
+            (blk as { text?: string }).text = stripChainEchoTags(stripAcpTags(t));
         }
     }
     return body;

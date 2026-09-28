@@ -12,6 +12,7 @@ import { effectiveRulesEnabled, rulesEnabled } from "./rules-feature.js";
 import { executeProxyTool } from "./loop/core.js";
 import { normalizeSseLineEndings } from "./sse-util.js";
 import { composeStreamFilters, containsMarkerLineText, containsRenderTagText, containsToolCallXmlFragment, createMarkerLineFilter, createTagEchoFilter, mayStartMarkerLine, mayStartRenderTag, stripAcpTags, stripAnthropicText, stripOpenaiChatText, stripResponsesText, type TagEchoFilter } from "./loop/tag-echo-filter.js";
+import { containsChainEchoText, createChainEchoFilter, mayStartChainEcho, removeExactCarrierFromInput, stripChainEchoAnthropicText, stripChainEchoOpenaiChatText, stripChainEchoResponsesEvent, stripChainEchoTags } from "./loop/chain-echo-filter.js";
 import { log as loggerLog } from "./logger.js";
 import { ccrEnabled, ccrLoopConfig, contentStoreOf, retrieveToolName } from "./store.js";
 import { imageUsageSuffix } from "./image-compress.js";
@@ -1202,6 +1203,21 @@ export async function pipePluginChatWithStrip(
     let buf = "";
     const acc: UsageSample = {};
     let sawStrippedEcho = false;
+    // #1565: chain carrier echoes are count-only telemetry (no tag content in
+    // logs) and latch the same stripped-echo flag that drives the #732/#821
+    // degenerate-turn retry below.
+    let chainDrops = 0;
+    let chainLogged = false;
+    const logChainDropsOnce = () => {
+        if (!chainLogged && chainDrops > 0) {
+            chainLogged = true;
+            loggerLog("info", `[chain-echo] stripped ${chainDrops} chain carrier echo span(s) from model prose this response (#1565, count-only)`);
+        }
+    };
+    const onChainDrop = () => {
+        chainDrops++;
+        sawStrippedEcho = true;
+    };
     const onTagDrop = (snippet: string) => {
         droppedTagInFrame = true;
         sawStrippedEcho = true;
@@ -1226,7 +1242,7 @@ export async function pipePluginChatWithStrip(
         const key = `${field}:${index}`;
         let s = streams.get(key);
         if (!s) {
-            s = { filter: composeStreamFilters(createTagEchoFilter(onTagDrop), createMarkerLineFilter(onMarkerDrop)), field, index };
+            s = { filter: composeStreamFilters(composeStreamFilters(createTagEchoFilter(onTagDrop), createMarkerLineFilter(onMarkerDrop)), createChainEchoFilter(onChainDrop)), field, index };
             streams.set(key, s);
         }
         return s;
@@ -1514,7 +1530,7 @@ export async function pipePluginChatWithStrip(
                 if (typeof v !== "string") continue;
                 hadText = true;
                 if (field !== "content" && v.length > 0) sawThinking = true;
-                if (!mayStartRenderTag(v) && !mayStartMarkerLine(v) && !anyPending()) {
+                    if (!mayStartRenderTag(v) && !mayStartMarkerLine(v) && !mayStartChainEcho(v) && !anyPending()) {
                     if (v.length > 0) {
                         keptText = true;
                         proseAcc += v;
@@ -1673,7 +1689,7 @@ export async function pipePluginChatWithStrip(
                 // field, so an interleaved thought/text pair in one frame never
                 // shares held-back state.
                 const field = p["thought"] === true ? "thinking" : "text";
-                if (!mayStartRenderTag(raw) && !mayStartMarkerLine(raw) && !anyPending()) {
+                if (!mayStartRenderTag(raw) && !mayStartMarkerLine(raw) && !mayStartChainEcho(raw) && !anyPending()) {
                     if (raw.length > 0) {
                         keptText = true;
                         proseAcc += raw;
@@ -1811,6 +1827,7 @@ export async function pipePluginChatWithStrip(
         // that reads lastInputTokens for the nudge decision) the moment the
         // stream completes, and those must already see this usage.
         settleUsage();
+        logChainDropsOnce();
         maybeWarnDegenerate();
         maybeWarnProtocolFragment();
         maybeWarnNamelessToolCalls();
@@ -1820,6 +1837,7 @@ export async function pipePluginChatWithStrip(
         }
     } catch (e) {
         settleUsage();
+        logChainDropsOnce();
         maybeWarnNamelessToolCalls();
         if (res.destroyed || res.writableEnded) {
             log?.("client aborted mid-stream");
@@ -1915,6 +1933,7 @@ export async function pipePluginResponsesWithStrip(
     session?: Session,
     log?: (msg: string) => void,
     refetch?: () => Promise<ReadableStream<Uint8Array> | null>,
+    chainCarrier?: string | null,
 ): Promise<void> {
     let reader = stream.getReader();
     let decoder = new TextDecoder("utf-8");
@@ -1924,12 +1943,30 @@ export async function pipePluginResponsesWithStrip(
         loggerLog("warn", `[tag-echo] stripped model-emitted render tag (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
         log?.(`[tag-echo] stripped model-emitted render tag from plugin passthrough text`);
     };
+    // #1565: chain carrier echoes are count-only telemetry (no tag content in
+    // logs) and latch the same stripped-echo flag that drives the #732/#821
+    // degenerate-turn retry below.
+    let chainDrops = 0;
+    let chainLogged = false;
+    const logChainDropsOnce = () => {
+        if (!chainLogged && chainDrops > 0) {
+            chainLogged = true;
+            loggerLog("info", `[chain-echo] stripped ${chainDrops} chain carrier echo span(s) from model prose this response (#1565, count-only)`);
+        }
+    };
+    const onChainDrop = () => {
+        chainDrops++;
+        sawStrippedEcho = true;
+    };
     const tagFilter = composeStreamFilters(
-        createTagEchoFilter(onTagDrop),
-        createMarkerLineFilter((snippet) => {
-            loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
-            log?.(`[marker-echo] stripped model-emitted ACP confirmation marker from plugin passthrough text`);
-        }),
+        composeStreamFilters(
+            createTagEchoFilter(onTagDrop),
+            createMarkerLineFilter((snippet) => {
+                loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                log?.(`[marker-echo] stripped model-emitted ACP confirmation marker from plugin passthrough text`);
+            }),
+        ),
+        createChainEchoFilter(onChainDrop),
     );
     // #673: turn-level observability for degenerate terminal turns.
     let sawFunctionCall = false;
@@ -2139,7 +2176,7 @@ export async function pipePluginResponsesWithStrip(
             for (const k of ["item_id", "output_index", "summary_index"]) {
                 if (ev[k] !== undefined) meta[k] = ev[k];
             }
-            s = { filter: createTagEchoFilter(onTagDrop), type, field, meta };
+            s = { filter: composeStreamFilters(createTagEchoFilter(onTagDrop), createChainEchoFilter(onChainDrop)), type, field, meta };
             argStreams.set(key, s);
         }
         return s;
@@ -2215,9 +2252,8 @@ export async function pipePluginResponsesWithStrip(
                     // The done is not visible text to the degenerate-turn retry below, so it
                     // is stripped and released directly.
                     if (type === "response.reasoning_summary_part.done") {
-                        const hadEcho = containsRenderTagText(jsonStr) || containsMarkerLineText(jsonStr);
-                        if (hadEcho) sawStrippedEcho = true;
-                        const evOut = hadEcho ? stripResponsesText(ev) : ev;
+                        const hadEcho = containsRenderTagText(jsonStr) || containsMarkerLineText(jsonStr) || containsChainEchoText(jsonStr);
+                        const evOut = hadEcho ? stripChainEchoResponsesEvent(stripResponsesText(ev)) : ev;
                         proseAcc += responsesEventText(evOut);
                         const out = hadEcho ? rebuildEvent(rawEvent, evOut) : rawEvent + "\n\n";
                         await write(flushArgTails() + flushTail(out));
@@ -2276,13 +2312,37 @@ export async function pipePluginResponsesWithStrip(
                         for (const held of heldEvents) await write(held);
                         heldEvents = [];
                         heldVisibleChars = 0;
+                        // #1565 P0-1: some upstreams echo the request back in
+                        // response.input — remove EXACTLY this instance's carrier
+                        // stamp (byte-exact match only; user prose that merely
+                        // discusses the tag shape survives).
+                        let carrierRemoved = 0;
+                        if (type === "response.completed" && chainCarrier !== undefined && chainCarrier !== null) {
+                            const respObj = ev["response"];
+                            if (respObj && typeof respObj === "object") {
+                                const r = respObj as Record<string, unknown>;
+                                if (Array.isArray(r["input"])) {
+                                    carrierRemoved = removeExactCarrierFromInput(r["input"], chainCarrier);
+                                }
+                            }
+                        }
+                        if (carrierRemoved > 0) {
+                            loggerLog("info", `[chain-echo] upstream echoed the request back in response.input; removed ${carrierRemoved} exact carrier item(s) (#1565, count-only)`);
+                        }
                         // The completion frame itself closes the turn: strip it if it
                         // carries echoed text, rewrite retry ids onto the first attempt's.
-                        const hadEchoText = containsRenderTagText(jsonStr) || containsMarkerLineText(jsonStr);
+                        // The chain probe skips response.input — it carries this
+                        // instance's own stamp on every stamped turn, so probing it
+                        // would rebuild every clean completion.
+                        const respProbe = ev["response"];
+                        const chainProbeStr = respProbe && typeof respProbe === "object" && Array.isArray((respProbe as Record<string, unknown>)["input"])
+                            ? JSON.stringify({ ...ev, response: { ...(respProbe as Record<string, unknown>), input: undefined } })
+                            : jsonStr;
+                        const hadEchoText = containsRenderTagText(jsonStr) || containsMarkerLineText(jsonStr) || containsChainEchoText(chainProbeStr);
                         if (hadEchoText) sawStrippedEcho = true;
                         let evOut = ev;
-                        let rebuild = hadEchoText || retryRewritePending();
-                        if (rebuild) evOut = stripResponsesText(ev);
+                        let rebuild = hadEchoText || carrierRemoved > 0 || retryRewritePending();
+                        if (rebuild) evOut = stripChainEchoResponsesEvent(stripResponsesText(ev));
                         rewriteRetryIds(evOut);
                         await write(rebuild ? rebuildEvent(rawEvent, evOut) : rawEvent + "\n\n");
                         continue;
@@ -2293,7 +2353,7 @@ export async function pipePluginResponsesWithStrip(
                             await write(rawEvent + "\n\n");
                             continue;
                         }
-                        if (!retryRewritePending() && !mayStartRenderTag(delta) && !mayStartMarkerLine(delta) && !tagFilter.pending()) {
+                        if (!retryRewritePending() && !mayStartRenderTag(delta) && !mayStartMarkerLine(delta) && !mayStartChainEcho(delta) && !tagFilter.pending()) {
                             proseAcc += delta;
                             await write(rawEvent + "\n\n");
                             continue;
@@ -2329,7 +2389,7 @@ export async function pipePluginResponsesWithStrip(
                             await write(rawEvent + "\n\n");
                             continue;
                         }
-                        if (!mayStartRenderTag(v) && !argAnyPending() && !tagFilter.pending()) {
+                        if (!mayStartRenderTag(v) && !mayStartChainEcho(v) && !argAnyPending() && !tagFilter.pending()) {
                             proseAcc += v;
                             await write(rawEvent + "\n\n");
                             continue;

@@ -189,3 +189,26 @@ test("#821 O2: genuinely empty (no-reasoning) terminal turn is NOT retried", asy
     const { fetchCalls } = await drainOpenai(OPENAI_EMPTY_NO_THINKING, [OPENAI_GOOD], "deg-o2");
     assert.equal(fetchCalls, 0, "sawThinking=false → the empty turn passes through untouched");
 });
+
+test("#1565 E1: echo-only turn (sole output was a stripped bili-chain carrier) retries once", async () => {
+    const echoOnly = [
+        sse("response.created", { response: { id: "resp_e1", status: "in_progress" } }),
+        sse("response.output_item.added", { output_index: 0, item: { type: "message", id: "msg_e1", role: "assistant", content: [] } }),
+        sse("response.output_text.delta", { item_id: "msg_e1", output_index: 0, delta: "\x3cbili-chain digest=\"sha256:" + "ef".repeat(32) + "\"/\x3e" }),
+        sse("response.completed", { response: { id: "resp_e1", status: "completed", output: [] } }),
+    ].join("");
+    const res = await drain([echoOnly, ROUND_GOOD], "s1565-e1");
+    assert.equal(res.fetchCalls, 2, "the echo-only turn triggered exactly one continuation retry");
+    assert.match(res.bodies[1], /no visible text and no tool call/, "the retry carries the continuation nudge");
+    assert.ok(res.out.includes("continued after nudge"), "the retried turn delivered real content");
+});
+
+test("#1565 E2: genuinely bare turn (no reasoning, no stripped echo) is NOT retried", async () => {
+    const bare = [
+        sse("response.created", { response: { id: "resp_b1", status: "in_progress" } }),
+        sse("response.completed", { response: { id: "resp_b1", status: "completed", output: [] } }),
+    ].join("");
+    const res = await drain([bare, ROUND_GOOD], "s1565-e2");
+    assert.equal(res.fetchCalls, 1, "sawThinking=false && sawChainEcho=false → the bare turn passes through untouched");
+    assert.ok(!res.out.includes("continued after nudge"), "no retry happened");
+});

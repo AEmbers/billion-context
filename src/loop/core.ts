@@ -170,7 +170,7 @@ export type ParsedStreamEvent =
     | { kind: "reasoning"; delta: string; raw?: Buffer; signature?: string; blockEnd?: boolean }
     | { kind: "tool_call"; name: string; callId: string; arguments: string; passthrough?: boolean; signature?: string }
     | { kind: "usage"; inputTokens?: number; outputTokens?: number; cachedTokens?: number; creationTokens?: number }
-    | { kind: "done"; finishReason?: string; suppressCompletion?: boolean; truncated?: boolean; thinking?: boolean }
+    | { kind: "done"; finishReason?: string; suppressCompletion?: boolean; truncated?: boolean; thinking?: boolean; chainEcho?: boolean }
     | { kind: "error"; message: string }
 | { kind: "diag"; level: "info" | "warn"; message: string }
     // #1455: stateless marks an inert keep-alive frame (anthropic ping) whose
@@ -399,6 +399,9 @@ export async function* runCompressLoop(
             let suppressCompletion = false;
             let truncatedDone = false;
             let sawThinking = false;
+            // #1565: chain-echo-only turn — the turn's only output was a
+            // bili-chain carrier echo the filter stripped (no reasoning seen).
+            let sawChainEcho = false;
             // #821: on wires that stream reasoning verbatim (openai/anthropic) a thinking-only
             // turn marks output forwarded before done, making the #732 retry unreachable there.
             // Track model-VISIBLE output separately: a reasoning prefix is invisible to host turn
@@ -434,6 +437,7 @@ export async function* runCompressLoop(
                 suppressCompletion = false;
                 truncatedDone = false;
                 sawThinking = false;
+                sawChainEcho = false;
                 forwardedFraming = false;
                 forwardedVisible = false;
                 fwdBytes = 0;
@@ -480,6 +484,7 @@ export async function* runCompressLoop(
                         suppressCompletion = ev.suppressCompletion === true;
                         truncatedDone = ev.truncated === true;
                         sawThinking = ev.thinking === true;
+                        sawChainEcho = ev.chainEcho === true;
                     } else if (ev.kind === "error") {
                         // A 200 SSE response can still carry a provider error.
                         // Preserve it as an error path; never let the absence of
@@ -624,11 +629,11 @@ export async function* runCompressLoop(
                     }
                 }
 
-                // #732 (completes the auto-retry groundwork of #673/#674), extended by #821: a reasoning model can end a turn with ONLY a thinking block — zero visible text, zero tool calls, status completed — most often right after a post-compress re-request, where it sees the freshly-shrunk context and "wraps up" into a silent thought. The client then receives an empty completed turn and stalls until manually nudged. Retriable when no VISIBLE output reached the client yet (!forwardedVisible): on Responses rounds the framing is suppressed so nothing was forwarded at all; on openai/anthropic a thinking-only prefix WAS streamed verbatim, but it is invisible to host turn semantics and its chunks carry no finish_reason, so appending the retry's content to the same stream is safe. Re-fetch once with a continuation nudge (a plain re-fetch reproduces the same silent output deterministically). One-shot per request. `sawThinking` is mandatory so a genuinely empty (no-reasoning) terminal turn is left untouched — only the "silent thought" shape retries.
-                if (
-                    !degenerateRetried &&
-                    sawDone &&
-                    sawThinking &&
+                 // #732 (completes the auto-retry groundwork of #673/#674), extended by #821: a reasoning model can end a turn with ONLY a thinking block — zero visible text, zero tool calls, status completed — most often right after a post-compress re-request, where it sees the freshly-shrunk context and "wraps up" into a silent thought. The client then receives an empty completed turn and stalls until manually nudged. Retriable when no VISIBLE output reached the client yet (!forwardedVisible): on Responses rounds the framing is suppressed so nothing was forwarded at all; on openai/anthropic a thinking-only prefix WAS streamed verbatim, but it is invisible to host turn semantics and its chunks carry no finish_reason, so appending the retry's content to the same stream is safe. Re-fetch once with a continuation nudge (a plain re-fetch reproduces the same silent output deterministically). One-shot per request. A reasoning marker (`sawThinking`) OR a stripped chain-echo (`sawChainEcho`, #1565: the turn's only output was a bili-chain carrier echo) is mandatory so a genuinely empty (no-reasoning, no-echo) terminal turn is left untouched — only the "silent thought" and "echo-only" shapes retry.
+                 if (
+                     !degenerateRetried &&
+                     sawDone &&
+                     (sawThinking || sawChainEcho) &&
                     !truncatedDone &&
                     !suppressCompletion &&
                     typeof finishReason === "string" &&
@@ -641,8 +646,9 @@ export async function* runCompressLoop(
                     !signal?.aborted
                 ) {
                     degenerateRetried = true;
-                    ctx.log(`[acp-loop] round ${round}: degenerate terminal turn (completed, zero visible output); retrying once with continuation nudge (#732/#821)`);
-                    loggerLog("warn", `[acp-loop] degenerate-turn auto-retry round ${round} (session ${ctx.session.id})`);
+                    const trigger = sawChainEcho && !sawThinking ? "chain-echo-only turn (#1565)" : "silent thought";
+                    ctx.log(`[acp-loop] round ${round}: degenerate terminal turn (completed, zero visible output, ${trigger}); retrying once with continuation nudge (#732/#821/#1565)`);
+                    loggerLog("warn", `[acp-loop] degenerate-turn auto-retry round ${round} (${trigger}, session ${ctx.session.id})`);
                     const nudge: CoreMessage = {
                         id: `acp_degenerate_retry_r${round}`,
                         role: "user",

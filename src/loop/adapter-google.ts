@@ -3,6 +3,7 @@ import { coreToGoogle } from "acp-kernel/wire";
 import type { GooglePart } from "acp-kernel/wire";
 import { buildVisibilityMarker } from "./core.js";
 import { composeStreamFilters, createMarkerLineFilter, createTagEchoFilter } from "./tag-echo-filter.js";
+import { createChainEchoFilter } from "./chain-echo-filter.js";
 import { degenerateTurnWarning } from "../degenerate-turn.js";
 import { log as loggerLog } from "../logger.js";
 
@@ -287,12 +288,26 @@ export function createGoogleAdapter(
             // #206/#717: strip model-imitated render tags and forged ACP
             // confirmation markers from text parts; both filters may hold back a
             // short tail, flushed on finish (and at stream end).
+            // #1565: chain-carrier echoes ride through the same delta path;
+            // count-only telemetry (never the tag content itself).
+            let chainDrops = 0;
+            let chainLogged = false;
+            const logChainDropsOnce = () => {
+                if (chainDrops === 0 || chainLogged) return;
+                chainLogged = true;
+                loggerLog("warn", `[chain-echo] stripped ${chainDrops} chain carrier echo span(s) from model prose this response (#1565, count-only)`);
+            };
             const tagFilter = composeStreamFilters(
-                createTagEchoFilter((snippet) => {
-                    loggerLog("warn", `[tag-echo] stripped model-emitted render tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
-                }),
-                createMarkerLineFilter((snippet) => {
-                    loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                composeStreamFilters(
+                    createTagEchoFilter((snippet) => {
+                        loggerLog("warn", `[tag-echo] stripped model-emitted render tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                    }),
+                    createMarkerLineFilter((snippet) => {
+                        loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                    }),
+                ),
+                createChainEchoFilter(() => {
+                    chainDrops++;
                 }),
             );
             const flushFilter = function* (): Generator<ParsedStreamEvent> {
@@ -417,7 +432,8 @@ export function createGoogleAdapter(
                     yield* flushFilter();
                     sawDone = true;
                     yield { kind: "meta", chunk: rawBuf } as ParsedStreamEvent;
-                    yield { kind: "done", finishReason: blockReason } as ParsedStreamEvent;
+                    logChainDropsOnce();
+                    yield { kind: "done", finishReason: blockReason, chainEcho: chainDrops > 0 } as ParsedStreamEvent;
                     continue;
                 }
                 if (!candidate) {
@@ -511,9 +527,11 @@ export function createGoogleAdapter(
                             ? sseFrame(cloneChunk(parsed, { parts: [] }))
                             : rawBuf;
                         yield { kind: "meta", chunk: finishChunk } as ParsedStreamEvent;
-                        yield { kind: "done", finishReason, suppressCompletion: true, ...(truncated ? { truncated: true } : {}) } as ParsedStreamEvent;
+                        logChainDropsOnce();
+                        yield { kind: "done", finishReason, suppressCompletion: true, chainEcho: chainDrops > 0, ...(truncated ? { truncated: true } : {}) } as ParsedStreamEvent;
                     } else {
-                        yield { kind: "done", finishReason, ...(truncated ? { truncated: true } : {}) } as ParsedStreamEvent;
+                        logChainDropsOnce();
+                        yield { kind: "done", finishReason, chainEcho: chainDrops > 0, ...(truncated ? { truncated: true } : {}) } as ParsedStreamEvent;
                     }
                 }
             }

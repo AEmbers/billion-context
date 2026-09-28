@@ -5,6 +5,7 @@ import { buildVisibilityMarker } from "./core.js";
 import { hoistTrappedToolItems } from "../tool-pair-order.js";
 import { hashId } from "../util.js";
 import { composeStreamFilters, createMarkerLineFilter, createTagEchoFilter, stripResponsesText, containsMarkerLineText, containsRenderTagText, ACP_NAME_ALT } from "./tag-echo-filter.js";
+import { containsChainEchoText, createChainEchoFilter, removeExactCarrierFromInput, stripChainEchoResponsesEvent } from "./chain-echo-filter.js";
 import { degenerateTurnWarning } from "../degenerate-turn.js";
 import { log as loggerLog } from "../logger.js";
 import { extractResponsesTextTriggers, PROXY_TOOL_NAMES } from "../compress-tool.js";
@@ -262,7 +263,7 @@ function buildCompleted(responseObj: Record<string, unknown> | null): Buffer {
     );
 }
 
-export function createResponsesAdapter(textProtocol?: boolean, projection?: ResponsesProjection, absorbName?: string, notes?: string[]): CompressLoopAdapter {
+export function createResponsesAdapter(textProtocol?: boolean, projection?: ResponsesProjection, absorbName?: string, notes?: string[], chainCarrier?: string): CompressLoopAdapter {
     const suppressTextLifecycle = !!textProtocol;
     let outputIndex = 0;
     let responseObj: Record<string, unknown> | null = null;
@@ -333,12 +334,28 @@ export function createResponsesAdapter(textProtocol?: boolean, projection?: Resp
             // #206: render-tag echo filter — deltas stream through the filter;
             // full-text events (.done / output_item.done / completed response)
             // are stripped wholesale via stripResponsesText.
+            // #1565: chain-carrier echoes ride through the same delta path; the
+            // dedicated bounded machine (chain-echo-filter.ts) is nested last so
+            // ACP/marker semantics are unchanged. Count-only telemetry — never
+            // the tag content/digest itself.
+            let chainDrops = 0;
+            let chainLogged = false;
+            const logChainDropsOnce = () => {
+                if (chainDrops === 0 || chainLogged) return;
+                chainLogged = true;
+                loggerLog("warn", `[chain-echo] stripped ${chainDrops} chain carrier echo span(s) from model prose this response (#1565, count-only)`);
+            };
             const tagFilter = composeStreamFilters(
-                createTagEchoFilter((snippet) => {
-                    loggerLog("warn", `[tag-echo] stripped model-emitted render tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
-                }),
-                createMarkerLineFilter((snippet) => {
-                    loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                composeStreamFilters(
+                    createTagEchoFilter((snippet) => {
+                        loggerLog("warn", `[tag-echo] stripped model-emitted render tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                    }),
+                    createMarkerLineFilter((snippet) => {
+                        loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                    }),
+                ),
+                createChainEchoFilter(() => {
+                    chainDrops++;
                 }),
             );
             let lastTextRef: { itemId: string; outputIndex: number } | null = null;
@@ -428,9 +445,9 @@ export function createResponsesAdapter(textProtocol?: boolean, projection?: Resp
                 ) {
                     const mapped = remapped.get(typeof obj.item_id === "string" ? obj.item_id : "");
                     if (mapped) {
-                        yield { kind: "meta", chunk: rewriteRefEvent(type, stripResponsesText(obj), mapped), firstRoundOnly: false } as ParsedStreamEvent;
+                        yield { kind: "meta", chunk: rewriteRefEvent(type, stripChainEchoResponsesEvent(stripResponsesText(obj)), mapped), firstRoundOnly: false } as ParsedStreamEvent;
                     } else if (!suppressTextLifecycle) {
-                        const chunk = (containsRenderTagText(eventStr) || containsMarkerLineText(eventStr)) ? rebuildResponsesEvent(type, stripResponsesText(obj)) : rawBuf;
+                        const chunk = (containsRenderTagText(eventStr) || containsMarkerLineText(eventStr) || containsChainEchoText(eventStr)) ? rebuildResponsesEvent(type, stripChainEchoResponsesEvent(stripResponsesText(obj))) : rawBuf;
                         yield { kind: "meta", chunk, firstRoundOnly: true } as ParsedStreamEvent;
                     }
                 } else if (type === "response.output_text.delta") {
@@ -515,7 +532,7 @@ export function createResponsesAdapter(textProtocol?: boolean, projection?: Resp
                             remapped.delete(origId);
                             yield { kind: "meta", chunk: rewriteItemEvent(type, stripResponsesText(obj), mapped), firstRoundOnly: false } as ParsedStreamEvent;
                         } else if (!suppressTextLifecycle) {
-                            const chunk = (containsRenderTagText(eventStr) || containsMarkerLineText(eventStr)) ? rebuildResponsesEvent(type, stripResponsesText(obj)) : rawBuf;
+                            const chunk = (containsRenderTagText(eventStr) || containsMarkerLineText(eventStr) || containsChainEchoText(eventStr)) ? rebuildResponsesEvent(type, stripChainEchoResponsesEvent(stripResponsesText(obj))) : rawBuf;
                             yield { kind: "meta", chunk, firstRoundOnly: true } as ParsedStreamEvent;
                         }
                     } else if (item?.type !== "message" || !suppressTextLifecycle) {
@@ -524,7 +541,18 @@ export function createResponsesAdapter(textProtocol?: boolean, projection?: Resp
                 } else if (type === "response.completed") {
                     yield* flushFilter();
                     yield* settleNamelessDiag();
-                    responseObj = stripResponsesText((obj.response as Record<string, unknown>) ?? null);
+                    // #1565 P0-1: some upstreams echo the full request back in
+                    // response.input — remove EXACTLY the carrier stamp this
+                    // instance inserted (byte-exact match only; user text that
+                    // merely discusses the tag shape survives).
+                    const respIn = (obj.response as Record<string, unknown> | null) ?? null;
+                    if (respIn && chainCarrier && Array.isArray(respIn.input)) {
+                        const removed = removeExactCarrierFromInput(respIn.input, chainCarrier);
+                        if (removed > 0) {
+                            loggerLog("warn", `[chain-echo] upstream echoed the request back in response.input; removed ${removed} exact carrier item(s) (#1565, count-only)`);
+                        }
+                    }
+                    responseObj = stripChainEchoResponsesEvent(stripResponsesText(respIn));
                     terminalKind = "completed";
                     terminalRaw = null;
                     const respUsage = (responseObj as Record<string, unknown> | null)?.usage as
@@ -538,26 +566,30 @@ export function createResponsesAdapter(textProtocol?: boolean, projection?: Resp
                         cachedTokens: typeof pd?.cached_tokens === "number" ? pd.cached_tokens : undefined,
                     } as ParsedStreamEvent;
                     maybeWarnDegenerate("completed");
-                    yield { kind: "done", finishReason: "completed", thinking: sawReasoning } as ParsedStreamEvent;
+                    logChainDropsOnce();
+                    yield { kind: "done", finishReason: "completed", thinking: sawReasoning, chainEcho: chainDrops > 0 } as ParsedStreamEvent;
                 } else if (type === "response.incomplete") {
                     yield* flushFilter();
                     yield* settleNamelessDiag();
                     terminalKind = "incomplete";
                     terminalRaw = rawBuf;
-                    yield { kind: "done", finishReason: "incomplete" } as ParsedStreamEvent;
+                    logChainDropsOnce();
+                    yield { kind: "done", finishReason: "incomplete", chainEcho: chainDrops > 0 } as ParsedStreamEvent;
                 } else if (type === "response.failed" || type === "response.error") {
                     yield* flushFilter();
                     yield* settleNamelessDiag();
                     terminalKind = "failed";
                     terminalRaw = rawBuf;
-                    yield { kind: "done", finishReason: "failed" } as ParsedStreamEvent;
+                    logChainDropsOnce();
+                    yield { kind: "done", finishReason: "failed", chainEcho: chainDrops > 0 } as ParsedStreamEvent;
                 } else {
                     yield { kind: "meta", chunk: rawBuf, firstRoundOnly: true } as ParsedStreamEvent;
                 }
             }
             if (!terminalKind) {
                 yield* settleNamelessDiag();
-                yield { kind: "done", finishReason: "failed", truncated: true } as ParsedStreamEvent;
+                logChainDropsOnce();
+                yield { kind: "done", finishReason: "failed", truncated: true, chainEcho: chainDrops > 0 } as ParsedStreamEvent;
             }
         },
 
