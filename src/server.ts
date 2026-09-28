@@ -3662,7 +3662,12 @@ async function prepareGoogle(
         // trailing user content below (see prepareOpenai for the rationale).
         const sysParts: string[] = [];
         if (googleClientSystem) sysParts.push(googleClientSystem);
-        if (shouldInject) sysParts.push(withMarkerIntegrityNote(buildCompressSystemPrompt(prompts, surface?.promptSections), visibilityMarkers));
+        // Same triple-wrap as every other wire (anthropic/responses/openai) and
+        // as the folded re-request view (below): the notes are byte-stable
+        // constants, so the system anchor stays identical across normal turns
+        // and round-2 re-requests — skipping them here would fork the prefix
+        // at every fold and collapse the upstream cache hit.
+        if (shouldInject) sysParts.push(withConversationIdNote(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers), ensureCanonicalId(session)));
         if (absorbActive) sysParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
         googleOutboundSystem = sysParts.join("\n\n");
         // Untouched when nothing was added beyond the client's own text: the
