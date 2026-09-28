@@ -365,3 +365,43 @@ export function inspectZcodeRouting(dataDir: string, env: NodeJS.ProcessEnv = pr
     }
     return { kind, file, wrapped };
 }
+
+/** #1623: the origin bili currently routes through, read back from the
+ *  managed /bili/ wrappers — undefined when no entry carries one (direct).
+ *  Drift repair and exit handoff use it to decide whether the shared store
+ *  points at a live instance, a dead one, or at us. */
+export function detectCurrentZcodeOrigin(dataDir: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+    const { kind, file } = detectZcodeStore(dataDir, env);
+    let text: string;
+    try {
+        text = fs.readFileSync(file, "utf8");
+    } catch {
+        return undefined;
+    }
+    let doc: unknown;
+    try {
+        doc = JSON.parse(text);
+    } catch {
+        return undefined;
+    }
+    const urls: string[] = [];
+    if (kind === "new") {
+        const rulesField = asRecord(asRecord(asRecord(doc)?.config)?.providerConfigRules);
+        const rules = rulesField && Array.isArray(rulesField.providerRules) ? (rulesField.providerRules as unknown[]) : [];
+        for (const raw of rules) {
+            const api = asRecord(asRecord(asRecord(raw)?.config)?.api);
+            if (api && typeof api.baseUrl === "string") urls.push(api.baseUrl);
+        }
+    } else {
+        const provider = asRecord(asRecord(doc)?.provider);
+        if (!provider) return undefined;
+        for (const value of Object.values(provider)) {
+            const options = asRecord(asRecord(value)?.options);
+            if (options && typeof options.baseURL === "string") urls.push(options.baseURL);
+        }
+    }
+    for (const url of urls) {
+        if (WRAPPED_URL_RE.test(url)) return url.slice(0, url.indexOf("/bili/"));
+    }
+    return undefined;
+}
