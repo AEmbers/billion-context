@@ -68,6 +68,10 @@ type PluginContext = {
     llm?: { resolveModelInfo?: (provider: string, model: string, signal?: AbortSignal) => Promise<{ context?: { contextWindow?: number }; defaultMaxTokens?: number } | undefined> };
     agentDefaultModel?: { currentSelection?: () => { provider?: string; model?: string } | undefined };
     inject?: (deps: readonly string[], callback: (sub: PluginContext) => void) => unknown;
+    // #1590: host event bus (web-profile hosts only) — webserver/index-inject
+    // gathers per-startup rows for the web index; we push the __BILI__ global
+    // the dsh-native-client.js settings entry reads.
+    on?: (event: string, listener: (table: Array<{ kind: string; name?: string; value?: unknown }>) => void) => void;
 };
 
 /** Decides whether the native bootstrap should run in this process. */
@@ -501,6 +505,18 @@ async function cacheOutcome(ctx: PluginContext): Promise<CommandOutcome> {
 export function apply(ctx: PluginContext): void {
     const plan = planNativeDsh(process.env);
     if (plan.mode === "off") return;
+
+    // #1590: the dsh web-profile settings panel shows a "bili设置" entry
+    // (dsh-native-client.js) that opens this proxy's Web UI. The origin is
+    // only published while known — attach mode binds register.base
+    // synchronously below; spawn mode binds it after bootstrap, so at
+    // startup-time index collection that entry degrades to a hint instead of
+    // a stale link.
+    ctx.on?.("webserver/index-inject", (table) => {
+        const envOrigin = process.env.BILLION_CONTEXT_PROXY?.trim();
+        const origin = register.base ?? (envOrigin !== undefined && envOrigin.length > 0 ? envOrigin : undefined);
+        if (origin !== undefined) table.push({ kind: "global", name: "__BILI__", value: { origin } });
+    });
 
     if (plan.mode === "attach") {
         const attachOrigin = plan.attachOrigin;
