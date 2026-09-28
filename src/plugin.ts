@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { acquireInFlight, effectiveConfig, findSessionByCanonicalId, listSessions, markCompactionBoundary, markDirty, peekSession, releaseInFlight, withSessionLock, type Session } from "./session.js";
+import { acquireInFlight, diagnoseSuccessWithoutUsage, effectiveConfig, findSessionByCanonicalId, listSessions, markCompactionBoundary, markDirty, peekSession, releaseInFlight, withSessionLock, type Session } from "./session.js";
 import { clientConversationHeader } from "./session-id.js";
 import { ABSORB_TOOL_NAME, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, PROXY_TOOL_NAMES, RETRIEVE_TOOL_NAME, RULE_TOOL, RULE_TOOL_NAME, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, SEARCH_CONTEXT_CONVERSATION_ID_PARAM, SEARCH_CONTEXT_TOOL_NAME, absorbToolsFor, retrieveToolsFor } from "./compress-tool.js";
 import { absorbEnabled, effectiveAbsorbConfig, isProxyToolFor } from "./absorb.js";
@@ -1408,10 +1408,15 @@ export async function pipePluginChatWithStrip(
     // before any prose, and dropping it froze lastInputTokens at the previous
     // turn's value, corrupting every later nudge decision.
     const settleUsage = () => {
-        if (session && (acc.inputTokens !== undefined || acc.outputTokens !== undefined || acc.cachedTokens !== undefined || acc.creationTokens !== undefined)) {
+        if (!session) return;
+        if (acc.inputTokens !== undefined || acc.outputTokens !== undefined || acc.cachedTokens !== undefined || acc.creationTokens !== undefined) {
             applyUsageSample(session, acc, protocol, upstreamOrigin);
             markDirty(session);
         }
+        // #1595: clean completion but no input usage sample — name it (the
+        // cut-stream paths below have sawTerminal=false, so they stay
+        // distinguishable from transport failures).
+        if (sawTerminal && acc.inputTokens === undefined) diagnoseSuccessWithoutUsage(session, `plugin-passthrough-${protocol}`);
     };
     // #498: whether a terminal event ([DONE] / message_stop) was seen. A
     // stream that ends without one was cut mid-flight.
@@ -2036,10 +2041,13 @@ export async function pipePluginResponsesWithStrip(
     // #411: keep the usage sniffed before an abort (see
     // pipePluginChatWithStrip).
     const settleUsage = () => {
-        if (session && (acc.inputTokens !== undefined || acc.outputTokens !== undefined || acc.cachedTokens !== undefined)) {
+        if (!session) return;
+        if (acc.inputTokens !== undefined || acc.outputTokens !== undefined || acc.cachedTokens !== undefined) {
             applyUsageSample(session, acc, "responses", upstreamOrigin);
             markDirty(session);
         }
+        // #1595: same as the chat-pipe twin — sawTerminal gates out cuts.
+        if (sawTerminal && acc.inputTokens === undefined) diagnoseSuccessWithoutUsage(session, "plugin-passthrough-responses");
     };
     // #498: whether a terminal event (done-family / [DONE]) was seen. A
     // stream that ends without one was cut mid-flight.
@@ -2551,6 +2559,7 @@ export async function pipePluginJson(
     try {
         json = JSON.parse(text) as Record<string, unknown>;
         const usage = json["usage"] as Record<string, unknown> | undefined;
+        let sawInputSample = false;
         if (session && usage) {
             const input = num(usage["prompt_tokens"]) ?? num(usage["input_tokens"]);
             if (input !== undefined) {
@@ -2568,6 +2577,7 @@ export async function pipePluginJson(
                     creationTokens: creation,
                 }, protocol, upstreamOrigin);
                 markDirty(session);
+                sawInputSample = true;
             }
         }
         // Gemini reports its usage in a top-level `usageMetadata` instead of
@@ -2579,8 +2589,11 @@ export async function pipePluginJson(
             if (sample && sample.inputTokens !== undefined) {
                 applyUsageSample(session, sample, protocol, upstreamOrigin);
                 markDirty(session);
+                sawInputSample = true;
             }
         }
+        // #1595: parsed success body carrying no input usage report — name it.
+        if (session && !sawInputSample) diagnoseSuccessWithoutUsage(session, "plugin-json");
     } catch { /* non-JSON body — forward verbatim */ }
         if (json && (containsRenderTagText(text) || containsMarkerLineText(text))) {
         // #206 parity for the non-streaming plugin path: the compress loop's

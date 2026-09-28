@@ -1,5 +1,6 @@
-import { createInitialState, resetImageFullState, type CompressionState, type Config, type CoreMessage, type MessageContentStore } from "acp-kernel";
+import { createInitialState, defaultConfig, resetImageFullState, type CompressionState, type Config, type CoreMessage, type MessageContentStore } from "acp-kernel";
 import { createHash } from "node:crypto";
+import { log as loggerLog } from "./logger.js";
 import { getStore } from "./persist.js";
 import type { WireProtocol } from "./util.js";
 
@@ -291,6 +292,71 @@ export function effectiveConfig(session: Session | undefined, fallback: Config):
     const stored = session?.metadata["effectiveConfig"];
     if (stored && typeof stored === "object") return { ...fallback, ...(stored as Partial<Config>) };
     return fallback;
+}
+
+/** Mirror of acp-kernel's resolveAdaptiveGrowth (not exported by the kernel):
+ *  min(growthCap, max(growthFloor, round(modelContextLimit × growthRatio))).
+ *  The per-request config stamped by storeEffectiveConfig is the same object
+ *  the kernel decided with this turn, so the margin matches the kernel's own
+ *  cadence exactly — including owner-flattened compress.nudgeGrowthTokens. */
+function nudgeGrowthInterval(config?: Config): number {
+    const c = config ?? defaultConfig(1);
+    return Math.min(c.nudge.growthCap, Math.max(c.nudge.growthFloor, Math.round(c.modelContextLimit * c.nudge.growthRatio)));
+}
+
+/** #1595: retire a stale-high kernel nudge reference when a REAL usage-grade
+ *  sample lands far below it.
+ *
+ * The kernel's own downward re-anchor (nudgeNode) compares the incoming token
+ * count against the BASELINE only, but its growth decision prefers
+ * lastNudgeShownTokens whenever that is non-zero. When an estimate-grade
+ * reading (armFailureShrink window feeding effectiveTokenCount's #1492
+ * fall-through) pins lastNudgeShownTokens at a phantom-high level and real
+ * usage then settles within one interval of the low baseline, the kernel never
+ * self-resets and every later growth calculation runs against the phantom —
+ * permanently negative, blocking the tier cadence until context regrows past
+ * the phantom level or a compression resets the references.
+ *
+ * Called from every usage-grade settle site (plugin SSE pipes via
+ * applyUsageSample, proxy streaming loops via recordUsage, non-streaming JSON)
+ * AFTER lastInputTokens has been written from the real report. Fires only for
+ * drops of more than one full growth interval below the current reference
+ * (lastNudgeShownTokens, else baseline) — estimates never trigger it. On fire
+ * it mirrors the kernel's drift-reset trio: baseline := real value,
+ * lastNudgeShownTokens := 0, lastShownByTier := {} — so the next prepare
+ * measures growth from reality with a full interval of cadence headroom. */
+export function reanchorNudgeOnUsageDrop(session: Session): void {
+    // Partial-session literals (test fixtures, pre-kernel shapes) may lack
+    // state/stats fields entirely — no-op rather than crash.
+    const nudge = session.state?.nudge;
+    const value = session.stats.lastInputTokens;
+    if (!nudge || typeof value !== "number" || value <= 0) return;
+    const ref = nudge.lastNudgeShownTokens > 0 ? nudge.lastNudgeShownTokens : nudge.lastPerMessageNudgeTokens;
+    if (ref <= 0) return;
+    const stored = session.metadata?.["effectiveConfig"];
+    const margin = nudgeGrowthInterval(stored && typeof stored === "object" ? (stored as Config) : undefined);
+    if (!(value < ref - margin)) return;
+    nudge.lastPerMessageNudgeTokens = value;
+    nudge.lastNudgeShownTokens = 0;
+    nudge.lastShownByTier = {};
+    markDirty(session);
+    loggerLog("info", `[${session.id}] nudge reference re-anchored ${ref} -> ${value} after usage-grade drop (margin ${margin}) — stale high reference retired (#1595)`);
+}
+
+/** #1595: name the third no-usage shape — an upstream SUCCESS that completes
+ *  without reporting input usage. Transport failures and upstream 5xx already
+ *  log their own armFailureShrink arms; this one used to be silent, so a
+ *  session could sit on stale values with nothing in the log explaining why.
+ *  Callers gate the preconditions (clean terminal / parsed body + no input
+ *  sample accumulated); this handles the once-per-session throttle. */
+export function diagnoseSuccessWithoutUsage(session: Session, wire: string): void {
+    // Partial-session literals (test fixtures) may lack the metadata bag —
+    // nothing to throttle against, so skip rather than crash.
+    if (!session.metadata) return;
+    if (session.metadata["warnedNoUsage"]) return;
+    session.metadata["warnedNoUsage"] = true;
+    markDirty(session);
+    loggerLog("warn", `[${session.id}] [${wire}] upstream success without usage report — keeping lastInputTokens=${session.stats.lastInputTokens} (source=${session.stats.lastInputTokensSource ?? "none"}); nudge decisions ride local estimates until a usage-grade sample lands (#1595)`);
 }
 
 const sessions = new Map<string, Session>();
