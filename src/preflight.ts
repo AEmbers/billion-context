@@ -214,7 +214,7 @@ function spanUnitsOf(messages: CoreMessage[], startIdx: number, endIdx: number, 
 // Message-level splitChunks cannot shrink a span dominated by one huge
 // message (e.g. a megabyte tool result); split its rendered content into
 // token-budgeted slices so every summarization call stays inside the window.
-function splitSummaryContent(content: string, budget: number, countTokens: (text: string) => number): string[] {
+export function splitSummaryContent(content: string, budget: number, countTokens: (text: string) => number): string[] {
     const chunks: string[] = [];
     let offset = 0;
     while (offset < content.length) {
@@ -224,6 +224,13 @@ function splitSummaryContent(content: string, budget: number, countTokens: (text
             const mid = Math.ceil((low + high) / 2);
             if (countTokens(content.slice(offset, mid)) <= budget) low = mid;
             else high = mid - 1;
+        }
+        // #1615 family: a budget boundary landing between the two halves of an
+        // astral char would strand a lone surrogate at this chunk's end (and the
+        // next chunk's start) — strict upstreams reject such summarization bodies.
+        if (low - offset > 1 && low < content.length) {
+            const c = content.charCodeAt(low - 1);
+            if (c >= 0xd800 && c <= 0xdbff) low -= 1;
         }
         chunks.push(content.slice(offset, low));
         offset = low;
