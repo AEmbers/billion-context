@@ -4,7 +4,21 @@ README 三种使用方式背后的机制级说明。README 里每种方式只保
 
 ## 原生插件生命周期(方式 1)
 
-插件加载时**自拉起自己的代理**(已有健康实例则直接复用 —— 父进程 pid 看门狗在客户端退出时收掉它),把模型流量改写到 `<proxy>/bili/<上游URL>`,把 `compress` / `decompress` / `acp_status` 注册为客户端原生工具(plugin 模式),并把 `/acp` 面板绑定到当前会话。插件还会把客户端**自己的模型配置**上报给代理(runtime-info 协议,#955),压缩预算用真实窗口而不是注册表猜测。退出开关:`BILI_NATIVE_PI=0`、`BILI_NATIVE_OMP=0`、`BILI_NATIVE_OPENCODE=0`、`BILI_NATIVE_DSH=0`、`BILI_NATIVE_KIMI=0`。
+插件加载时**自拉起自己的代理**(已有健康实例则直接复用 —— 父进程 pid 看门狗在客户端退出时收掉它),把模型流量改写到 `<proxy>/bili/<上游URL>`,把 `compress` / `decompress` / `acp_status` 注册为客户端原生工具(plugin 模式),并把 `/acp` 面板绑定到当前会话。插件还会把客户端**自己的模型配置**上报给代理(runtime-info 协议,#955),压缩预算用真实窗口而不是注册表猜测。退出开关:`BILI_NATIVE_PI=0`、`BILI_NATIVE_OMP=0`、`BILI_NATIVE_OPENCODE=0`、`BILI_NATIVE_DSH=0`、`BILI_NATIVE_KIMI=0`、`BILI_NATIVE_HERMES=0`、`BILI_NATIVE_ZCODE=0`。
+
+## 代理复用与附着门禁(#1225、#1335、#1232)
+
+原生 hook 可以附着到已在运行的代理而不自己拉起 —— 仅当通过下面的生命周期门禁。复用基于身份(#1225):只有当既有代理运行的是**同一份代码**(入口脚本 sha256,记录在实例文件里)、**lane 兼容**(每个启动器声明其客户端 lane,两个*不同声明的* lane 永不共享;未声明 lane 的实例在该轴上通配)、**且拥有会话生命周期**(健康端点报告 armed 父进程 pid 看门狗 `watchdog.armed == true`,即由带父 pid 的启动器拉起、随最后一个附着会话消亡)时才附着。#1225 之前写入的实例没有代码指纹,因此永不附着:重建或更新后的安装下次启动总会拉起新代理,修复立即生效而不是静默服务旧代码。
+
+| 监听者 | 附着? | 原因 |
+|---|---|---|
+| 本会话拉起的代理 | ✅ | 出生即 armed |
+| 其他会话的 armed 共享代理(watcher 集,#1186) | ✅ | 共享本就是设计 |
+| 手工 `bili start` 常驻守护进程 | ❌ 默认不附着 | 无生命周期属主(拒绝 watcher 注册、不随会话退出、常是旧版本代码 —— #1322 的成因) |
+
+hook 附着前先探测候选者 `/__bili/health` 里的 `watchdog.armed`:armed → 附着并注册 watcher(现状不变);unarmed、或 pre-#1330 构建根本不报 `watchdog` 字段(不可验证,按 unarmed 处理)→ **不附着**,本会话自拉起一个临时代理(临时端口、出生即 armed、随最后一个会话消亡,#1186 watcher 语义)。顺带修掉版本偏斜:每个会话跑的都是**当前安装的** bili,而不是陈旧守护进程携带的旧代码。代价:无 armed 代理时每会话多一个短命代理进程(会话状态在磁盘上共享,压缩连续性不受影响);多实例告警(#394)相应变多。**逃生舱:** 刻意用常驻守护进程承载原生 hook → 配置文件设 `"native": { "attachExternal": true }` 或 `BILI_NATIVE_ATTACH_EXTERNAL=1`,恢复对任何 code/lane 兼容监听者的附着(守护进程的寿命与版本由你自己负责)。kimi/dsh 的显式用户指定附着(`BILLION_CONTEXT_ATTACH` / 预置 `BILLION_CONTEXT_PROXY`)完全不经过发现路径,构造上豁免。
+
+附着发现在**所有**存活实例间是 lane 感知的(#1232):启动器探测实例注册表里的每一条存活记录,而不只是单个实例文件(last-writer-wins —— 并发多客户端下它可能指向别的客户端的代理),并对每个候选应用上面的门禁。兼容候选中,lane 与启动器自身声明一致的最新实例胜出;未声明 lane 的实例在 lane 轴上通配(仍受门禁约束)。`another bili instance is running` 告警(#394)也是 lane 感知的:同 lane 或无 lane 共存时触发,两个*不同声明* lane 之间保持沉默(它们的会话文件互不相交)。
 
 ## Runtime-info 协议(#955)
 
