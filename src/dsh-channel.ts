@@ -30,6 +30,19 @@ export function isDshDesktopProfile(name: string): boolean {
     return name === DSH_DESKTOP_PROFILE;
 }
 
+// #1600: the desktop owner hint below must not repeat on every check cycle —
+// on a machine whose running copy IS the stale desktop bundle, the #1196
+// self-refresh re-enters refreshDshProfileBundles every ~3 min until the app
+// itself updates, so an unthrottled hint would log ~48 lines/day. One notice
+// per target version per process (same precedent as the advisory one-liner);
+// a new registry version re-notifies.
+const desktopHintNotified = new Set<string>();
+
+/** Test seam: clear the per-process desktop-hint throttle. */
+export function _resetDshDesktopHintForTest(): void {
+    desktopHintNotified.clear();
+}
+
 const DSH_EXEC_TIMEOUT_MS = 5 * 60 * 1000; // cold pnpm store + slow network
 
 /** Every profile dir under $DSH_HOME/profiles/*. dsh creates a profile dir
@@ -317,7 +330,11 @@ export async function refreshDshProfileBundles(
     }
     const desktopDir = dirs.find((dir) => isDshDesktopProfile(path.basename(dir)));
     if (desktopDir !== undefined && dshProfileDependsOnBili(desktopDir)) {
-        log("info", `[update] dsh profile ${DSH_DESKTOP_PROFILE}: owned by the deepseek-harness Desktop app — skipping the refresh; update billion-context there in the app's plugin manager, or with 'dsh plugin --profile ${DSH_DESKTOP_PROFILE} add ${DSH_PACKAGE}@${targetVersion}' while the app is closed`);
+        const hintKey = `${DSH_DESKTOP_PROFILE}@${targetVersion}`;
+        if (!desktopHintNotified.has(hintKey)) {
+            desktopHintNotified.add(hintKey);
+            log("info", `[update] dsh profile ${DSH_DESKTOP_PROFILE}: owned by the deepseek-harness Desktop app — skipping the refresh; update billion-context there in the app's plugin manager, or with 'dsh plugin --profile ${DSH_DESKTOP_PROFILE} add ${DSH_PACKAGE}@${targetVersion}' while the app is closed`);
+        }
     }
     const targets = dirs.filter((dir) => !isDshDesktopProfile(path.basename(dir)) && dshProfileDependsOnBili(dir));
     if (targets.length === 0) return;

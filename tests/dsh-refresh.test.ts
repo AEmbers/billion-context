@@ -10,6 +10,7 @@ import {
     planDshSpawn,
     refreshDshProfileBundles,
     _setDshRunnersForTest,
+    _resetDshDesktopHintForTest,
     type DshPlan,
 } from "../src/dsh-channel.ts";
 
@@ -137,12 +138,14 @@ test("refreshDshProfileBundles: the Desktop-owned `desktop` profile is skipped w
     const log = (level: string, msg: string): void => logs.push(`${level}: ${msg}`);
     try {
         _setDshRunnersForTest({ async: recordingAsyncRunner(calls) });
+        _resetDshDesktopHintForTest();
         await refreshDshProfileBundles("0.1.121", log, { ...process.env, DSH_HOME: home });
         assert.deepEqual(calls, ["plugin --profile a add billion-context@0.1.121"]);
         assert.ok(logs.some((l) => l.includes("dsh profile desktop") && l.includes("skipping the refresh")));
         assert.ok(logs.some((l) => l.includes("refreshed 1 dsh profile bundle(s) to 0.1.121")));
     } finally {
         _setDshRunnersForTest(undefined);
+        _resetDshDesktopHintForTest();
         fs.rmSync(home, { recursive: true, force: true });
     }
 });
@@ -154,12 +157,38 @@ test("refreshDshProfileBundles: a desktop-only home spawns nothing and warns not
     const log = (level: string, msg: string): void => logs.push(`${level}: ${msg}`);
     try {
         _setDshRunnersForTest({ async: recordingAsyncRunner(calls) });
+        _resetDshDesktopHintForTest();
         await refreshDshProfileBundles("0.1.121", log, { ...process.env, DSH_HOME: home });
         assert.deepEqual(calls, []);
         assert.ok(!logs.some((l) => l.startsWith("warn")), JSON.stringify(logs));
         assert.ok(logs.some((l) => l.includes("dsh profile desktop") && l.includes("skipping the refresh")));
     } finally {
         _setDshRunnersForTest(undefined);
+        _resetDshDesktopHintForTest();
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test("refreshDshProfileBundles: the desktop owner hint fires once per version per process (#1600)", async () => {
+    const home = makeHome({ desktop: { dependencies: { "billion-context": "^0.1.119" } } });
+    const logs: string[] = [];
+    const log = (level: string, msg: string): void => logs.push(`${level}: ${msg}`);
+    const hints = (): number => logs.filter((l) => l.includes("dsh profile desktop") && l.includes("skipping the refresh")).length;
+    try {
+        _setDshRunnersForTest({ async: recordingAsyncRunner([]) });
+        _resetDshDesktopHintForTest();
+        // the #1196 self-refresh re-enters here every check cycle while the
+        // desktop copy stays stale — repeated cycles must not repeat the hint
+        await refreshDshProfileBundles("0.1.121", log, { ...process.env, DSH_HOME: home });
+        await refreshDshProfileBundles("0.1.121", log, { ...process.env, DSH_HOME: home });
+        await refreshDshProfileBundles("0.1.121", log, { ...process.env, DSH_HOME: home });
+        assert.equal(hints(), 1, JSON.stringify(logs));
+        // a new registry version opens a fresh gap — notify again
+        await refreshDshProfileBundles("0.1.122", log, { ...process.env, DSH_HOME: home });
+        assert.equal(hints(), 2, JSON.stringify(logs));
+    } finally {
+        _setDshRunnersForTest(undefined);
+        _resetDshDesktopHintForTest();
         fs.rmSync(home, { recursive: true, force: true });
     }
 });
