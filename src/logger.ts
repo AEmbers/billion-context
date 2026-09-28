@@ -48,6 +48,25 @@ export function isStreamWriteError(err: unknown): boolean {
     return typeof code === "string" && STREAM_WRITE_ERROR_CODES.has(code);
 }
 
+const BENIGN_SOCKET_RACE_MESSAGE = "Cannot read properties of undefined (reading '_writableState')";
+
+/** Socket-teardown race on an already-closed socket (#1574): a Node-internal
+ *  callback (socketOnTimeout / socketOnEnd / closeIdleConnections) reaches a
+ *  socket whose writable side was already torn down. #1574 triage proved this
+ *  signature unreachable via bili's own call paths or stock Node v22.23.2
+ *  dispatch (all cited frames pass bound receivers; states are never nulled;
+ *  every graceful close funnels through destroy(), which clears the keep-alive
+ *  timer), and empirically verified that end()/destroy() on a fully closed
+ *  socket are harmless no-ops — so an occurrence touches no live resource.
+ *  Matched exactly (message + core frame provenance) so nothing else can be
+ *  demoted by accident. */
+export function isBenignSocketRaceError(err: unknown): boolean {
+    if (!(err instanceof TypeError) || err.message !== BENIGN_SOCKET_RACE_MESSAGE) return false;
+    const stack = err.stack;
+    if (typeof stack !== "string") return false;
+    return stack.includes("node:_http_server") || stack.includes("node:internal/streams/writable");
+}
+
 /** Flip to file-only logging after stderr died. Idempotent; the [warn] goes
  *  through log(), which now skips stderr — the logger's error path never
  *  re-enters the writer that produced the error. */

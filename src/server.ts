@@ -81,7 +81,7 @@ import { reapOrphanBlocks } from "./orphan-gc.js";
 import { conflictScanEnabled, isDesignAbsorbed, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
 import { recordConflict, summarizeConflicts } from "./conflict-watch.js";
 import { getStore } from "./persist.js";
-import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError } from "./logger.js";
+import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError, isBenignSocketRaceError } from "./logger.js";
 import { configFile, defaultLogFile, dumpsDir, stateDir } from "./paths.js";
 import { atomicWriteInstanceFile, clearProxyInstanceFile, entryScriptFingerprint, isPidAlive, registerInstanceAndWarn, unregisterInstance, type ProxyInstanceFile } from "./instance.js";
 import { compressLoopResponsesJson } from "./compress-loop-responses.js";
@@ -766,6 +766,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     // auto-update, initSessions) that escape the per-request try/catch —
     // Node 20+ aborts the process on these by default. Log loudly and flush.
     let suppressedWriteErrors = 0;
+    let suppressedRaceErrors = 0;
     process.on("uncaughtException", (err) => {
         if (isStreamWriteError(err)) {
             // Belt-and-suspenders for #1233: the logger's own stderr path is
@@ -778,6 +779,17 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
             } else {
                 suppressedWriteErrors += 1;
             }
+            return;
+        }
+        if (isBenignSocketRaceError(err)) {
+            // #1574: keep-alive/idle-cleanup race reaching an already-closed
+            // socket — triage-verified benign (touches no live resource), so
+            // it must not masquerade as a real error. First at debug level,
+            // repeats counted away, mirroring the stream-write branch above.
+            if (suppressedRaceErrors === 0) {
+                log("debug", `uncaughtException (benign socket race #1574; suppressing repeats): ${String(err?.stack ?? err)}`);
+            }
+            suppressedRaceErrors += 1;
             return;
         }
         log("error", `uncaughtException: ${String(err?.stack ?? err)}`);
