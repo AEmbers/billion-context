@@ -29,7 +29,7 @@ test("resolveCompressSurface: builtin lean resolves from the kernel registry", (
     const surface = resolveCompressSurface({ promptPack: "lean" });
     assert.equal(
         surface.toolPrompts?.compress?.description,
-        "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs.",
+        "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs; batch multiple ranges into ONE call (a single string may hold every range).",
     );
     assert.equal(surface.prompts, undefined);
     const tools = applyAcpToolOverrides(ACP_TOOLS_OPENAI, surface.toolPrompts);
@@ -83,7 +83,7 @@ test("resolveCompressSurfaceDetailed: pack identity travels with the surface", (
     const lean = resolveCompressSurfaceDetailed({ promptPack: "lean" });
     assert.equal(lean.packName, "lean");
     assert.equal(typeof lean.packVersion, "string");
-    assert.equal(lean.surface.toolPrompts?.compress?.description, "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs.");
+    assert.equal(lean.surface.toolPrompts?.compress?.description, "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs; batch multiple ranges into ONE call (a single string may hold every range).");
 });
 
 test("resolveCompressSurfaceDetailed: file pack reports the requested name and its version", () => {
