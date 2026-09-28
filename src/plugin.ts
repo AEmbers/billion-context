@@ -73,6 +73,15 @@ export const PLUGIN_INSTRUCTIONS_MUTABLE_HEADER = "x-bili-plugin-instructions-mu
 
 export const PLUGIN_PROTOCOL_VERSION = 1;
 
+/** #1567: folds executed through POST /__bili/plugin/tool are minted this
+ *  synthetic callId, which the client can never echo back — its own re-sent
+ *  compress pair is the summary carrier for such blocks, so the kernel's
+ *  in-place acp_summary anchor is redundant and must be stripped (#1567). */
+export const PLUGIN_FOLD_CALLID_PREFIX = "plugin_";
+export function isPluginFoldCallId(callId: string | undefined): boolean {
+    return typeof callId === "string" && callId.startsWith(PLUGIN_FOLD_CALLID_PREFIX);
+}
+
 const VERSION = (() => {
     try {
         const here = fileURLToPath(import.meta.url);
@@ -970,7 +979,7 @@ export async function handlePluginTool(
     // for per-call routing; routing itself uses the body-level conversationId
     // field, so strip it before kernel arg parsing sees it.
     delete args.conversation_id;
-    const callId = `plugin_${Date.now().toString(36)}`;
+    const callId = `${PLUGIN_FOLD_CALLID_PREFIX}${Date.now().toString(36)}`;
     acquireInFlight(session);
     let result: string;
     try {
