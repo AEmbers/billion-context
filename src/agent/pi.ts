@@ -272,9 +272,9 @@ const RETRY_INTERVAL_MS = 10000;
 
 type RegisterState = { sid?: string; toolsFor?: string; toolsReady?: boolean; pending?: Promise<void>; retryAt?: number; identityAt?: string; carriedSids?: Set<string>; retryIntervalMs: number; manifestPrime?: { base: string; tools: Promise<ManifestTool[] | undefined> } };
 
-async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, agent: string): Promise<void> {
+async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, agent: string, awaitNativeOrigin = true): Promise<void> {
     let proxyBase = proxyBaseForCtx(ctx);
-    if (proxyBase === undefined) proxyBase = await awaitNativeProxyOrigin();
+    if (proxyBase === undefined && awaitNativeOrigin) proxyBase = await awaitNativeProxyOrigin();
     if (proxyBase === undefined) return;
     // Cache on the session id; "" (host has no sessionManager) still caches,
     // so a successful registration is not re-fetched on every provider
@@ -793,7 +793,15 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
         });
         pi.on("session_start", (_event, ctx) => {
             state.sid = undefined;
-            void registerTools(pi, ctx, state, agent).catch((err: unknown) => console.error(`bili-plugin(${agent}): ${err instanceof Error ? err.message : String(err)}`));
+            // #1586 review: session_start captures its ctx for the whole
+            // session — never suspend across it here. One-shot flows replace
+            // the session inside async windows, so an awaited native-origin
+            // resolution would resume on stale refs and pi throws "ctx is
+            // stale" into our catch → stderr noise (e2e-native-pi gate). The
+            // per-event handlers below get a fresh ctx each time and are the
+            // ones that await the origin (#1243 pattern); launcher mode is
+            // unaffected (its base resolves synchronously).
+            void registerTools(pi, ctx, state, agent, false).catch((err: unknown) => console.error(`bili-plugin(${agent}): ${err instanceof Error ? err.message : String(err)}`));
         });
         // omp fires session_compact on in-session native compaction (sid does
         // not rotate), so the proxy reuses stale state — notify it to archive
