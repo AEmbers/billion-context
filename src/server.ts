@@ -5825,7 +5825,11 @@ async function forward(
                     adoptContentStore(prepared.session, turn.contentStore);
                     const viewed = applyAbsorbView(turn.messages, turn.state, loopConfig, prepared.session.stats.lastInputTokens);
                     const records = current.filter((m) => typeof m.id === "string" && m.id.startsWith("acp_loop_"));
-                    const out = stripKernelSummaries([...viewed, ...records] as BiliMessage[], turn.state);
+                    // #1548: strip only when the compress call rides INBOUND history (client persists
+                    // it). Ephemeral acp_loop_* pairs are never re-sent by proxy-mode clients; stripping
+                    // against them drops the only cross-turn summary carrier and breaks the byte-prefix
+                    // at the fold anchor (post-fold cache floor reset to the stable head).
+                    const out = [...stripKernelSummaries(viewed as BiliMessage[], turn.state), ...(records as BiliMessage[])] as BiliMessage[];
                     // [#1095] the folded re-request must carry the SAME bytes the
                     // model saw (deterministic encode + per-fingerprint cache).
                     await applyImageCompressionPass(prepared.session, out, { config: loopConfig, billing: imageBillingFor(opts, route?.rewrittenUrl), log: ctx.log });
