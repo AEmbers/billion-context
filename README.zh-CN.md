@@ -242,6 +242,21 @@ curl -s http://localhost:8787/__bili/stats
 
 一行带不过来的细节 —— 各模式(启动器 / `/bili/` URL 前缀 / 原生插件)如何把流量接进代理、往哪儿写了什么、已知局限有哪些 —— 都在 **[CLIENTS.zh-CN.md](CLIENTS.zh-CN.md)**:dsh · Kimi Code · Hermes · ZCode · Gemini 系(Gemini CLI / iFlow CLI / Qwen Code)· CONNECT 盲隧道接入但从不压缩的客户端(#897)· 未识别端点直连(#1290)· OpenCode(启动器 / 原生 / 纯代理、`/acp` 状态与规则、旧 opencode-acp 会话 #920)。
 
+## 常见问题
+
+**怎么查缓存命中率?** 每个请求都会向日志文件写一行
+`[acp-usage] round N input=X cached=Y (cache hit Z%)`。想知道前缀缓存*为什么*断了,在 opencode 或 dsh 里执行 `/acp-cache`(或让模型调用 `acp_cache` 工具,需已注册 bili MCP server):它把会话内相邻请求两两配对、逐对分类 —— pure-append(纯追加)/ mid-stream-rewrite(流中重写)/ prefix-stable-miss(前缀稳定但未命中)—— 并把每次断点归因到代理重建、客户端变更或两者(#1254/#1266)。HTTP 同款报告:`GET /__bili/cache-report`。
+
+**`/acp` 显示什么?** 带原生插件的客户端(opencode、dsh)里,`/acp` 直接从代理取当前会话的 ACP 状态面板(会话、块、可压缩区间、用量);首个模型请求到来前显示空闲提示。`/acp-cache [full]` 打印上面的缓存报告。
+
+**能用网页查会话和配置吗?** 能 —— 打开 [http://localhost:8787](http://localhost:8787):总览仪表盘、会话列表(含逐会话详情)、实时日志、配置编辑器、上游连通性测试。全部功能同样以纯 JSON 提供(`/__bili/stats`、`/__bili/sessions`、`/__bili/config`、…),方便脚本化。
+
+**压缩什么时候发生?** 由模型驱动:注入的上下文工具由模型在上下文增长时自行调用,温和的增长 nudge(按设计固定约 50K token 步长,可用 `compress.nudgeGrowthTokens` 调整)沿途提醒它,仅输入就超窗时预检作为硬兜底触发(#470)。用 `/acp` 或网页界面实时观察。
+
+**bili 是透明的吗?怎么关掉?** 未识别端点原样转发([CLIENTS.zh-CN.md](CLIENTS.zh-CN.md)),且每种模式都能干净退出:原生安装用 `bili plugin remove <client>`,另两种模式停掉启动器命令 / 环境变量 / `/bili/` 前缀即可 —— 流量立刻恢复直连。
+
+**日志和会话数据存在哪?** 日志:`~/.local/state/billion-context/bili.log`(同时镜像到 stderr);会话状态:`~/.local/share/billion-context/`(XDG 可覆盖;Windows 杀软排除 #362、可选清理 #1082)—— 完整路径见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md)。
+
 ## 运行代理
 
 ### 命令行参数

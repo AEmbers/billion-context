@@ -42,3 +42,46 @@ Claude Code 没有进程内扩展点,所以 `bili plugin install claude` 往 `~/
 ## 注入优先级 —— 能不写文件就不写(#535)
 
 bili 永不拥有用户数据:每个被启动的客户端都跑在**真实 home** 上,运行期写入落在用户预期的位置。把客户端指向代理时,启动器按优先级选择——**优先 env 变量**(hermes/dsh/codex 的代理/CA env;pi/omp 的 `BILI_PROVIDER_REWRITES` URL 清单,由扩展加载时经 `registerProvider` 消费),其次 **CLI 参数或扩展 API**(codex `-c key=value`、opencode 插件),最后才是**生成文件**——目前仅剩 opencode 的临时 `opencode.json`(退出即删)和 dsh 的回环例外:dsh 的 fetch 栈对回环目标无条件绕过代理 env,所以本地上游保留持久 `~/.dsh-bili` overlay 改写,直到 dsh 提供 settings-path env 或上游支持回环 opt-out。旧版本创建的 overlay 目录原地保留,绝不合并回真实 home。
+
+## 两种压缩模式 —— 谁执行 `compress`
+
+代理有两种工作模式,**模式决定谁来执行 `compress`,进而决定摘要以什么形式("载体")到达模型**。这一区分是 #377 的根源。
+
+| | **启动器 / 插件模式**(`bili pi`、`bili codex`、…) | **代理模式**(普通客户端 → `/bili/`) |
+|---|---|---|
+| 客户端 | 带 bili 扩展的 ACP 原生 agent(pi/omp) | 任意 OpenAI/Anthropic 客户端,无扩展 |
+| 谁执行 `compress` | **agent**(pi 在本地执行) | **代理**(服务端压缩循环) |
+| 重发历史里有 `compress` 工具调用吗? | 有 —— agent 自己对话的一部分 | 没有 —— 临时性的代理循环流量 |
+| 预检块(没有工具调用时)? | 最后防线 —— agent 通常靠自己的 `compress` 调用压缩,但仅输入就超窗时 `src/preflight.ts` 仍会触发(两种模式都如此,#470) | 有 —— `src/preflight.ts` 在客户端背后压缩 |
+| **线上摘要载体** | **`compress` 工具调用本身** | **一条 `acp_summary` user 消息** |
+| 线上的 system 消息 | 恒为 1 条(客户端 + prompt) | 恒为 1 条(客户端 + prompt)—— 摘要走 user 消息 |
+| SGLang「单 system」400(#377) | 不可能发生 | 不可能发生(摘要是 user 消息,不是 system) |
+| 代理注入的 `compress` 工具 | 无 —— agent 原生注册 4 个 ACP 工具 | 4 个上下文工具(启用时) |
+| 代理注入的 nudge | **有** —— agent 自己没有 nudge 通道,代理侧 nudge 就是主动压缩触发器(仅预检只在硬上限才触发;#451) | 有(启用时) |
+
+**为什么载体不同。** 插件模式下 agent 拥有压缩权:`compress` 调用 + 结果都在 agent 自己的历史里、每轮重发,所以摘要搭在工具调用上,agent 视图从不渲染内核的 `acp_summary` 兜底(`billion-context-pi` 的 `src/messages.ts` 跳过 `acp_summary_*`)。代理模式下客户端不是 ACP 原生的,由代理在服务端执行 `compress`;工具调用从不进入客户端历史,预检块则根本没有工具调用 —— 于是内核的 `acp_summary` 消息成为唯一载体。内核把它渲染为 role `system`,但严格的 OpenAI 兼容后端(SGLang)要求 index 0 处恰好一条 system 消息,所以 `systemToUser`(`src/util.ts`)把它改声为 `user` 消息,留在原锚点位置。这使头部 system 消息(前缀缓存锚点)在压缩轮之间保持字节稳定,新块不会使整段对话前缀失效。
+
+**为什么是 `user`,而不是 `system` 或伪造的工具调用。** 流中间的 `system` 消息正是 SGLang 拒绝的东西(#377)。伪造一个 `compress` 工具调用是「更纯粹」的载体,但在代理模式下需要按 id 捏造 assistant `tool_calls` + user `tool_result` 对、在请求里声明该工具、还要处理没有真实调用的预检块 —— 远比改声一条独立笔记侵入得多。`user` 消息允许出现在对话任何位置,是同时满足 SGLang 单 system 规则与前缀缓存稳定的最小改动。接受的取舍:摘要是被折叠历史的替身,把它改声成 user 回合是一种模型能容忍的语义错位(它被明确标记为 `[Compressed conversation section]`)。
+
+**两种模式能共存吗?**
+
+- **同一代理实例:可以,且是设计使然。** 一个代理同时服务插件客户端与普通客户端;`pluginMode` 按请求判定(`x-bili-plugin` header)、按会话绑定(`session.metadata.pluginAgent`)。启动器复用已在跑的代理。
+- **同一会话:模式是粘滞的。** 插件模式创建的会话保持插件模式(metadata 继承);普通会话只能被*升级*为插件模式 —— 当带匹配会话 id 的插件请求到来(header 优先)—— 且永不降级。实际上 plain→plugin 升级要求插件客户端的会话 id 与既有普通会话 id 相同,而这不会发生(各客户端自生成 id)。
+- **跨模式块风险:仅理论存在。** 它需要同一个会话 id 跨越一次模式切换。plugin→proxy 安全(工具调用在共享历史里);proxy→plugin 可能孤立代理创建的块摘要(其工具调用不在 agent 历史里,而 agent 视图跳过 `acp_summary`)—— 但那需要上述的 id 匹配,实际不会发生。
+
+**如何验证一次压缩真的落地了。** 执行 `compress` 后,代理以纯 assistant 文本发出确认标记(`📦 [ACP] Compressed …`)—— 但在持续上下文压力下曾观察到模型*自行写出该标记格式*却从未调用工具(#717):约 2 小时内 17 次假「压缩」,真实用量一路涨到 89%。因此转录中可见的标记行不是持久化的证明 —— 先以 `acp_status`(块数增加、可压缩区间起点前移)核实再采信。作为兜底,代理会剥离模型自行发出的任何形似标记的行并记 `[marker-echo]` 警告,nudge 与注入提示也都明确声明标记只由代理发出。
+
+## 单写者:哪份拷贝归谁管(#991)
+
+一台机器上每一份 bili 存在物恰好有**一个写者** —— 装它的那个东西负责更新它,其他任何东西都不就地覆盖那份拷贝:
+
+| Lane | 拷贝住在哪里 | 由谁更新 |
+|------|---------------|------------|
+| 全局 `bili` | npm global(`npm i -g billion-context`) | `bili update` / 后台自动更新 |
+| **pi** | pi 的包管理器(npm 形态) | **`pi update`** —— bili 从不覆盖 |
+| **opencode** | opencode 的插件目录 | **opencode 的插件管理器** —— bili 从不覆盖 |
+| **dsh** | 每个 profile 的 pnpm store | 周期性检查按 profile 重跑 dsh 插件通道 —— 由全局 bili 自更新驱动,**或在全局没跑时由 profile 拷贝自己的代理驱动**(dsh 市场安装,#1196);手动:`dsh plugin add billion-context@latest`。pnpm 硬链接 store 绝不可就地覆盖拷贝 |
+| omp / claude / codex / kimi / zcode | 无拷贝 —— 条目指向全局 bili 安装 | 随全局拷贝一起更新 |
+| **hermes** | `~/.hermes/plugins/billion-context/`(拷贝文件 + 指向全局 dist 的 `bili.json` sidecar) | **`bili plugin update hermes`** 重新拷文件;sidecar 跟随全局安装 |
+
+这在代码里强制,不只是约定:自更新器(`src/update.ts` → `hostManagedInstall`)识别 pnpm 虚拟 store(`.pnpm`)或宿主 agent 树(pi / opencode / dsh / kimi / omp home)下的安装目录并**跳过**它们;`installViaTarball` 从结构上拒绝它们,直接调用方也无法损坏 store。混用*命令*没问题(`dsh plugin add` ≡ `bili plugin install dsh` —— 同一通道、同一记录);混用*写者*才是守卫禁止的事。`bili plugin update [client]` 是唯一能驱动每条 lane 走各自 owner 的命令,并打印逐 lane 更新路径(`bili plugin list` 显示同样的逐 lane 通道)。
