@@ -42,6 +42,8 @@
 
 ---
 
+> **Cache health at a glance:** a healthy session keeps a **95–97%** prefix-cache hit rate — compression itself costs ≤2%. Sustained lower? Check attribution with `/acp` or `/acp-cache` (see [FAQ](#faq)); usual causes, in order: upstream cache TTL expiry · model switch · a bili bug (please report) · other/unknown.
+
 ## Community
 
 QQ Group:
@@ -273,14 +275,17 @@ Everything that doesn't fit in one Quickstart line — how each client's lanes a
 
 ## FAQ
 
-**How do I check my cache hit rate?** Every request logs
-`[acp-usage] round N input=X cached=Y (cache hit Z%)` to the log file. To find
-out *why* a prefix stopped hitting, run `/acp-cache` in opencode or dsh (or let
-the model call the `acp_cache` tool where the bili MCP server is registered):
-it pairs adjacent requests of the session and classifies each pair —
-pure-append / mid-stream-rewrite / prefix-stable-miss — attributing each break
-to the proxy rebuild, the client change, or both (#1254/#1266). Same report
-over HTTP: `GET /__bili/cache-report`.
+**How do I check my cache hit rate?** Don't dig through logs — run `/acp`
+or `/acp-cache` and click the localhost URL it prints: the session page shows
+the cache hit-rate **line chart** plus a per-break **attribution** of why
+each prefix stopped hitting (adjacent-request pairing: pure-append /
+mid-stream-rewrite / prefix-stable-miss, #1254/#1266). Rule of thumb:
+**compression itself costs ≤2%** — a healthy session sits at **95–97%**. When
+you see less, the report tells you which of the usual suspects it was, in this
+order: ① upstream cache TTL expiry, ② a model switch, ③ a bili bug (report it
+with the page attached), ④ other/unknown. Same report over HTTP:
+`GET /__bili/cache-report`; the raw per-request `[acp-usage]` lines still land
+in the log file for deep dives.
 
 **What does `/acp` show?** In clients with the native plugin (opencode, dsh),
 `/acp` renders the ACP status panel of the current conversation straight from

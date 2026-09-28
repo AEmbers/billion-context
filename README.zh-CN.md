@@ -42,6 +42,8 @@
 
 ---
 
+> **缓存健康速览：**健康会话的前缀缓存命中率在 **95–97%** 左右——压缩本身代价 ≤2%。持续低于这个数，用 `/acp` 或 `/acp-cache` 查归因（见[常见问题](#常见问题)）；常见原因依次：上游缓存 TTL 到期 · 切换模型 · bili 的 bug（欢迎提报）· 其他/未知。
+
 ## 社区
 
 QQ群:
@@ -244,8 +246,7 @@ curl -s http://localhost:8787/__bili/stats
 
 ## 常见问题
 
-**怎么查缓存命中率?** 每个请求都会向日志文件写一行
-`[acp-usage] round N input=X cached=Y (cache hit Z%)`。想知道前缀缓存*为什么*断了,在 opencode 或 dsh 里执行 `/acp-cache`(或让模型调用 `acp_cache` 工具,需已注册 bili MCP server):它把会话内相邻请求两两配对、逐对分类 —— pure-append(纯追加)/ mid-stream-rewrite(流中重写)/ prefix-stable-miss(前缀稳定但未命中)—— 并把每次断点归因到代理重建、客户端变更或两者(#1254/#1266)。HTTP 同款报告:`GET /__bili/cache-report`。
+**怎么查缓存命中率？** 不用翻日志——直接 `/acp` 或 `/acp-cache`，点击输出的 localhost 链接：会话页有缓存命中率**折线图**，以及每个断点的**归因**（相邻请求两两配对：pure-append 纯追加 / mid-stream-rewrite 流中重写 / prefix-stable-miss 前缀稳定但未命中，#1254/#1266）。经验值：**压缩本身只吃掉 ≤2%**，健康会话稳在 **95–97%**；低于这个值时，报告的归因会告诉你是哪类原因，按概率排序：①上游缓存 TTL 到期 ②切换了模型 ③bili 的 bug（带报告页面提 issue）④其他/未知。HTTP 同款：`GET /__bili/cache-report`；每个请求的 `[acp-usage]` 行仍会落日志，供深挖。
 
 **`/acp` 显示什么?** 带原生插件的客户端(opencode、dsh)里,`/acp` 直接从代理取当前会话的 ACP 状态面板(会话、块、可压缩区间、用量);首个模型请求到来前显示空闲提示。`/acp-cache [full]` 打印上面的缓存报告。
 
