@@ -160,8 +160,17 @@ export function stampPromptCacheKey(event: unknown, ctx: Ctx, agent: string): Re
         // expansion; the proxy consumes (and strips) the stamped pck exactly
         // as on the launcher lanes. Anything the interceptor would NOT
         // rewrite keeps #1403's guarantee — never stamp where the proxy
-        // cannot see it.
+        // cannot see it. The install flag alone is not routing evidence — it
+        // outlives routing (failed bootstrap, or proxy death + respawn
+        // give-up: onGiveUp clears BILLION_CONTEXT_PROXY but not the flag),
+        // and an un-routed stamped request rides verbatim into strict-schema
+        // upstreams (#1403's 400). Live claim = same env-keyed signal
+        // ownsCompaction / registerTools / runtime-info use; bootstrap
+        // rewrites it on (re-)establishment so degrades/recovery track the
+        // traffic. Round 1 inside the pre-bootstrap window misses the stamp
+        // and self-heals on round 2.
         if (!nativeInterceptInstalled()) return undefined;
+        if (detectProxyBase(ctx.model?.baseUrl) === undefined) return undefined;
         const base = ctx.model?.baseUrl ?? "";
         const expanded = /\/v\d+\/?$/.test(base) ? `${base.replace(/\/+$/, "")}/chat/completions` : base;
         if (!isModelApiUrl(base) && !isModelApiUrl(expanded)) return undefined;
