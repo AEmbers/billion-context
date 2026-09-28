@@ -194,7 +194,7 @@ overwrites that copy in place:
 | global `bili` | npm global (`npm i -g billion-context`) | `bili update` / background auto-update |
 | **pi** | pi's package manager (npm form) | **`pi update`** — bili never overwrites it |
 | **opencode** | opencode's plugin dir | **opencode's plugin manager** — bili never overwrites it |
-| **dsh** | each profile's pnpm store | a periodic check re-runs dsh's plugin channel per profile — driven by the global bili self-update **or by the profile copy's own proxy** when the global isn't running (dsh-market installs, #1196); manual: `dsh plugin add billion-context@latest`. pnpm's hardlinked store must never be copied over in place |
+| **dsh** | each profile's pnpm store | a periodic check re-runs dsh's plugin channel per profile — driven by the global bili self-update **or by the profile copy's own proxy** when the global isn't running (dsh-market installs, #1196); manual: `dsh plugin add billion-context@latest`. pnpm's hardlinked store must never be copied over in place. Exception: the `desktop` profile is owned exclusively by the deepseek-harness Desktop app (#1575) — its plugins come from the app's in-app plugin manager, and bili never drives `dsh plugin` against it |
 | omp / claude / codex / kimi / zcode | no copy — entries point at the global bili install | they update together with the global copy |
 | **hermes** | `~/.hermes/plugins/billion-context/` (copied files + `bili.json` sidecar pointing at the global dist) | **`bili plugin update hermes`** re-copies the files; the sidecar tracks the global install |
 

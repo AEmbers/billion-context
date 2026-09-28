@@ -127,6 +127,43 @@ test("refreshDshProfileBundles: one profile's failure does not stop the rest and
     }
 });
 
+test("refreshDshProfileBundles: the Desktop-owned `desktop` profile is skipped with a hint (#1575)", async () => {
+    const home = makeHome({
+        a: { dependencies: { "billion-context": "^0.1.119" } },
+        desktop: { dependencies: { "billion-context": "^0.1.119" } },
+    });
+    const calls: string[] = [];
+    const logs: string[] = [];
+    const log = (level: string, msg: string): void => logs.push(`${level}: ${msg}`);
+    try {
+        _setDshRunnersForTest({ async: recordingAsyncRunner(calls) });
+        await refreshDshProfileBundles("0.1.121", log, { ...process.env, DSH_HOME: home });
+        assert.deepEqual(calls, ["plugin --profile a add billion-context@0.1.121"]);
+        assert.ok(logs.some((l) => l.includes("dsh profile desktop") && l.includes("skipping the refresh")));
+        assert.ok(logs.some((l) => l.includes("refreshed 1 dsh profile bundle(s) to 0.1.121")));
+    } finally {
+        _setDshRunnersForTest(undefined);
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test("refreshDshProfileBundles: a desktop-only home spawns nothing and warns nothing (#1575)", async () => {
+    const home = makeHome({ desktop: { dependencies: { "billion-context": "^0.1.119" } } });
+    const calls: string[] = [];
+    const logs: string[] = [];
+    const log = (level: string, msg: string): void => logs.push(`${level}: ${msg}`);
+    try {
+        _setDshRunnersForTest({ async: recordingAsyncRunner(calls) });
+        await refreshDshProfileBundles("0.1.121", log, { ...process.env, DSH_HOME: home });
+        assert.deepEqual(calls, []);
+        assert.ok(!logs.some((l) => l.startsWith("warn")), JSON.stringify(logs));
+        assert.ok(logs.some((l) => l.includes("dsh profile desktop") && l.includes("skipping the refresh")));
+    } finally {
+        _setDshRunnersForTest(undefined);
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
 test("refreshDshProfileBundles: no profiles root or no bili deps → silent no-op", async () => {
     const logs: string[] = [];
     const log = (level: string, msg: string): void => logs.push(`${level}: ${msg}`);

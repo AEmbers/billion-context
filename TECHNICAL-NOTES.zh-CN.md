@@ -80,7 +80,7 @@ bili 永不拥有用户数据:每个被启动的客户端都跑在**真实 home*
 | 全局 `bili` | npm global(`npm i -g billion-context`) | `bili update` / 后台自动更新 |
 | **pi** | pi 的包管理器(npm 形态) | **`pi update`** —— bili 从不覆盖 |
 | **opencode** | opencode 的插件目录 | **opencode 的插件管理器** —— bili 从不覆盖 |
-| **dsh** | 每个 profile 的 pnpm store | 周期性检查按 profile 重跑 dsh 插件通道 —— 由全局 bili 自更新驱动,**或在全局没跑时由 profile 拷贝自己的代理驱动**(dsh 市场安装,#1196);手动:`dsh plugin add billion-context@latest`。pnpm 硬链接 store 绝不可就地覆盖拷贝 |
+| **dsh** | 每个 profile 的 pnpm store | 周期性检查按 profile 重跑 dsh 插件通道 —— 由全局 bili 自更新驱动,**或在全局没跑时由 profile 拷贝自己的代理驱动**(dsh 市场安装,#1196);手动:`dsh plugin add billion-context@latest`。pnpm 硬链接 store 绝不可就地覆盖拷贝。例外:`desktop` profile 由 deepseek-harness 桌面应用独占拥有(#1575)—— 其插件来自应用内插件管理器,bili 从不对其驱动 `dsh plugin` |
 | omp / claude / codex / kimi / zcode | 无拷贝 —— 条目指向全局 bili 安装 | 随全局拷贝一起更新 |
 | **hermes** | `~/.hermes/plugins/billion-context/`(拷贝文件 + 指向全局 dist 的 `bili.json` sidecar) | **`bili plugin update hermes`** 重新拷文件;sidecar 跟随全局安装 |
 

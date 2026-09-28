@@ -17,6 +17,19 @@ import { resolveDshHome } from "./client-config.js";
 
 export const DSH_PACKAGE = "billion-context";
 
+// #1575: the deepseek-harness Desktop app (Electron) exclusively owns the
+// profile named `desktop` ($DSH_HOME/profiles/desktop) plus its package-manager
+// state — "The CLI cannot boot or mutate this profile" (its apps/desktop/
+// README.md). Its plugins are installed by the in-app plugin manager (bundled
+// pnpm), so bili treats that profile as a host-managed lane (#991): it reports
+// on it but never drives `dsh plugin` against it, never strips legacy blocks
+// from it, and never refreshes it. Its copy updates through the app only.
+export const DSH_DESKTOP_PROFILE = "desktop";
+
+export function isDshDesktopProfile(name: string): boolean {
+    return name === DSH_DESKTOP_PROFILE;
+}
+
 const DSH_EXEC_TIMEOUT_MS = 5 * 60 * 1000; // cold pnpm store + slow network
 
 /** Every profile dir under $DSH_HOME/profiles/*. dsh creates a profile dir
@@ -287,7 +300,10 @@ export async function runDshPluginAsync(args: string[], env: NodeJS.ProcessEnv =
  *  the proxy never drift apart again (#953). Best-effort by contract: never
  *  throws — a failed refresh degrades to the pre-fix behavior (stale profile
  *  copy until the next manual update), never to a broken update loop.
- *  Profiles pinned to a local source (link:/file:/git specs) are left alone. */
+ *  Profiles pinned to a local source (link:/file:/git specs) are left alone.
+ *  The `desktop` profile is skipped entirely (#1575) — the Desktop app owns
+ *  it exclusively; its billion-context updates through the in-app plugin
+ *  manager only. */
 export async function refreshDshProfileBundles(
     targetVersion: string,
     log: (level: "info" | "warn", msg: string) => void,
@@ -299,7 +315,11 @@ export async function refreshDshProfileBundles(
     } catch {
         return; // dsh has never run on this machine — nothing to keep in step
     }
-    const targets = dirs.filter((dir) => dshProfileDependsOnBili(dir));
+    const desktopDir = dirs.find((dir) => isDshDesktopProfile(path.basename(dir)));
+    if (desktopDir !== undefined && dshProfileDependsOnBili(desktopDir)) {
+        log("info", `[update] dsh profile ${DSH_DESKTOP_PROFILE}: owned by the deepseek-harness Desktop app — skipping the refresh; update billion-context there in the app's plugin manager, or with 'dsh plugin --profile ${DSH_DESKTOP_PROFILE} add ${DSH_PACKAGE}@${targetVersion}' while the app is closed`);
+    }
+    const targets = dirs.filter((dir) => !isDshDesktopProfile(path.basename(dir)) && dshProfileDependsOnBili(dir));
     if (targets.length === 0) return;
     let refreshed = 0;
     for (const dir of targets) {

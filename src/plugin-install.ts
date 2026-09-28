@@ -39,7 +39,7 @@ import { applyEdits, modify as jsoncModify, parse as jsoncParse, type ParseError
 import { resolveDshHome, resolveHermesHome, resolveKimiHome, resolvePiHome } from "./client-config.js";
 import { clearClaudeNativePort, resolveClaudeNativePort, saveClaudeNativePort } from "./config.js";
 import { isPidAlive, isProxyInstanceFile, readProxyInstanceFile } from "./instance.js";
-import { DSH_PACKAGE, dshBundleInstalled, dshHasLegacyManagedBlock, dshProfileDependsOnBili, dshProfileDepSpec, dshProfileDirs, isRegistryDepSpec, planDshSpawn, refreshDshProfileBundles, runDshPlugin, stripLegacyManagedBlock } from "./dsh-channel.js";
+import { DSH_DESKTOP_PROFILE, DSH_PACKAGE, dshBundleInstalled, dshHasLegacyManagedBlock, dshProfileDependsOnBili, dshProfileDepSpec, dshProfileDirs, isDshDesktopProfile, isRegistryDepSpec, planDshSpawn, refreshDshProfileBundles, runDshPlugin, stripLegacyManagedBlock } from "./dsh-channel.js";
 import { fetchRegistryVersion } from "./update.js";
 import { restoreKimiBackup, unrouteKimi } from "./kimi/native.js";
 import { inspectZcodeRouting, resolveZcodeDataDir } from "./zcode/json-edit.js";
@@ -1323,10 +1323,14 @@ function opencodeStatus(): string {
 function dshInstall(): string {
     const root = selfPackageRoot();
     requireDistFile(path.join(root, "dist", "agent", "dsh-native.js"));
-    const dirs = dshProfileDirs();
+    const all = dshProfileDirs();
+    const dirs = all.filter((dir) => !isDshDesktopProfile(path.basename(dir)));
     const notes: string[] = [];
     for (const dir of dirs) {
         if (stripLegacyManagedBlock(dir)) notes.push(`${path.basename(dir)}: legacy managed block stripped`);
+    }
+    if (dirs.length < all.length) {
+        notes.push(`${DSH_DESKTOP_PROFILE}: skipped — owned by the deepseek-harness Desktop app (#1575); install billion-context there in the app's plugin manager, or with 'dsh plugin --profile ${DSH_DESKTOP_PROFILE} add <spec>' while the app is closed`);
     }
     const spec = isNpmInstallForm(root) ? DSH_PACKAGE : path.resolve(root);
     for (const dir of dirs) {
@@ -1338,8 +1342,16 @@ function dshInstall(): string {
 function dshRemove(): string {
     const notes: string[] = [];
     const touched = new Set<string>();
+    let desktopNote: string | undefined;
     for (const dir of dshProfileDirs()) {
         const name = path.basename(dir);
+        if (isDshDesktopProfile(name)) {
+            // #1575: host-managed lane — no channel drives and no block stripping in this dir
+            if (dshProfileDependsOnBili(dir) || dshHasLegacyManagedBlock(dir)) {
+                desktopNote = `${DSH_DESKTOP_PROFILE}: left in place — owned by the deepseek-harness Desktop app; remove billion-context there in the app's plugin manager, or with 'dsh plugin --profile ${DSH_DESKTOP_PROFILE} remove ${DSH_PACKAGE}' while the app is closed`;
+            }
+            continue;
+        }
         if (dshProfileDependsOnBili(dir)) {
             runDshPlugin(["plugin", "--profile", name, "remove", DSH_PACKAGE]);
             touched.add(name);
@@ -1350,7 +1362,10 @@ function dshRemove(): string {
             notes.push(`${name}: legacy managed block stripped`);
         }
     }
-    if (touched.size === 0) return "nothing to remove — no dsh profile carries billion-context";
+    if (desktopNote !== undefined) notes.push(desktopNote);
+    if (touched.size === 0) {
+        return desktopNote !== undefined ? `nothing removed from CLI profiles — ${desktopNote}` : "nothing to remove — no dsh profile carries billion-context";
+    }
     return `removed bili from ${touched.size} dsh profile(s) under ${path.join(resolveDshHome(process.env), "profiles")} (${notes.join("; ")}) — restart dsh to finish`;
 }
 
@@ -2147,8 +2162,13 @@ async function updateLane(agent: PluginAgent, opts: PluginUpdateOpts, log: (leve
         } catch {
             return ["dsh: never initialized on this machine — nothing to update"];
         }
-        const targets = dirs.filter((dir) => dshProfileDependsOnBili(dir));
-        if (targets.length === 0) return ["dsh: no profile depends on billion-context — nothing to update"];
+        const targets = dirs.filter((dir) => !isDshDesktopProfile(path.basename(dir)) && dshProfileDependsOnBili(dir));
+        if (targets.length === 0) {
+            const desktopOnly = dirs.some((dir) => isDshDesktopProfile(path.basename(dir)) && dshProfileDependsOnBili(dir));
+            return desktopOnly
+                ? ["dsh: only the desktop profile depends on billion-context — it is owned by the deepseek-harness Desktop app, so there is nothing to update here"]
+                : ["dsh: no profile depends on billion-context — nothing to update"];
+        }
         const latest = await fetchRegistryVersion(opts, opts.packageName);
         if (!latest) return ["dsh: could not resolve the latest version from npm — leaving profile bundles alone"];
         const before = targets.length;

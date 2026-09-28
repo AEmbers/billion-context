@@ -233,6 +233,68 @@ test("dsh remove uninstalls through the same channel and migrates legacy blocks"
     }
 });
 
+test("dsh install/remove skip the Desktop-owned `desktop` profile (#1575)", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-desktop-"));
+    const calls: string[][] = [];
+    _setDshRunnersForTest(channelRunner(home, calls));
+    try {
+        await withEnv({ DSH_HOME: home }, async () => {
+            fs.mkdirSync(path.join(home, "profiles", "headless"), { recursive: true });
+            fs.mkdirSync(path.join(home, "profiles", "desktop"), { recursive: true });
+
+            const msg = pluginInstall("dsh");
+            assert.match(msg, /1 dsh profile/);
+            assert.match(msg, /desktop: skipped — owned by the deepseek-harness Desktop app/);
+            assert.deepEqual(calls.map((c) => c.join(" ")), [`plugin --profile headless add ${expectedSpec()}`]);
+            // no writes into the desktop profile at all — not even legacy-block migration
+            assert.ok(!fs.existsSync(path.join(home, "profiles", "desktop", "package.json")));
+            assert.ok(!fs.existsSync(path.join(home, "profiles", "desktop", "cordis.patch.yml")));
+            assert.equal(pluginStatusAll().find((r) => r.agent === "dsh")?.status, "installed as a dsh bundle in 1/2 profiles");
+
+            // a pre-#1575 install would have left the desktop profile carrying bili — remove must leave it alone
+            fs.writeFileSync(
+                path.join(home, "profiles", "desktop", "package.json"),
+                JSON.stringify({ name: "dsh-profile-desktop", dependencies: { "billion-context": "^0.1.120" }, dsh: { profile: { bundles: ["@deepseek-ai/dsh-base", "billion-context"] } } }),
+            );
+            const removed = pluginRemove("dsh");
+            assert.match(removed, /removed bili from 1 dsh profile/);
+            assert.match(removed, /headless: uninstalled via the dsh plugin channel/);
+            assert.match(removed, /desktop: left in place — owned by the deepseek-harness Desktop app/);
+            assert.deepEqual(calls.map((c) => c.join(" ")), [
+                `plugin --profile headless add ${expectedSpec()}`,
+                "plugin --profile headless remove billion-context",
+            ]);
+            const desktopManifest = JSON.parse(fs.readFileSync(path.join(home, "profiles", "desktop", "package.json"), "utf8")) as Record<string, unknown>;
+            assert.equal((desktopManifest.dependencies as Record<string, string>)["billion-context"], "^0.1.120");
+        });
+    } finally {
+        _setDshRunnersForTest(undefined);
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test("dsh remove: only the desktop profile carries billion-context → reports it, removes nothing (#1575)", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-desktop-only-"));
+    const calls: string[][] = [];
+    _setDshRunnersForTest(channelRunner(home, calls));
+    try {
+        await withEnv({ DSH_HOME: home }, async () => {
+            fs.mkdirSync(path.join(home, "profiles", "desktop"), { recursive: true });
+            fs.writeFileSync(
+                path.join(home, "profiles", "desktop", "package.json"),
+                JSON.stringify({ name: "dsh-profile-desktop", dependencies: { "billion-context": "^0.1.120" }, dsh: { profile: { bundles: ["billion-context"] } } }),
+            );
+            const removed = pluginRemove("dsh");
+            assert.match(removed, /nothing removed from CLI profiles/);
+            assert.match(removed, /desktop: left in place/);
+            assert.deepEqual(calls, []);
+        });
+    } finally {
+        _setDshRunnersForTest(undefined);
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
 test("dsh install surfaces channel failures with context", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-fail-"));
     try {

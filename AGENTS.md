@@ -104,9 +104,14 @@ against it, not ad hoc:
      copy at all, points at the global dist, follows it automatically;
    - it lives in a host world (dsh profile bundle, opencode/pi tree): updated
      through the HOST's channel — driven by a global self-update AND, when no
-     global ever runs (market-only users), by the copy's own periodic check
-     (`refreshDshProfileCopy`, #1196). Self-heal goes THROUGH the owner's
-     sanctioned channel, never around it.
+      global ever runs (market-only users), by the copy's own periodic check
+      (`refreshDshProfileCopy`, #1196). Self-heal goes THROUGH the owner's
+      sanctioned channel, never around it. Exception (#1575): the dsh
+      `desktop` profile is owned EXCLUSIVELY by the deepseek-harness Desktop
+      app (Electron) — bili treats it as a host-managed lane and NEVER drives
+      `dsh plugin` against it (no refresh, no install/remove, no
+      legacy-block stripping); its copy updates through the app's in-app
+      plugin manager only.
 3. **Terminal users get the one-copy experience via launchers** (`bili dsh`
    overlay mode loads the global dist, no persistent copy); market users get
    self-contained per-context copies. Both are first-class; the user picks by

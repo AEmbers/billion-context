@@ -40,8 +40,12 @@ Two lanes, same plugin (#941):
   require a published release that carries `dsh.bundle.patch.yml`. If dsh
   fails to boot right after an add with `ERR_MODULE_NOT_FOUND` on
   `billion-context/dsh`, the profile resolved a pre-bundle copy from a stale
-  package-metadata cache (#953) — re-add pinned: `dsh plugin --profile
-  <name> add billion-context@latest`.
+   package-metadata cache (#953) — re-add pinned: `dsh plugin --profile
+   <name> add billion-context@latest`. The `desktop` profile is skipped by
+   install and remove alike (#1575): the deepseek-harness Desktop app owns it
+   exclusively and manages its plugins through its in-app plugin manager —
+   manage billion-context there in the app, or with `dsh plugin --profile
+   desktop add|remove billion-context` while the app is closed.
 - **Auto-update keeps profiles in lockstep:** the refresh has two triggers —
   after a global self-update, AND from the **profile copy's own proxy** when
   its periodic check sees a newer registry version (so dsh plugin-market
@@ -50,9 +54,13 @@ Two lanes, same plugin (#941):
   `billion-context` dependency to the target version (the new global version
   for the global trigger, registry-latest for the self trigger), always
   through dsh's own `plugin add` channel — never an in-place copy — so the
-  loaded plugin and the proxy never drift apart again (#953); profiles
-  pinned to a local source are left alone. The refresh is best-effort,
-  retries next cycle on failure, and never fails the update or the proxy.
+   loaded plugin and the proxy never drift apart again (#953); profiles
+   pinned to a local source are left alone; the `desktop` profile is always
+   skipped (#1575) — it belongs to the Desktop app, whose bundled pnpm would
+   race the system one — so that copy converges on the app's in-app updates
+   instead (a deliberate opt-out of lockstep for that lane). The refresh is
+   best-effort, retries next cycle on failure, and never fails the update or
+   the proxy.
  - **Reported: zero proxy traffic for some transports under profile install
    (#1158, under investigation):** sessions served by some of dsh's
    `llm-pi-ai`-layer transports show NO model request ever reaching the proxy
