@@ -200,6 +200,55 @@ test("lifecycle ledger: client FIN first classifies reason=peer-fin (#1452)", as
     }
 });
 
+test("lifecycle ledger: clock-tie between FIN read and prefinish still classifies reason=peer-fin (#1562)", async () => {
+    const upstream = http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    let harness: Harness | null = null;
+    // Freeze performance.now() for the exchange: reproduces the load-induced
+    // condition where the end→prefinish gap falls below the clock's effective
+    // resolution and both markers come out equal. A strict ordering check then
+    // mislabels the close server-end; the ledger must classify ties as peer-fin
+    // (every post-response prefinish producer is downstream of the FIN read).
+    const perf = performance as unknown as { now: () => number };
+    const origNow = perf.now;
+    try {
+        perf.now = () => 1234567.89;
+        harness = await startProxy(upstream, true);
+        const base = captured.length;
+        const closed = new Promise<void>((resolve) => {
+            const req = http.request(
+                { host: "127.0.0.1", port: harness.port, path: "/v1/chat/completions", method: "POST", agent: false, headers: { "content-type": "application/json", "content-length": Buffer.byteLength(CHAT_BODY), "connection": "keep-alive" } },
+                (res) => {
+                    const s = res.socket as net.Socket;
+                    s.once("close", () => resolve());
+                    res.resume();
+                    res.on("end", () => s.end());
+                },
+            );
+            req.end(CHAT_BODY);
+        });
+        await closed;
+        const deadline = Date.now() + 2000;
+        let line = captured.slice(base).find((c) => /closed reason=peer-fin .* reqs=1$/.test(c.msg));
+        while (!line && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+            line = captured.slice(base).find((c) => /closed reason=peer-fin .* reqs=1$/.test(c.msg));
+        }
+        assert.ok(line, `expected reason=peer-fin ledger line under clock tie, got: ${captured.slice(base).filter((c) => c.msg.includes("closed reason=")).map((c) => c.msg).join(" | ")}`);
+    } finally {
+        perf.now = origNow;
+        setLogCapture(null);
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});
+
 test("lifecycle ledger + kat knob: idle keep-alive close classifies reason=idle-timeout as clean FIN (#1452)", async () => {
     const upstream = http.createServer((_req, res) => {
         // Upstream stays keep-alive so bili keeps the client socket open and

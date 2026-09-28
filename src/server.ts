@@ -516,6 +516,12 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
         // both sides routinely close within the same millisecond — the receiver
         // of a FIN reacts by ending its own side — so only sub-ms resolution
         // preserves the causal order that decides who initiated (#1452).
+        // Under load the clock's effective resolution can coarsen below the
+        // end→prefinish gap, so both markers may come out EQUAL. Every
+        // post-response prefinish producer is causally downstream of the peer
+        // FIN read (socketOnEnd → end()), so a tie means peer-fin-first or
+        // indistinguishable from it — classified as peer-fin via `<=` below
+        // (a strict `<` mislabeled these as server-end, #1562).
         socket.on("prefinish", () => { rec.serverEndAt = performance.now(); });
         socket.on("end", () => { rec.peerFinAt = performance.now(); });
         socket.on("error", (err) => {
@@ -535,7 +541,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
                 ? "clienterror-backstop"
                 : rec.errored
                     ? `error(${rec.errored})`
-                    : rec.peerFinAt !== null && (rec.serverEndAt === null || rec.peerFinAt < rec.serverEndAt)
+                    : rec.peerFinAt !== null && (rec.serverEndAt === null || rec.peerFinAt <= rec.serverEndAt)
                         ? "peer-fin"
                         : idleForBudget
                             ? "idle-timeout"
