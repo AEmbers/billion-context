@@ -108,7 +108,7 @@ import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
 import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
-import { evaluateChain, extractChainCarriers, stampOutbound } from "./chain-checkpoint.js";
+import { evaluateChain, extractChainCarriers, stampOutbound, stripEmbeddedChainCarriers } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "./util.js";
 
@@ -3121,6 +3121,10 @@ async function prepareAnthropic(
     if (strippedMarkerLines > 0) {
         log("info", `[${sessionId}] stripped ${strippedMarkerLines} ACP status marker line(s) from incoming history (ephemeral proxy status, issue #1029)`);
     }
+    const strippedCarriers = stripEmbeddedChainCarriers(parsed, "anthropic");
+    if (strippedCarriers > 0) {
+        log("info", `[${sessionId}] stripped ${strippedCarriers} embedded chain checkpoint(s) from incoming history (leaked egress control data, issue #1542)`);
+    }
 
     try {
         const { msgs, cacheControls } = anthropicToCore(parsed);
@@ -3350,6 +3354,10 @@ async function prepareOpenai(
     const strippedMarkerLines = stripAcpStatusMarkers(parsed.messages);
     if (strippedMarkerLines > 0) {
         log("info", `[${sessionId}] stripped ${strippedMarkerLines} ACP status marker line(s) from incoming history (ephemeral proxy status, issue #1029)`);
+    }
+    const strippedCarriers = stripEmbeddedChainCarriers(parsed, "openai");
+    if (strippedCarriers > 0) {
+        log("info", `[${sessionId}] stripped ${strippedCarriers} embedded chain checkpoint(s) from incoming history (leaked egress control data, issue #1542)`);
     }
 
     try {
@@ -3606,6 +3614,11 @@ async function prepareGoogle(
     const shouldInject = opts.compress.injectTool && !isTitleGen;
     const injectTools = shouldInject && !pluginMode;
 
+    const strippedCarriers = stripEmbeddedChainCarriers(parsed, "google");
+    if (strippedCarriers > 0) {
+        log("info", `[${sessionId}] stripped ${strippedCarriers} embedded chain checkpoint(s) from incoming history (leaked egress control data, issue #1542)`);
+    }
+
     try {
         const { msgs, systemText } = googleToCore(parsed);
         googleClientSystem = systemText;
@@ -3838,6 +3851,10 @@ async function prepareResponses(
     const strippedMarkerLines = stripAcpStatusMarkers(parsed.input);
     if (strippedMarkerLines > 0) {
         log("info", `[${sessionId}] stripped ${strippedMarkerLines} ACP status marker line(s) from incoming history (ephemeral proxy status, issue #1029)`);
+    }
+    const strippedCarriers = stripEmbeddedChainCarriers(parsed, "responses");
+    if (strippedCarriers > 0) {
+        log("info", `[${sessionId}] stripped ${strippedCarriers} embedded chain checkpoint(s) from incoming history (leaked egress control data, issue #1542)`);
     }
 
     const shouldInject = opts.compress.injectTool;
