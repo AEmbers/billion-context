@@ -95,11 +95,7 @@ QQ群:
 - **`search_context`** —— 在压缩摘要与可见消息中做关键词检索。
 - **`acp_status`** —— 上下文用量概览 + 哪些区间仍可压缩。
 
-四个可选扩展各自默认关闭,完整语义(开启开关、作用域、注意事项)见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md):**`absorb`** 对超大工具结果(构建、日志、grep)在到达时即时蒸馏为紧凑摘要,不必等折叠轮(#605);**`acp_rule`** 记录原则级提醒(教训、要求记住的行为、撞到的大坑),硬性受保护、每次折叠都保留在上下文中(#1399、[billion-context-pi#433](https://github.com/ranxianglei/billion-context-pi/issues/433));**`acp_retrieve`** 把超大结果放入内容寻址存储、线上只留字节稳定的 ID 引用,折叠同样无损、按需取回(#1097/#1179);**`image_full`** 对截图类图像在到达时降采样一次,降低进入 wire 的计费像素,可按会话恢复原始分辨率(#1095)。
-
-保护开关决定哪些工具结果能穿过折叠:`compress.protectedLatestTools` 让累积型工具(todo/任务清单)的最新快照不被折叠(#639);`compress.protectedTools` 对低频高价值工具的全部实例硬排除;`compress.neverPreserveRecentTools` / `compress.preserveRecentTools` 调整最近区豁免表 —— 例如批量读文件「折叠→重读」死循环的推荐解法是 `["read"]`(#1198/#1277)。均详见 [CONFIGURATION.zh-CN.md](CONFIGURATION.zh-CN.md)。
-
-**如何确认压缩真的生效了。** 代理执行 `compress` 后会以普通 assistant 文本发出确认标记(`📦 [ACP] Compressed …`)—— 但曾观察到模型在持续上下文压力下*自行书写该标记格式*而从未调用工具(#717):约 2 小时内 17 次假"压缩",真实用量一路爬到 89%。因此对话中看到的标记行本身不是持久化完成的证据 —— 请先用 `acp_status` 复核(块数 +1、可压缩区间起点前移)再采信。作为兜底,代理会剥离模型自发的标记形文本并记录 `[marker-echo]` 警告;注入的 nudge 与系统提示词也明确声明标记只由代理发出。
+模型会自主使用以上工具自主管控上下文，无需人工干预。
 
 ## 该选哪个?
 
@@ -141,9 +137,9 @@ npm install -g billion-context
 
 3种方式 —— 任选其一:
 
-- **原生插件(免启动器):** `bili plugin install <client>` —— bili 成为客户端内的插件,照常启动客户端即可.
-- **启动器(最省事):** `bili <client>` 一条命令拉起代理 + 客户端,不碰任何真实配置文件.
-- **改url(持久化):** 在客户端 baseURL 前面加上代理地址 + `/bili/`。
+- **原生插件(最原生):** `bili plugin install <client>` —— bili 成为客户端内的插件,照常启动客户端即可.
+- **启动器(免安装):** `bili <client>` 一条命令拉起代理 + 客户端,不碰任何真实配置文件.
+- **改url(最通用):** 在客户端 baseURL 前面加上代理地址 + `/bili/`。
 
 三种方式背后的机制细节(插件生命周期、runtime-info 协议、注入优先级)见 [TECHNICAL-NOTES.zh-CN.md](TECHNICAL-NOTES.zh-CN.md)。
 
@@ -170,12 +166,6 @@ bili plugin remove <client>     # 卸载(dsh 经同一通道移除;配置快照�
 - **opencode:** 把裸 npm 包名直接写进你真实配置的插件列表 —— `"plugin": ["billion-context"]`(仅 npm 形态;git checkout 没有已发布入口)。包通过 `exports["./server"]` → `dist/agent/opencode-native.js` 暴露插件入口,opencode 用自己的 Npm.add 机制加载,插件自拉起的行为与 bili 安装的形态完全一致。另外要做两件 bili 安装器会替你做的事:在同一份配置里设 `"compaction": { "auto": false }`(否则 OpenCode 的原生自动压缩会双重压缩),并先手工备份该配置文件。
 
 pi / omp / kimi / claude 没有客户端侧通道 —— 它们的配置条目由 `bili plugin install <client>` 代写(kimi 的声明式 `kimi.plugin.json` + 注册记录、claude 的受管 settings 块等)。
-
-插件加载时**自拉起自己的代理**(已有健康实例且通过附着门禁则直接复用;父进程 pid 看门狗在客户端退出时收掉它),把模型流量改写到 `<proxy>/bili/<上游URL>`,注册 `compress` / `decompress` / `acp_status` 为客户端原生工具(plugin 模式),并把客户端**自己的模型配置**上报给代理让压缩预算用真实窗口而不是注册表猜测。退出开关:`BILI_NATIVE_PI=0`、`BILI_NATIVE_OMP=0`、`BILI_NATIVE_OPENCODE=0`、`BILI_NATIVE_DSH=0`、`BILI_NATIVE_KIMI=0`、`BILI_NATIVE_HERMES=0`、`BILI_NATIVE_ZCODE=0`。完整机制:[TECHNICAL-NOTES.zh-CN.md](TECHNICAL-NOTES.zh-CN.md)。
-
-**附着门禁(#1335)。** 原生 hook 会附着到端口上任何应答者,因此三类监听者区别对待:自己会话拉起的代理(出生即 armed)✅ 附着;其他会话的 armed 共享代理(watcher 集,#1186)✅ 附着——共享本就是设计;手工 `bili start` 常驻守护进程 ❌ **默认不附着**——它没有生命周期属主(拒绝 watcher 注册、不随会话退出、常是旧版本代码,正是 #1322 的成因)。hook 附着前先探测候选者 `/__bili/health` 里的 `watchdog.armed`:armed → 附着并注册 watcher(现状不变);unarmed、或 pre-#1330 构建根本不报 `watchdog` 字段(不可验证,按 unarmed 处理)→ **不附着**,本会话自拉起一个临时代理(临时端口、出生即 armed、随最后一个会话消亡,#1186 watcher 语义)。顺带修掉版本偏斜:每个会话跑的都是**当前安装的** bili,而不是陈旧守护进程携带的旧代码。代价:无 armed 代理时每会话多一个短命代理进程(会话状态在磁盘上共享,压缩连续性不受影响);多实例告警(#394)相应变多。**逃生舱:** 刻意用常驻守护进程承载原生 hook → 配置文件设 `"native": { "attachExternal": true }` 或 `BILI_NATIVE_ATTACH_EXTERNAL=1`,恢复对任何 code/lane 兼容监听者的附着(守护进程的寿命与版本由你自己负责)。kimi/dsh 的显式用户指定附着(`BILLION_CONTEXT_ATTACH` / 预置 `BILLION_CONTEXT_PROXY`)完全不经过发现路径,构造上豁免。
-
-**Runtime-info 协议(#955)。** 原生插件读取客户端自己将要使用的模型配置并推给代理(逐请求头 + 自举上报);代理解析上下文窗口时优先采用这份真相,而不是 models.dev 注册表/内置表。协议细节、解析顺序与现有实现:[TECHNICAL-NOTES.zh-CN.md](TECHNICAL-NOTES.zh-CN.md)。
 
 注意:
 
