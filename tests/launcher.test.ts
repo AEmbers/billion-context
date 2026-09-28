@@ -66,6 +66,7 @@ import {
     writeDshAcpPatch,
     dshPluginEntry,
     writeDshClientShimFiles,
+    writeDshClientShim,
     dshArgsWithPatch,
     buildCodexMcpArgs,
     prepareCodexHome,
@@ -2951,6 +2952,25 @@ test("writeDshClientShimFiles + dshPluginEntry: resolvable shim yields the bare 
         fs.writeFileSync(path.join(other, "keep.txt"), "x");
         assert.equal(writeDshClientShimFiles(other, path.join(dir, "missing.js"), clientBundle, "0.0.0"), false);
         assert.equal(fs.readFileSync(path.join(other, "keep.txt"), "utf8"), "x");
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("writeDshClientShim: stamps the real bili version into the shim package.json (#1590)", (t) => {
+    const root = selfPackageRoot();
+    if (!fs.existsSync(path.join(root, "dist", "agent", "dsh-native.js")) || !fs.existsSync(path.join(root, "dist", "agent", "dsh-native-client.js"))) {
+        t.skip("needs a built dist (npm run build first)");
+        return;
+    }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-shimver-"));
+    try {
+        const home = path.join(dir, ".dsh");
+        fs.mkdirSync(home);
+        assert.equal(writeDshClientShim(home), true);
+        const shimPkg = JSON.parse(fs.readFileSync(path.join(home, "node_modules", "billion-context", "package.json"), "utf8"));
+        const repoPkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+        assert.equal(shimPkg.version, repoPkg.version);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }

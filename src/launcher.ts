@@ -2193,7 +2193,7 @@ export function writeDshClientShim(dshHome: string): boolean {
     const clientBundle = selfDistFile("agent/dsh-native-client.js");
     let version = "0.0.0";
     try {
-        version = JSON.parse(fs.readFileSync(path.join(path.dirname(path.dirname(hostBundle)), "package.json"), "utf8")).version ?? version;
+        version = JSON.parse(fs.readFileSync(path.join(selfPackageRoot(), "package.json"), "utf8")).version ?? version;
     } catch {}
     return writeDshClientShimFiles(path.join(dshHome, "node_modules", "billion-context"), hostBundle, clientBundle, version);
 }
