@@ -5534,6 +5534,12 @@ async function forward(
         }
         return;
     }
+    // #1536: origin of the URL fetched for THIS request — cache-invalidation
+    // attribution identity shared by the plugin pipes below and the compress
+    // loop further down (proxyUrl is the routing CONNECT-proxy, not the
+    // endpoint; the outer upstreamOrigin is the configured route target).
+    let targetOrigin: string | undefined;
+    try { targetOrigin = new URL(upstreamUrl).origin; } catch { targetOrigin = undefined; }
     // Plugin mode: the agent's native loop owns the tool surface — pass the
     // response through VERBATIM (a model-emitted compress call must reach the
     // plugin untouched) while sniffing usage so lastInputTokens (the input to
@@ -5581,6 +5587,7 @@ async function forward(
                             log,
                             label: prepared.session.id,
                         }),
+                        targetOrigin,
                     );
                 } else {
                     // #732/#821: the plugin pipe re-issues the agent's own body
@@ -5604,10 +5611,11 @@ async function forward(
                             log,
                             label: prepared.session.id,
                         }),
+                        targetOrigin,
                     );
                 }
             } else {
-                await pipePluginJson(pluginBody, res, prepared.session, prepared.protocol);
+                await pipePluginJson(pluginBody, res, prepared.session, prepared.protocol, targetOrigin);
             }
         } finally {
             clearUpstreamTimer();
@@ -5846,12 +5854,9 @@ async function forward(
             };
             // #1455: loop-originated upstream responses (re-request/retries) are NOT covered by the outer tee above — they were invisible to ACP_DUMP_SSE until now.
             const loopDumpDir = opts.dumpSse;
-            // #1536: LLM target origin for cache-invalidation attribution (proxyUrl is the routing CONNECT-proxy, not the endpoint).
-            let upstreamOrigin: string | undefined;
-            try { upstreamOrigin = new URL(upstreamUrl).origin; } catch { upstreamOrigin = undefined; }
             const loop = runCompressLoop(
                 streamToRead,
-                { core, config, messages: prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages, compressMessages: prepared.originalMessages, session: prepared.session, log: ctx.log, proxyUrl, upstreamOrigin, protocol: prepared.protocol, textProtocol, debug: opts.debug, refreshFolded, visibilityMarkers, dumpSse: loopDumpDir ? (name, stream) => dumpStreamToFile(stream, loopDumpDir, name) : undefined },
+                { core, config, messages: prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages, compressMessages: prepared.originalMessages, session: prepared.session, log: ctx.log, proxyUrl, upstreamOrigin: targetOrigin, protocol: prepared.protocol, textProtocol, debug: opts.debug, refreshFolded, visibilityMarkers, dumpSse: loopDumpDir ? (name, stream) => dumpStreamToFile(stream, loopDumpDir, name) : undefined },
                 parsedReq,
                 { url: upstreamUrl, headers: reqHeaders, wireTransform },
                 adapter,
