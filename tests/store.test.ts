@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -225,6 +225,39 @@ test("envelope round-trip: dirty flag gates the write; reload restores the store
     } finally {
         _setStoreForTest(new SessionStore({ enabled: false }));
         rmSync(PERSIST_TMP, { recursive: true, force: true });
+    }
+});
+
+test("flushAll retries a dirty content store after a transient write failure", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bili-ccr-flushall-"));
+    const logs: string[] = [];
+    const store = new SessionStore({ dir, debounceMs: 60_000, log: (level, msg) => logs.push(`${level}:${msg}`) });
+    _setStoreForTest(store);
+    try {
+        const session = getSession(`ccr-flushall-${Math.random().toString(36).slice(2)}`);
+        storeEffectiveCcr(session, { enabled: true, minToolTokens: 50 });
+        adoptContentStore(session, turnWith(ccrConfig()).contentStore);
+        assert.ok(store.flushSync(session));
+        const file = findEnvelope(dir);
+        assert.ok(file, "initial content-store envelope written");
+
+        rmSync(file, { force: true });
+        mkdirSync(file);
+        adoptContentStore(session, turnTwoResults(ccrConfig()).contentStore);
+        assert.ok(session.contentStore?.byRef.m00005, "second turn adds a new stored ref");
+        store.scheduleSave(session);
+        assert.equal(session.contentStoreDirty, true, "failed content-store write stays dirty for retry");
+        assert.ok(logs.some((line) => line.includes("content-store write failed")), "transient write failure was observed");
+
+        rmSync(file, { recursive: true, force: true });
+        await store.flushAll([session]);
+        assert.equal(session.contentStoreDirty, false, "graceful flush retries the dirty content store");
+        assert.ok(existsSync(file), "content-store envelope is restored once the transient failure clears");
+        assert.ok(store.loadContentStore(session)?.byRef.m00005, "retry persists the ref added before the transient failure");
+    } finally {
+        store.cancelAll();
+        _setStoreForTest(new SessionStore({ enabled: false }));
+        rmSync(dir, { recursive: true, force: true });
     }
 });
 
