@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { wrapCacheReport, wrapRuleReport } from "../acp-panel.js";
 import { awaitNativeProxyOrigin } from "./native-bootstrap.js";
+import { isModelApiUrl, nativeInterceptInstalled } from "./native-intercept.js";
 import { detectProxyBase, destinationRoutedThroughProxy, fetchManifest, forwardTool, fetchStatus, fetchProxyVersion, postIdentityRegister, reportRuntimeInfoOnChange, armedIdleNotice, noSessionWarning, type ManifestTool } from "./shared.js";
 
 type Ctx = {
@@ -143,9 +144,37 @@ export function parentConversationIdOf(ctx: Ctx): string | undefined {
 // permitted") 400 the whole request. Unrouted destinations degrade to the
 // proxy's anonymous prefix-affinity sessions (#309): compression still works,
 // /acp lookup by session id does not — acceptable vs a guaranteed 400.
-function stampPromptCacheKey(event: unknown, ctx: Ctx, agent: string): Record<string, unknown> | undefined {
+export function stampPromptCacheKey(event: unknown, ctx: Ctx, agent: string): Record<string, unknown> | undefined {
     if (agent !== "omp") return undefined;
-    if (!destinationRoutedThroughProxy(ctx.model?.baseUrl)) return undefined;
+    if (!destinationRoutedThroughProxy(ctx.model?.baseUrl)) {
+        // #1579: native omp mode routes at the FETCH layer — the model
+        // baseUrl stays the real upstream, so the launcher-shaped checks
+        // (a /bili/-wrapped URL, the BILLION_CONTEXT_PROXY origin, the MITM
+        // whitelist) can never match and #1403's gate silently killed the
+        // identity stamp for EVERY native session. Mirror the interceptor's
+        // own predicate instead: when the native intercept is installed it
+        // WILL rewrite any isModelApiUrl request URL to <proxy>/bili/<url>.
+        // The interceptor judges the FULL request URL while ctx carries only
+        // the baseUrl prefix (".../v1" — not suffix-matched by itself), so
+        // probe both the bare baseUrl and its natural chat-completions
+        // expansion; the proxy consumes (and strips) the stamped pck exactly
+        // as on the launcher lanes. Anything the interceptor would NOT
+        // rewrite keeps #1403's guarantee — never stamp where the proxy
+        // cannot see it. The install flag alone is not routing evidence — it
+        // outlives routing (failed bootstrap, or proxy death + respawn
+        // give-up: onGiveUp clears BILLION_CONTEXT_PROXY but not the flag),
+        // and an un-routed stamped request rides verbatim into strict-schema
+        // upstreams (#1403's 400). Live claim = same env-keyed signal
+        // ownsCompaction / registerTools / runtime-info use; bootstrap
+        // rewrites it on (re-)establishment so degrades/recovery track the
+        // traffic. Round 1 inside the pre-bootstrap window misses the stamp
+        // and self-heals on round 2.
+        if (!nativeInterceptInstalled()) return undefined;
+        if (detectProxyBase(ctx.model?.baseUrl) === undefined) return undefined;
+        const base = ctx.model?.baseUrl ?? "";
+        const expanded = /\/v\d+\/?$/.test(base) ? `${base.replace(/\/+$/, "")}/chat/completions` : base;
+        if (!isModelApiUrl(base) && !isModelApiUrl(expanded)) return undefined;
+    }
     const payload = (event as { payload?: unknown } | undefined)?.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
     const p = payload as Record<string, unknown>;
@@ -243,8 +272,9 @@ const RETRY_INTERVAL_MS = 10000;
 
 type RegisterState = { sid?: string; toolsFor?: string; toolsReady?: boolean; pending?: Promise<void>; retryAt?: number; identityAt?: string; carriedSids?: Set<string>; retryIntervalMs: number; manifestPrime?: { base: string; tools: Promise<ManifestTool[] | undefined> } };
 
-async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, agent: string): Promise<void> {
-    const proxyBase = proxyBaseForCtx(ctx);
+async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, agent: string, awaitNativeOrigin = true): Promise<void> {
+    let proxyBase = proxyBaseForCtx(ctx);
+    if (proxyBase === undefined && awaitNativeOrigin) proxyBase = await awaitNativeProxyOrigin();
     if (proxyBase === undefined) return;
     // Cache on the session id; "" (host has no sessionManager) still caches,
     // so a successful registration is not re-fetched on every provider
@@ -763,7 +793,15 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
         });
         pi.on("session_start", (_event, ctx) => {
             state.sid = undefined;
-            void registerTools(pi, ctx, state, agent).catch((err: unknown) => console.error(`bili-plugin(${agent}): ${err instanceof Error ? err.message : String(err)}`));
+            // #1586 review: session_start captures its ctx for the whole
+            // session — never suspend across it here. One-shot flows replace
+            // the session inside async windows, so an awaited native-origin
+            // resolution would resume on stale refs and pi throws "ctx is
+            // stale" into our catch → stderr noise (e2e-native-pi gate). The
+            // per-event handlers below get a fresh ctx each time and are the
+            // ones that await the origin (#1243 pattern); launcher mode is
+            // unaffected (its base resolves synchronously).
+            void registerTools(pi, ctx, state, agent, false).catch((err: unknown) => console.error(`bili-plugin(${agent}): ${err instanceof Error ? err.message : String(err)}`));
         });
         // omp fires session_compact on in-session native compaction (sid does
         // not rotate), so the proxy reuses stale state — notify it to archive

@@ -170,6 +170,15 @@ const MODEL_API_SUFFIX = /(?:^|\/)(?:v\d+\/)?(?:messages|chat\/completions|compl
 
 /** True when the URL points at a model-API endpoint worth proxying. Never
  *  true for bili's own proxy paths (`/bili/…`, `/__bili/…`) or non-HTTP(S). */
+/** True when this process carries the native fetch intercept (#519) — every
+ *  isModelApiUrl request WILL be rewritten to the proxy regardless of what
+ *  the model config's baseUrl says. Lets identity stamping mirror the
+ *  interceptor's own routing decision (#1579) instead of guessing from
+ *  launcher-shaped URL forms. */
+export function nativeInterceptInstalled(): boolean {
+    return (globalThis as Record<PropertyKey, unknown>)[INTERCEPT_FLAG] === true;
+}
+
 export function isModelApiUrl(url: string): boolean {
     if (!/^https?:\/\//i.test(url)) return false;
     if (url.includes("/__bili/") || url.includes("/__acp/")) return false;
