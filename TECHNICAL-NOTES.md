@@ -13,8 +13,21 @@ rewrites model traffic to `<proxy>/bili/<upstream-url>`, registers
 mode), and binds the `/acp` panel to the current session. It also reports
 the client's **own model config** to the proxy (runtime-info protocol,
 #955) so compression budgets use the real window instead of a registry
-guess. Opt-out envs: `BILI_NATIVE_PI=0`, `BILI_NATIVE_OMP=0`,
-`BILI_NATIVE_OPENCODE=0`, `BILI_NATIVE_DSH=0`, `BILI_NATIVE_KIMI=0`.
+guess. Opt-out envs: `BILI_NATIVE_PI=0`, `BILI_NATIVE_OMP=0`, `BILI_NATIVE_OPENCODE=0`, `BILI_NATIVE_DSH=0`, `BILI_NATIVE_KIMI=0`, `BILI_NATIVE_HERMES=0`, `BILI_NATIVE_ZCODE=0`.
+
+## Proxy reuse and the attach gate (#1225, #1335, #1232)
+
+A native hook may attach to an already-running proxy instead of spawning its own — only when it passes the lifecycle gate below. Reuse is identity-based (#1225): an existing proxy is attached only when it runs the **same code** (sha256 of the entry script, recorded in the instance file), its **lane is compatible** — each launcher declares its client's lane, two *different declared* lanes never share, and an instance without a declared lane is wildcard-compatible on that axis — **and it owns a session lifecycle**: its health endpoint reports an armed parent-pid watchdog (`watchdog.armed == true`), i.e. it was spawned by a launcher with a parent pid and dies when the last attached session dies. Instances written before #1225 carry no code fingerprint and are therefore never attached: a rebuilt or updated install always starts a fresh proxy on the next launch, so fixes take effect immediately instead of silently serving stale code.
+
+| Listener | Attaches? | Why |
+|---|---|---|
+| Proxy spawned by this session | ✅ | armed at birth |
+| Another session's armed shared proxy (watcher set, #1186) | ✅ | sharing is by design |
+| Manually started `bili start` daemon | ❌ by default | no lifecycle owner (refuses watcher registration, never dies with sessions, often runs an older build — the cause of #1322) |
+
+The hook probes each candidate's `/__bili/health` for `watchdog.armed` before attaching: armed → attach and register a watcher (unchanged); unarmed, or a pre-#1330 build that reports no `watchdog` field at all (unverifiable, treated as unarmed) → do **not** attach; the session spawns its own ephemeral proxy (ephemeral port, armed at birth, dies with the last session, #1186 watcher semantics). This also fixes version skew: every session runs the **currently installed** bili instead of stale daemon code. Cost: one extra short-lived proxy process per session when no armed proxy exists (session state is shared on disk, so compression continuity is unaffected); the multi-instance warning (#394) becomes correspondingly more common. **Escape hatch:** deliberately run a resident daemon for your hooks to ride on → set `native.attachExternal: true` in the config file or `BILI_NATIVE_ATTACH_EXTERNAL=1`. That restores attaching to any compatible listener regardless of watchdog state — you then own the daemon's lifetime and version yourself. Explicit user-directed attaches (`BILLION_CONTEXT_ATTACH` / preset `BILLION_CONTEXT_PROXY` for kimi/dsh) bypass discovery entirely and are exempt by construction.
+
+Attach discovery is lane-aware across **all** live instances (#1232): the launcher probes every live entry in the instance registry, not just the single instance file (last-writer-wins — under concurrent multi-client use it can point at another client's proxy), and applies the gate above to every candidate. Among compatible candidates the newest instance with the launcher's own declared lane wins; an instance without a lane is wildcard-compatible on the lane axis (still subject to the gate). The `another bili instance is running` warning (#394) is lane-aware too: it fires for same-lane or lane-less coexistence, but stays silent between two *different* declared lanes, whose session files are disjoint.
 
 ## Runtime-info protocol (#955)
 

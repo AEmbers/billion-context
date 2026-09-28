@@ -104,25 +104,25 @@ QQ群:
 | 客户端 | 用这个 |
 |---|---|
 | **pi** | [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi)(进程内扩展) |
-| **opencode**(1.x / 2.x) | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili opencode`(启动器)或 `bili plugin install opencode`(原生,免启动器);独立 [`opencode-acp`](https://github.com/ranxianglei/opencode-acp) 在 1.x 上仍可用。完整指南:[OpenCode](CLIENTS.zh-CN.md#opencode) |
+| **opencode**(1.x / 2.x) | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili opencode`(启动器)或 `bili plugin install opencode`(原生);独立 [`opencode-acp`](https://github.com/ranxianglei/opencode-acp) 在 1.x 上仍可用 —— 完整指南:[OpenCode](CLIENTS.zh-CN.md#opencode) |
 | **omp** | [`billion-context`](https://github.com/ranxianglei/billion-context)，`bili omp`（内置插件）或 `bili plugin install omp`（自拉起原生插件，免启动器） |
-| **dsh** | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili dsh`（启动器，经 `--patch` 注入完整原生插件：工具、会话绑定 `/acp`、fetch 拦截）或 `bili plugin install dsh` ≡ `dsh plugin --profile <name> add billion-context`（统一泳道 —— pnpm 把包装进各 profile、由 dsh 挂载包内 patch 层；bili 形式只是替你按 profile 驱动 dsh 自己的通道，并顺带迁移旧版受管块） |
-| **kimi** | `bili plugin install kimi`（自拉起原生插件，免启动器 —— 需 Kimi Code ≥ 2.0.0；每会话在 `~/.kimi-code/config.toml` 写入路由块）或 `bili kimi`（启动器，证书 MITM）或 `/bili/` 前缀 |
-| **hermes** | `bili plugin install hermes`（自拉起原生插件，免启动器 —— Python 插件，#958）或 `bili hermes`（启动器，证书 MITM） |
-| **zcode**（Z.ai / bigmodel coding plan） | `bili plugin install zcode`（自拉起原生插件，免启动器 —— 每会话在 bigmodel provider store 写入路由块，#1145）或 GUI「设置 → 网络」证书 MITM（HTTP 代理 + CA 路径）或 `/bili/` 前缀 |
+| **dsh** | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili dsh`(启动器,经 `--patch` 注入完整原生插件)或 `bili plugin install dsh` ≡ `dsh plugin --profile <name> add billion-context`(统一泳道)—— 细节见 [CLIENTS.zh-CN.md](CLIENTS.zh-CN.md) |
+| **kimi** | `bili plugin install kimi`(自拉起原生,需 Kimi Code ≥ 2.0.0)或 `bili kimi`(证书 MITM)或 `/bili/` 前缀 —— 细节见 [CLIENTS.zh-CN.md](CLIENTS.zh-CN.md) |
+| **hermes** | `bili plugin install hermes`(自拉起原生,Python 插件 #958)或 `bili hermes`(证书 MITM) |
+| **zcode**(Z.ai / bigmodel coding plan) | `bili plugin install zcode`(自拉起原生,#1145)或 GUI「设置 → 网络」证书 MITM 或 `/bili/` 前缀 —— 细节见 [CLIENTS.zh-CN.md](CLIENTS.zh-CN.md) |
 | **claude** | `bili claude`(启动器)或 `bili plugin install claude`(原生姿态,#964 —— 受管 settings 块 + 会话自管代理;见下方"注意") |
-| **jcode** | [`billion-context`](https://github.com/ranxianglei/billion-context)，`bili jcode`（启动器，cert-MITM）或 `/bili/` 前缀 —— 无法做原生插件：编译型 Rust 二进制、无插件接缝，其静态 provider 配置无法按请求打头（[#962](https://github.com/ranxianglei/billion-context/issues/962)） |
-| **gemini**（Gemini CLI） | `bili gemini`（启动器，`GOOGLE_GEMINI_BASE_URL` `/bili/` 改写）或 `/bili/` 前缀 —— 仅启动器模式：gemini-cli 的扩展体系只到自定义命令，没有环内工具注入接缝（#1043） |
+| **jcode** | [`billion-context`](https://github.com/ranxianglei/billion-context),`bili jcode`(cert-MITM)或 `/bili/` 前缀 —— 无原生模式(编译型 Rust 二进制、无插件接缝,[#962](https://github.com/ranxianglei/billion-context/issues/962)) |
+| **gemini**(Gemini CLI) | `bili gemini`(启动器,`GOOGLE_GEMINI_BASE_URL` `/bili/` 改写)或 `/bili/` 前缀 —— 仅启动器(无环内工具注入接缝,#1043) |
 | **iflow**（iFlow CLI） | `bili iflow`（启动器，`IFLOW_BASE_URL` `/bili/` 改写）或 `/bili/` 前缀 |
 | **qwen**（Qwen Code） | `bili qwen`（启动器，cert-MITM）或 `/bili/` 前缀 |
-| **mcode**（MiniMax Code） | [`billion-context`](https://github.com/ranxianglei/billion-context)，`bili mcode`（启动器，cert-MITM）或 `/bili/` 前缀 —— 无法做原生插件：其插件体系是纯声明式事件钩子（无模型请求/历史改写接缝），压缩走代理（[#1050](https://github.com/ranxianglei/billion-context/issues/1050)） |
-| **aider** | [`billion-context`](https://github.com/ranxianglei/billion-context)，`bili aider`（启动器，cert-MITM）或 `/bili/` 前缀 —— 无法做原生插件：Python 脚本结构，hook 面仅限编辑/通知前后的 shell 命令，无工具注入接缝（[#1048](https://github.com/ranxianglei/billion-context/issues/1048)） |
-| **copilot**（GitHub Copilot CLI） | `bili copilot`（启动器，cert-MITM）—— 闭源 Go 二进制、无插件接缝；模型主机（`api.githubcopilot.com` + 各套餐子域）加白名单(#1049) |
-| **amp**（Amp CLI） | `bili amp`（启动器，cert-MITM）—— 闭源 Go 二进制、无插件接缝；`ampcode.com` 加白名单(#1049) |
-| **goose**（Goose CLI） | `bili goose`(启动器)—— rustls 发布构建不信任任何 CA 文件,无法 cert-MITM:内置 openai/anthropic 腿经 `OPENAI_HOST`/`ANTHROPIC_HOST` 重定向,自定义 provider 经重新生成的 `GOOSE_PATH_ROOT` overlay(`base_url` → `/bili/`,真实配置不动);固定第三方 provider 不支持(#1049) |
+| **mcode**(MiniMax Code) | [`billion-context`](https://github.com/ranxianglei/billion-context),`bili mcode`(cert-MITM)或 `/bili/` 前缀 —— 无原生模式(纯声明式事件钩子,无模型请求接缝,[#1050](https://github.com/ranxianglei/billion-context/issues/1050)) |
+| **aider** | [`billion-context`](https://github.com/ranxianglei/billion-context),`bili aider`(cert-MITM)或 `/bili/` 前缀 —— 无原生模式(仅 shell 命令钩子,无工具注入接缝,[#1048](https://github.com/ranxianglei/billion-context/issues/1048)) |
+| **copilot**(GitHub Copilot CLI) | `bili copilot`(启动器,cert-MITM)—— 闭源 Go 二进制、无插件接缝(#1049) |
+| **amp**(Amp CLI) | `bili amp`(启动器,cert-MITM)—— 闭源 Go 二进制、无插件接缝(#1049) |
+| **goose**(Goose CLI) | `bili goose`(启动器)—— rustls 不信任任何 CA 文件,无法 cert-MITM:openai/anthropic 腿经 `OPENAI_HOST`/`ANTHROPIC_HOST`,自定义 provider 经重新生成的 `GOOSE_PATH_ROOT` overlay(#1049) |
 | **其余所有**（没有上下文 hook） | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili <client>`（启动器，优先）或 `/bili/` 前缀 |
 
-**原生模式 vs 独立扩展。** 宿主原生插件(`bili plugin install pi` / `opencode` —— 代理在宿主进程内拉起)与独立进程内扩展(`billion-context-pi`、`opencode-acp`)**互斥**:两者同时生效意味着双重压缩。安装器负责切换:`bili plugin install pi` 会替换旧的 `npm:billion-context-pi` 条目;`bili plugin install opencode` 会从全局 opencode.json 里剔除旧的 `opencode-acp` 条目 —— 裸名、`npm:` 别名、带版本号(`opencode-acp@stable`)、路径形式都认,数组/对象两种形态都处理;原配置会快照到 `opencode.json.bili-bak`。**项目级**安装(`opencode plugin opencode-acp` 写的是 `<project>/.opencode/opencode.json`,不是全局配置)不会被碰 —— 需手动移除,安装器输出里会提醒。作为手动安装的运行期安全网,原生入口在加载时同步设置 `BILLION_CONTEXT_NATIVE=<host>`,让独立扩展在动作时自动退出 —— 它自己的加载期 `BILLION_CONTEXT_PROXY` 检查看不见原生模式异步拉起的代理,`/bili/` baseURL 检查也看不见 fetch 层改写。
+**原生模式 vs 独立扩展。** 宿主原生插件(`bili plugin install …`)与独立进程内扩展(`billion-context-pi`、`opencode-acp`)**互斥** —— 两者同时生效意味着双重压缩。安装器负责切换:替换旧条目(裸名、`npm:` 别名、带版本号、路径形式都认,数组/对象两种形态都处理),原配置快照到 `.bili-bak`;**项目级**安装不会被碰 —— 需手动移除。作为手动安装的运行期安全网,原生入口在加载时同步设置 `BILLION_CONTEXT_NATIVE=<host>`,让独立扩展在动作时自动退出。pi 一侧该标记需要 `billion-context-pi` **0.1.72+**。
 
 
 ## 安装
@@ -169,17 +169,15 @@ pi / omp / kimi / claude 没有客户端侧通道 —— 它们的配置条目�
 
 注意:
 
-- 原生模式与独立进程内扩展(`billion-context-pi`、`opencode-acp`)**互斥** —— 安装器负责换条目并把原配置快照(`.bili-bak`);迁移细节见上方客户端表(pi 需 `billion-context-pi` 0.1.72+ 才能干净退让)。
-- OpenCode:legacy `opencode-acp` 会话、V1/V2 插件形态与全部注意事项已并入 [OpenCode](CLIENTS.zh-CN.md#opencode) 一节。
-- `kimi` 仅在自举时上报 runtime-info(静态 `custom_headers` 无法承载逐请求的窗口/模型头,否则会在模型切换后过期),子代理会话按每次调用的 `conversation_id` 绑定 —— 完整机制见下文「Kimi Code」小节。
-- `hermes` 的原生插件是 Python 写的(其 CLI agent 的插件 API 只有 Python)—— 不补丁 fetch,而是在健康检查通过后用环境变量把 hermes 的 httpx 栈指向代理,并经 `llm_request` 中间件打逐请求头;完整机制见下文「Hermes」一节。
-- `claude` 有**原生姿态**(#964):`bili plugin install claude` 写入受管 settings 块(静态 `/bili/` URL + `SessionStart` hook)+ 指向稳定端口的 MCP shell —— 代理随会话生灭。`BILI_NATIVE_CLAUDE=0` 退出(passthrough)。机制细节:[TECHNICAL-NOTES.zh-CN.md](TECHNICAL-NOTES.zh-CN.md)。
-- `zcode` 有**原生姿态**(#1145):`bili plugin install zcode` 写 `~/.zcode/cli/config.json`(`hooks.enabled` + `SessionStart` hook + stdio MCP server),每会话把 bigmodel coding-plan provider 的 `baseURL` 改写为 `<proxy>/bili/<上游>`(legacy `v2/config.json` 与 v3.14+ `provider_config.json` 两代 store 都处理);完整机制见下文「ZCode」小节。
-- `codex` / `omp` 也有配套安装(MCP shell 与轻量扩展),但它们需要一个在跑的代理 —— 不属于原生模式。
-- `jcode` 则完全没有原生模式:它是编译型 Rust 二进制、无插件/扩展接缝,唯一的 provider 级请求头是静态 TOML 表(对每个请求原样附加),MCP server 又是跨所有会话共享的全局池 —— 既无法在进程内改写模型流量,也无法打上 plugin 模式所需的按请求头(`x-bili-plugin`、会话 id、runtime-info)。完整源码级分析见 [#962](https://github.com/ranxianglei/billion-context/issues/962)(已按 wontfix 关闭)。请用 `bili jcode`(启动器)。
-- `aider` 同样没有原生模式:它是 Python 脚本结构,hook 面仅限于文件编辑与空闲通知前后的 shell 命令(`--git-commit-verify`、`--notifications-command`)—— 无插件/扩展 API,也没有 MCP client,因此不存在 plugin 模式所需的工具注入接缝。请用 `bili aider`([#1048](https://github.com/ranxianglei/billion-context/issues/1048))。
-
-- `copilot`、`amp`、`goose` 仅启动器模式(#1049):三者均无工具注入接缝,故没有原生模式(amp/goose 理论上可做 codex 式 MCP shell 伴生安装,本版本未提供)。Goose 另外无法 cert-MITM —— 其发布构建走 rustls/webpki、不信任任何 CA 文件 —— 因此改走纯 HTTP base-URL 重定向而非代理环境变量。
+- 原生模式与独立进程内扩展(`billion-context-pi`、`opencode-acp`)**互斥** —— 安装器负责换条目并把原配置快照(`.bili-bak`)。
+- OpenCode 旧会话、V1/V2 插件形态与全部注意事项:[OpenCode](CLIENTS.zh-CN.md#opencode)。
+- `kimi` 仅在自举时上报 runtime-info(静态头无法承载逐请求窗口/模型值),子代理会话按每次调用的 `conversation_id` 绑定。
+- `hermes` 的原生插件是 Python:健康检查通过后用环境变量把 hermes 的 httpx 栈指向代理,并经 `llm_request` 中间件打逐请求头。
+- `claude` 有**原生姿态**(#964):受管 settings 块 + `SessionStart` hook + 稳定端口的 MCP shell;`BILI_NATIVE_CLAUDE=0` 退出(passthrough)。机制:[TECHNICAL-NOTES.zh-CN.md](TECHNICAL-NOTES.zh-CN.md)。
+- `zcode` 有**原生姿态**(#1145):受管 `~/.zcode/cli/config.json` 块 + 每会话 provider `baseURL` 改写。完整机制:[CLIENTS.zh-CN.md](CLIENTS.zh-CN.md)。
+- `codex` / `omp` 也有配套安装(MCP shell 与轻量扩展),但需要一个在跑的代理 —— 不属于原生模式。
+- `jcode`、`aider` 无原生模式(无插件/MCP/工具注入接缝:#962、#1048)—— 用 `bili jcode` / `bili aider`。
+- `copilot`、`amp`、`goose` 仅启动器模式(#1049);goose 无法 cert-MITM(rustls 不信任任何 CA 文件),改走纯 HTTP base-URL 重定向。
 
 ### 方式 2 —— 启动器(`bili pi` / `bili codex` / `bili claude` / `bili omp` / `bili opencode` / `bili hermes` / `bili dsh` / `bili codebuddy` / `bili qoder` / `bili trae` / `bili jcode` / `bili kimi` / `bili gemini` / `bili iflow` / `bili qwen` / `bili mcode` / `bili aider` / `bili copilot` / `bili amp` / `bili goose`)
 
@@ -192,20 +190,20 @@ bili claude                           # 拉起 claude
 bili omp                              # pi 同款,file-free(#535):环境变量 + 扩展 registerProvider + 压缩取消,真实 ~/.omp 不动
 bili opencode                         # OpenCode(1.x 与 2.x):完整指南见下文 [OpenCode](CLIENTS.zh-CN.md#opencode) 一节
 bili hermes                           # file-free(#535):hermes 代理环境变量(HTTPS_PROXY + SSL_CERT_FILE 组合 CA bundle)—— https 走 CONNECT MITM,http 走绝对形式转发;真实 ~/.hermes 不动
-bili dsh                              # deepseek-harness:经 --patch 注入完整原生插件(#941) —— compress/decompress/acp_status 注册为真实 dsh 工具，请求盖 dsh 会话 id(plugin 模式)，/acp 会话绑定；非回环上游走代理 env(https MITM、http absolute-form)，回环上游保留 overlay DSH_HOME(~/.dsh-bili)改写(#535)，内置 deepseek 路由走 DEEPSEEK_BASE_URL；dsh 原生自动压缩被禁用(compaction-basic auto:false)
+bili dsh                              # deepseek-harness:经 --patch 注入完整原生插件(#941) —— 真实 dsh 工具、会话绑定 /acp(plugin 模式);非回环上游走代理 env,回环保留 overlay DSH_HOME 改写(#535);dsh 自动压缩关
 bili codebuddy                        # Tencent CodeBuddy Code CLI:CODEBUDDY_BASE_URL /bili/ 重写(OpenAI chat completions wire),预算对齐走 CODEBUDDY_AUTO_COMPACT_WINDOW;真实 ~/.codebuddy 不动
 bili qoder                            # qoder:模型端点硬编码 https(无法 /bili/ 改写)—— 证书 MITM(HTTPS_PROXY + NODE_EXTRA_CA_CERTS),默认模型主机已加白名单(#653)
 bili trae                             # Trae CLI(字节跳动,闭源 Go 二进制,无 base-URL 覆盖)—— 证书 MITM(HTTPS_PROXY + SSL_CERT_FILE),模型主机取 TRAE_CLI_API_HOST 或默认企业网关(#655)
 bili jcode                            # jcode(Rust 终端编码 agent)—— 环境变量式证书 MITM 启动:HTTPS_PROXY + SSL_CERT_FILE,模型主机 api.z.ai 默认加白,本地回环 provider 走 NO_PROXY 直连
-bili kimi                             # Kimi Code CLI(Moonshot):除无条件回环绕过外,所有流量遵循标准代理环境变量——非回环 https 走证书 MITM(HTTPS_PROXY + NODE_EXTRA_CA_CERTS/SSL_CERT_FILE),非回环 http 走绝对形式转发;provider/model 主机取 ~/.kimi-code/config.toml(遵循 KIMI_CODE_HOME)或未声明时的托管 OAuth 端点;回环端点编目并附手动 /bili/ 前缀提示(#757)
+bili kimi                             # Kimi Code CLI(Moonshot):除无条件回环绕过外遵循标准代理环境变量 —— https 证书 MITM、http 绝对形式转发;回环端点编目并附手动 /bili/ 提示(#757)
 bili gemini                           # Gemini CLI(Google):GOOGLE_GEMINI_BASE_URL /bili/ 改写到 generativelanguage.googleapis.com(Google 原生 wire),真实 ~/.gemini 零改动
 bili iflow                            # iFlow CLI:IFLOW_BASE_URL /bili/ 改写到 apis.iflow.cn/v1(OpenAI chat-completions wire),真实 ~/.iflow 零改动
 bili qwen                             # Qwen Code(多协议 gemini-cli fork,无 base-URL 钩子):HTTPS_PROXY + NODE_EXTRA_CA_CERTS 证书 MITM,默认 DashScope/Qwen 模型主机加白,自建中转用 --mitm-domain 追加
-bili mcode                            # MiniMax Code CLI:除无条件回环绕过外,所有流量遵循标准代理环境变量——非回环 https 走证书 MITM(HTTPS_PROXY + NODE_EXTRA_CA_CERTS/SSL_CERT_FILE),非回环 http 走绝对形式转发;provider 主机取 ~/.minimax*/config.yaml(遵循 MINIMAX_DATA_DIR/MAVIS_DATA_DIR)或未声明时的官方 agent.minimax.* 端点;回环端点编目并附手动 /bili/ 前缀提示;会话经 X-Mavis-Session-Id 头绑定(#1050)
-bili aider                            # Aider(Python pair programmer):HTTPS_PROXY + SSL_CERT_FILE/REQUESTS_CA_BUNDLE 证书 MITM;端点取自继承 env(OPENAI_API_BASE / ANTHROPIC_BASE_URL 等)、--openai-api-base 或 .aider.conf.yml——未声明时默认 api.openai.com + api.anthropic.com;回环端点经 NO_PROXY 直连(#1048)
+bili mcode                            # MiniMax Code CLI:与 kimi 同构(代理环境变量、无条件回环绕过、证书 MITM/绝对形式);会话经 X-Mavis-Session-Id 绑定(#1050)
+bili aider                            # Aider(Python pair programmer):HTTPS_PROXY + SSL_CERT_FILE/REQUESTS_CA_BUNDLE 证书 MITM;端点取自 OPENAI_API_BASE / ANTHROPIC_BASE_URL / --openai-api-base / .aider.conf.yml(#1048)
 bili copilot                          # Copilot CLI(GitHub,闭源 Go 二进制)—— 证书 MITM(HTTPS_PROXY + SSL_CERT_FILE),api.githubcopilot.com + 各套餐子域加白(#1049)
 bili amp                              # Amp CLI(Sourcegraph,闭源 Go 二进制)—— 证书 MITM(HTTPS_PROXY + SSL_CERT_FILE),ampcode.com 加白(#1049)
-bili goose                            # Goose(Block,Rust/reqwest):rustls 发布构建不信任任何 CA 文件 —— 完全不用代理环境变量;内置 openai/anthropic 腿经 OPENAI_HOST/ANTHROPIC_HOST 重定向,自定义声明式 provider 经重新生成的 GOOSE_PATH_ROOT overlay 做 base_url /bili/ 改写(真实配置不动,用户编辑回并);固定第三方 provider 会警告(#1049)
+bili goose                            # Goose(Block,Rust/reqwest):rustls 发布构建不信任任何 CA 文件 —— openai/anthropic 腿经 OPENAI_HOST/ANTHROPIC_HOST,自定义 provider 经重新生成的 GOOSE_PATH_ROOT overlay(/bili/ 改写,真实配置不动)(#1049)
 bili pi --mitm-domain api.foo.com     # 向 MITM 白名单追加域名
 ```
 
@@ -293,7 +291,7 @@ bili --no-auto-update        # 本次启动禁用自动更新
 
 ## 会话机制
 
-代理需要一个稳定的、按会话标识的 ID,以便在多个用户/账号并发时隔离压缩状态。它**原样使用客户端自己提供的会话值**(见 `src/session-id.ts`)——不做哈希,也不含协议 / 上游 origin / API key 维度。这些维度在会话中途都可能变化(凭证轮换、用户切换 relay、wire 协议变化),拿它们做 key 会在用户继续对话时恰好把状态弄丢(#280、#286)。该 id 只在代理内部使用(状态存储、持久化、UI 标签),绝不上送。
+代理以**客户端自己提供的会话值(原样照搬)**为键隔离压缩状态(`src/session-id.ts`)—— 不哈希、不含协议/上游/API key 维度(它们会在会话中途变化,拿它们做 key 恰好在用户继续对话时把状态弄丢,#280/#286)。该 id 只在代理内部使用(状态存储、持久化、UI 标签),绝不上送。
 
 取值来源(按顺序取第一个命中的):插件的 `x-bili-plugin-conversation`(仅当同时带 `x-bili-plugin` 标记 header)、客户端专属 header(`x-claude-code-session-id`、`x-grok-session-id`/`x-grok-conv-id`、`x-mavis-session-id`)、通用 header(`x-session-affinity`、`x-acp-session`、`x-session-id`、`x-opencode-session`、`session-id`/`session_id`)、或 body 字段:Responses wire 的 `session_id`/`metadata.session_id`,以及 Responses/OpenAI/Anthropic wire 上提升替代内容指纹回退的 `prompt_cache_key`。
 
@@ -305,17 +303,13 @@ bili --no-auto-update        # 本次启动禁用自动更新
 | **omp**(经插件)| ✅ 发 | `prompt_cache_key` 提升为稳定身份(#268)|
 | **pi**(裸跑)| ❌ 不发 | 无 → 见下方匿名前缀亲和 |
 
-**无 header 客户端(pi 类):匿名前缀亲和。** 当客户端完全不发任何会话信号时,代理从重放的历史本身解析会话(`src/prefix-affinity.ts`,#309):只有当请求历史从第 0 条开始逐字节复现某已存会话的消息链时,才重新挂回该会话;否则获得一个确定性的新 `pfa-…` 会话。对本节过去警告过的失效模式(#1262)的后果:
-
-- **恢复(resume)** 的对话会重新挂回自己的会话 —— 包括代理重启之后(#499)。
-- **开头相同的新任务不会继承**另一个会话的 block 或受保护区:它拿到全新会话,历史一旦分叉就彻底独立(分叉血缘会被记录以便调试)。
-- 完全没有任何可用信号时,请求会被显式 400 拒绝,而不是静默与他人状态碰撞。
+**无 header 客户端(pi 类):匿名前缀亲和。** 当客户端完全不发任何会话信号时,代理从重放的历史本身解析会话(`src/prefix-affinity.ts`,#309):只有当请求历史从第 0 条开始逐字节复现某已存会话的消息链时,才重新挂回该会话;否则获得一个确定性的新 `pfa-…` 会话。后果(#1262):**恢复(resume)** 的对话重新挂回自己的会话(包括代理重启后,#499);**开头相同的新任务不会继承**另一个会话的 block —— 它拿到全新会话,历史一旦分叉就彻底独立;完全没有任何可用信号时,请求会被显式 400 拒绝,而不是静默与他人状态碰撞。
 
 设计记录与威胁模型:[SESSION-IDENTITY.md](SESSION-IDENTITY.md)。消息粒度的对偶文档(为什么身份由内容派生、而非指派 id)是 [MESSAGE-IDENTITY.zh-CN.md](MESSAGE-IDENTITY.zh-CN.md)。
 
 上游粘性路由方面,代理只转发客户端本来就提供的身份值(例如 body 里的 `session_id` 会以 `x-session-id` 上送),绝不自行合成一个。
 
-**建议:** 发显式 id 的客户端可以安全地通过代理并发跑很多会话。无 header 的多 agent 场景,优先装客户端插件(omp/pi 插件会为每个会话盖一个稳定 id);否则每个会话显式传一个 `x-acp-session` header。两者都没有时,前缀亲和也能把不同任务分开 —— 分叉的代价只是一次原始重发加压缩阶梯重启。
+**建议:** 发显式 id 的客户端可以安全并发。无 header 的多 agent 场景,优先装客户端插件(为每个会话盖稳定 id)或每会话传显式 `x-acp-session` header —— 两者都没有时,前缀亲和也能把不同任务分开(分叉的代价只是一次原始重发加压缩阶梯重启)。
 
 ### 派生(子)会话继承父会话的压缩上下文(#1333、#1362)
 

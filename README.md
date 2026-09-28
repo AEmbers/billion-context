@@ -180,25 +180,25 @@ Pick by your client:
 | Client | Use |
 |---|---|
 | **pi** | [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi) (in-process extension) |
-| **opencode** (1.x / 2.x) | [`billion-context`](https://github.com/ranxianglei/billion-context) — `bili opencode` (launcher) or `bili plugin install opencode` (native, no launcher); standalone [`opencode-acp`](https://github.com/ranxianglei/opencode-acp) remains usable on 1.x. Full guide: [OpenCode](CLIENTS.md#opencode) |
+| **opencode** (1.x / 2.x) | [`billion-context`](https://github.com/ranxianglei/billion-context) — `bili opencode` (launcher) or `bili plugin install opencode` (native); standalone [`opencode-acp`](https://github.com/ranxianglei/opencode-acp) remains usable on 1.x — full guide: [OpenCode](CLIENTS.md#opencode) |
 | **omp** | [`billion-context`](https://github.com/ranxianglei/billion-context) via `bili omp` (built-in plugin) or `bili plugin install omp` (self-spawning native plugin, no launcher) |
-| **dsh** | `bili dsh` (launcher — full native plugin via `--patch`: tools, session-bound `/acp` + `/acp-cache`, fetch intercept) or `bili plugin install dsh` ≡ `dsh plugin --profile <name> add billion-context` (one unified lane — pnpm-installs the package into each profile so dsh mounts the bundled patch layer; the bili form just drives dsh's own channel per profile and migrates legacy managed blocks) |
-| **kimi** | `bili plugin install kimi` (self-spawning native plugin, no launcher — Kimi Code ≥ 2.0.0; per-session routing block in `~/.kimi-code/config.toml`) or `bili kimi` (launcher, cert-MITM) or `/bili/` prefix |
-| **hermes** | `bili plugin install hermes` (self-spawning native plugin, no launcher — Python plugin, #958) or `bili hermes` (launcher, cert-MITM) |
-| **zcode** (Z.ai / bigmodel coding plan) | `bili plugin install zcode` (self-spawning native plugin, no launcher — per-session routing block in the bigmodel provider store, #1145) or cert-MITM through the GUI's Settings → Network (HTTP proxy + CA path) or `/bili/` prefix |
+| **dsh** | `bili dsh` (launcher — full native plugin via `--patch`) or `bili plugin install dsh` ≡ `dsh plugin --profile <name> add billion-context` (one unified lane) — details: [CLIENTS.md](CLIENTS.md) |
+| **kimi** | `bili plugin install kimi` (self-spawning native, Kimi Code ≥ 2.0.0) or `bili kimi` (cert-MITM) or `/bili/` prefix — details: [CLIENTS.md](CLIENTS.md) |
+| **hermes** | `bili plugin install hermes` (self-spawning native, Python plugin #958) or `bili hermes` (cert-MITM) |
+| **zcode** (Z.ai / bigmodel coding plan) | `bili plugin install zcode` (self-spawning native, #1145) or cert-MITM via the GUI's Settings → Network or `/bili/` prefix — details: [CLIENTS.md](CLIENTS.md) |
 | **claude** | `bili claude` (launcher) or `bili plugin install claude` (native posture, #964 — managed settings block + session-owned proxy; see the notes below) |
-| **jcode** | [`billion-context`](https://github.com/ranxianglei/billion-context) via `bili jcode` (launcher, cert-MITM) or `/bili/` prefix — no native plugin possible: compiled Rust binary with no plugin seam, and its static per-provider config can't stamp per-request headers ([#962](https://github.com/ranxianglei/billion-context/issues/962)) |
-| **gemini** (Gemini CLI) | `bili gemini` (launcher, `GOOGLE_GEMINI_BASE_URL` `/bili/` rewrite) or `/bili/` prefix — launcher-only: gemini-cli's extension system reaches custom commands only, no in-loop tool seam (#1043) |
+| **jcode** | [`billion-context`](https://github.com/ranxianglei/billion-context) via `bili jcode` (cert-MITM) or `/bili/` prefix — no native mode (compiled Rust binary, no plugin seam, [#962](https://github.com/ranxianglei/billion-context/issues/962)) |
+| **gemini** (Gemini CLI) | `bili gemini` (launcher, `GOOGLE_GEMINI_BASE_URL` `/bili/` rewrite) or `/bili/` prefix — launcher-only (no in-loop tool seam, #1043) |
 | **iflow** (iFlow CLI) | `bili iflow` (launcher, `IFLOW_BASE_URL` `/bili/` rewrite) or `/bili/` prefix |
 | **qwen** (Qwen Code) | `bili qwen` (launcher, cert-MITM) or `/bili/` prefix |
-| **mcode** (MiniMax Code) | [`billion-context`](https://github.com/ranxianglei/billion-context) via `bili mcode` (launcher, cert-MITM) or `/bili/` prefix — no native plugin possible: its plugin system is declarative event hooks only (no model-request/history seam), so compression rides the proxy ([#1050](https://github.com/ranxianglei/billion-context/issues/1050)) |
-| **aider** | [`billion-context`](https://github.com/ranxianglei/billion-context) via `bili aider` (launcher, cert-MITM) or `/bili/` prefix — no native plugin possible: Python script structure whose hook surface is shell commands around edits/notifications only, no tool-injection seam ([#1048](https://github.com/ranxianglei/billion-context/issues/1048)) |
-| **copilot** (GitHub Copilot CLI) | `bili copilot` (launcher, cert-MITM) — closed Go binary, no plugin seam; model hosts (`api.githubcopilot.com` + per-plan subdomains) whitelisted (#1049) |
-| **amp** (Amp CLI) | `bili amp` (launcher, cert-MITM) — closed Go binary, no plugin seam; `ampcode.com` whitelisted (#1049) |
-| **goose** (Goose CLI) | `bili goose` (launcher) — rustls release builds trust no CA file, so no cert-MITM: built-in openai/anthropic legs redirected via `OPENAI_HOST`/`ANTHROPIC_HOST`, custom providers via a regenerated `GOOSE_PATH_ROOT` overlay (`base_url` → `/bili/`, real config untouched); fixed third-party providers unsupported (#1049) |
+| **mcode** (MiniMax Code) | [`billion-context`](https://github.com/ranxianglei/billion-context) via `bili mcode` (cert-MITM) or `/bili/` prefix — no native mode (event hooks only, no model-request seam, [#1050](https://github.com/ranxianglei/billion-context/issues/1050)) |
+| **aider** | [`billion-context`](https://github.com/ranxianglei/billion-context) via `bili aider` (cert-MITM) or `/bili/` prefix — no native mode (shell-command-only hooks, no tool-injection seam, [#1048](https://github.com/ranxianglei/billion-context/issues/1048)) |
+| **copilot** (GitHub Copilot CLI) | `bili copilot` (launcher, cert-MITM) — closed Go binary, no plugin seam (#1049) |
+| **amp** (Amp CLI) | `bili amp` (launcher, cert-MITM) — closed Go binary, no plugin seam (#1049) |
+| **goose** (Goose CLI) | `bili goose` (launcher) — rustls trusts no CA file, so no cert-MITM: openai/anthropic legs via `OPENAI_HOST`/`ANTHROPIC_HOST`, custom providers via a regenerated `GOOSE_PATH_ROOT` overlay (#1049) |
 | **everything else** (no context hook) | [`billion-context`](https://github.com/ranxianglei/billion-context) — `bili <client>` (launcher, preferred) or `/bili/` prefix |
 
-**Native mode vs standalone extensions.** The host-native plugins (`bili plugin install pi` / `opencode` — they spawn the proxy inside the host process) and the standalone in-process extensions (`billion-context-pi`, `opencode-acp`) are **mutually exclusive**: both active means double compression. The installer makes the switch: `bili plugin install pi` replaces the legacy `npm:billion-context-pi` entry (with a reminder that a project-scope entry in `<project>/.pi/settings.json` from `pi install -l` lives outside the global settings), and `bili plugin install opencode` strips legacy `opencode-acp` entries from the global opencode.json — bare name, `npm:` alias, versioned (`opencode-acp@stable`), or path form, array or object shape; the original config is snapshotted to `.bili-bak` once. A **project-local** install (`opencode plugin opencode-acp` writes `<project>/.opencode/opencode.json`, not the global config) is not touched — remove it by hand; the installer note reminds you. As a runtime safety net for manual installs, the native entries set `BILLION_CONTEXT_NATIVE=<host>` synchronously at load so a standalone extension can stand down at action time — its own load-time `BILLION_CONTEXT_PROXY` check cannot see a proxy that native mode spawns asynchronously, and its `/bili/` baseUrl check never sees the fetch-layer rewrite. On the pi side the marker needs `billion-context-pi` **0.1.72+** (the per-event re-check landed after 0.1.71); the pi-native entry additionally scans both pi settings files once its proxy is up and warns loudly when it spots a co-resident legacy entry the installer never saw — that warning is the only visible signal while an old `billion-context-pi` silently double-compresses.
+**Native mode vs standalone extensions.** The host-native plugins (`bili plugin install …`) and the standalone in-process extensions (`billion-context-pi`, `opencode-acp`) are **mutually exclusive** — both active means double compression. The installer makes the switch: it replaces the legacy entries (bare name, `npm:` alias, versioned, path form; array or object shape) and snapshots the original config to `.bili-bak` once; a **project-local** install is not touched — remove that one by hand. As a runtime safety net for manual installs, the native entries set `BILLION_CONTEXT_NATIVE=<host>` synchronously at load so a standalone extension can stand down at action time. On the pi side the marker needs `billion-context-pi` **0.1.72+**, and the pi-native entry scans both pi settings files once its proxy is up and warns loudly when it spots a co-resident legacy entry the installer never saw — that warning is the only visible signal while an old `billion-context-pi` silently double-compresses.
 
 
 ## Install
@@ -213,11 +213,11 @@ This installs the `bili` command (`bili-proxy` is kept as an alias).
 
 Three ways to use it — pick one:
 
-- **Native plugin (no launcher):** `bili plugin install <client>` — bili
+- **Native plugin (most native):** `bili plugin install <client>` — bili
   becomes a plugin inside the client; start the client as usual.
-- **Launcher (easiest):** one `bili <client>` command brings up the proxy and
+- **Launcher (config-free):** one `bili <client>` command brings up the proxy and
   the client together — no real config file is ever touched.
-- **URL change (persistent):** prefix your client's baseURL with the proxy
+- **URL change (most universal):** prefix your client's baseURL with the proxy
   origin + `/bili/`.
 
 Mechanism details behind these three options (plugin lifecycle, runtime-info
@@ -288,125 +288,19 @@ mixing *writers* is what the guard forbids. `bili plugin update [client]`
 is the one command that drives every lane through its own owner and prints
 the per-lane update path (`bili plugin list` shows the same per-lane channel).
 
-At load the plugin **spawns its own proxy** (attaches to a healthy running
-one only when it passes the attach gate below; a parent-pid watchdog tears
-it down when the client exits),
-rewrites model traffic to `<proxy>/bili/<upstream-url>`, registers
-`compress` / `decompress` / `acp_status` as native client tools (plugin
-mode), and reports the client's **own model config** to the proxy so
-compression budgets use the real window instead of a registry guess.
-Opt-out envs: `BILI_NATIVE_PI=0`, `BILI_NATIVE_OMP=0`,
-`BILI_NATIVE_OPENCODE=0`, `BILI_NATIVE_DSH=0`, `BILI_NATIVE_KIMI=0`,
-`BILI_NATIVE_HERMES=0`, `BILI_NATIVE_ZCODE=0`. Full
-mechanics: [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
-
-Reuse is identity-based (#1225) **and lifecycle-gated (#1335)**: an existing
-proxy is attached only when it runs the **same code** (sha256 of the entry
-script, recorded in the instance file), its **lane is compatible** — each
-launcher declares its client's lane, two *different declared* lanes never
-share — **and it owns a session lifecycle**: its health endpoint reports an
-armed parent-pid watchdog (`watchdog.armed == true`), i.e. it was spawned by
-a launcher with a parent pid and dies when the last attached session dies.
-An instance without a declared lane is wildcard-compatible on the lane axis,
-but that alone no longer makes it attachable (see the gate below).
-Instances written before #1225 carry no code fingerprint and are therefore
-never attached: a rebuilt or updated install always starts a fresh proxy on
-the next launch, so fixes take effect immediately instead of silently
-serving stale code.
-
-**The attach gate (#1335).** A native hook attaches to whatever answers on
-the port, so the three listener kinds get different treatment (TS lanes and
-the hermes Python plugin's discovery path alike, #1338):
-
-| Listener | Lifecycle owner | Attach? |
-|---|---|---|
-| Its own session-spawned proxy | armed from birth | ✅ yes |
-| Another session's armed proxy (shared, watcher set #1186) | watcher set | ✅ yes — sharing stays the design |
-| Manually started `bili start` daemon | **none** — refuses watchers, never dies with sessions, often an older build | ❌ not by default |
-
-The hook probes the candidate's `/__bili/health` for `watchdog.armed` before
-attaching. Armed → attach + register a watcher (current behavior, README
-lifecycle contract holds). Unarmed — or a pre-#1330 build that reports no
-`watchdog` field at all (unverifiable, treated as unarmed) → **do not
-attach**; the hook spawns its own session-owned proxy (ephemeral port, armed
-from birth, dies with the last session). This also fixes version skew: every
-session now runs the **currently installed** bili instead of whatever a
-stale resident daemon happens to carry. The trade-off is one extra short-lived
-proxy process per session when no armed proxy exists (session state is shared
-on disk, so compression continuity is unaffected); the multi-instance warning
-(#394) becomes correspondingly more common. **Escape hatch:** deliberately
-run a resident daemon for your hooks to ride on → set
-`native.attachExternal: true` in the config file or
-`BILI_NATIVE_ATTACH_EXTERNAL=1`. That restores attaching to any compatible
-listener regardless of watchdog state — you then own the daemon's lifetime
-and version yourself. Explicit user-directed attaches (`BILLION_CONTEXT_ATTACH`
-/ preset `BILLION_CONTEXT_PROXY` for kimi/dsh) bypass discovery entirely and
-are exempt by construction.
-
-Attach discovery is lane-aware across **all** live instances (#1232): the
-launcher probes every live entry in the instance registry, not just the
-single instance file (last-writer-wins — under concurrent multi-client use
-it can point at another client's proxy), and applies the gate above to every
-candidate. Among compatible candidates the newest instance with the launcher's
-own declared lane wins; an instance without a lane is wildcard-compatible on
-the lane axis (still subject to the gate). The `another bili instance is
-running` warning (#394) is lane-aware too: it fires for same-lane or lane-less
-coexistence, but stays silent between two *different* declared lanes, whose
-session files are disjoint.
-
-**Runtime-info protocol (#955).** A native plugin reads the model config
-the client itself will use and pushes it to the proxy (per-request headers
-+ bootstrap report); the proxy prefers that truth over the models.dev
-registry / built-in table when resolving the context window. Protocol
-details, resolution order, and implementations:
-[TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
+Mechanics of how the plugin binds to its proxy — spawn vs attach, identity-based reuse (#1225), the lifecycle attach gate (#1335), lane-aware discovery across all live instances (#1232), and the runtime-info protocol (#955) — all live in [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
 
 Notes:
 
-- Native mode is **mutually exclusive** with the standalone in-process
-  extensions (`billion-context-pi`, `opencode-acp`) — the installer swaps
-  the entries and snapshots the original config (`.bili-bak`); migration
-  details in the client table above (pi needs `billion-context-pi` 0.1.72+
-  to stand down cleanly).
-- OpenCode: legacy `opencode-acp` sessions, the V1/V2 plugin shapes, and all caveats are consolidated in the [OpenCode](CLIENTS.md#opencode) section.
-- `kimi` reports runtime-info at bootstrap only (static `custom_headers` can't
-  carry per-request window/model headers without going stale on model switch)
-  and binds subagent conversations by per-call `conversation_id` — full
-  mechanics in the "Kimi Code" section below.
-- `hermes`'s native plugin is Python (its CLI agent's plugin API is
-  Python-only) — instead of patching fetch it points hermes' httpx stack at
-  the proxy via env vars after a health check, and stamps per-request headers
-  through an `llm_request` middleware; full mechanics in the "Hermes" section
-  below.
-- `codex` has a companion install too (an MCP shell), but it needs a running
-  proxy — it is not native mode.
-- `claude` also has a **native posture** (#964): `bili plugin install
-  claude` writes a managed settings block (static `/bili/` URL +
-  `SessionStart` hook) plus an MCP shell pinned to a stable port — the
-  proxy lives and dies with the session. Opt out with
-   `BILI_NATIVE_CLAUDE=0` (passthrough). Mechanics:
-   [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
-- `zcode` also has a **native posture** (#1145): `bili plugin install
-  zcode` writes `~/.zcode/cli/config.json` (`hooks.enabled` +
-  `SessionStart` hook + stdio MCP server) and rewrites the bigmodel
-  coding-plan provider's `baseURL` to `<proxy>/bili/<upstream>` per
-  session (both store generations: legacy `v2/config.json` and v3.14+
-  `provider_config.json`) — full mechanics in the "ZCode" section below.
-- `jcode` has no native mode at all: it is a compiled Rust binary with no
-  plugin or extension seam, its only per-provider request surface is a static
-  TOML header table applied verbatim to every request, and its MCP servers
-  run in a global pool shared across all sessions — so there is neither a
-  way to rewrite model traffic in-process nor one to stamp the per-request
-   headers plugin mode requires (`x-bili-plugin`, conversation id,
-   runtime-info). Full source-level analysis: [#962](https://github.com/ranxianglei/billion-context/issues/962)
-   (closed wontfix). Use `bili jcode`.
-- `aider` has no native mode either: it is a Python script structure whose
-  hook surface is limited to shell commands around file edits and idle
-  notifications (`--git-commit-verify`, `--notifications-command`) — there is
-  no plugin or extension API and no MCP client, so there is no
-  tool-injection seam for plugin mode. Use `bili aider`
-  ([#1048](https://github.com/ranxianglei/billion-context/issues/1048)).
-- `copilot`, `amp` and `goose` are launcher-only (#1049): none exposes a tool-injection seam, so there is no native mode (a codex-style MCP-shell companion remains possible for amp/goose but is not shipped). Goose additionally cannot be cert-MITMed — its release builds run rustls/webpki and trust no CA file — so it rides plain-HTTP base-URL redirects instead of proxy envs.
+- Native mode is **mutually exclusive** with the standalone in-process extensions (`billion-context-pi`, `opencode-acp`) — the installer swaps the entries and snapshots the original config (`.bili-bak`).
+- OpenCode legacy sessions, V1/V2 shapes and caveats: [OpenCode](CLIENTS.md#opencode).
+- `kimi` reports runtime-info at bootstrap only (static headers can't carry per-request window/model values) and binds subagents by per-call `conversation_id`.
+- `hermes`'s native plugin is Python: it points hermes' httpx stack at the proxy via env vars after a health check and stamps per-request headers through an `llm_request` middleware.
+- `codex` has a companion MCP-shell install too, but it needs a running proxy — not native mode.
+- `claude` has a native posture (#964): managed settings block + `SessionStart` hook + MCP shell on a stable port; opt out with `BILI_NATIVE_CLAUDE=0` (passthrough). Mechanics: [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
+- `zcode` has a native posture (#1145): managed `~/.zcode/cli/config.json` block + per-session provider `baseURL` rewrite. Full mechanics: [CLIENTS.md](CLIENTS.md).
+- `jcode` and `aider` have no native mode (no plugin/MCP/tool-injection seam: #962, #1048) — use `bili jcode` / `bili aider`.
+- `copilot`, `amp` and `goose` are launcher-only (#1049); goose cannot be cert-MITMed (rustls trusts no CA file) and rides plain-HTTP base-URL redirects instead.
 
 ### Option 2 — Launcher (`bili pi` / `bili codex` / `bili claude` / `bili omp` / `bili opencode` / `bili hermes` / `bili dsh` / `bili codebuddy` / `bili qoder` / `bili trae` / `bili jcode` / `bili kimi` / `bili gemini` / `bili iflow` / `bili qwen` / `bili mcode` / `bili aider` / `bili copilot` / `bili amp` / `bili goose`)
 
@@ -426,20 +320,20 @@ bili claude                           # launch claude through the proxy
 bili omp                              # pi-style, file-free (#535): env + extension registerProvider + compaction cancel, real ~/.omp untouched
 bili opencode                         # OpenCode (1.x & 2.x): full guide in the [OpenCode](CLIENTS.md#opencode) section below
 bili hermes                           # file-free (#535): hermes proxy env (HTTPS_PROXY + combined CA bundle via SSL_CERT_FILE) — https via CONNECT MITM, http via absolute-form forward proxy; real ~/.hermes untouched
-bili dsh                              # deepseek-harness: full native plugin injected via --patch (#941) — compress/decompress/acp_status registered as real dsh tools, requests stamped with the dsh session id (plugin mode), /acp + /acp-cache session-bound; non-loopback upstreams ride proxy envs (https MITM, http absolute-form), loopback keeps the overlay DSH_HOME (~/.dsh-bili) rewrite (#535), built-in deepseek route via DEEPSEEK_BASE_URL; dsh native auto-compaction disabled (compaction-basic auto:false)
+bili dsh                              # deepseek-harness: full native plugin injected via --patch (#941) — real dsh tools, session-bound /acp + /acp-cache (plugin mode); non-loopback upstreams ride proxy envs, loopback keeps the overlay DSH_HOME rewrite (#535); dsh auto-compaction off
 bili codebuddy                        # Tencent CodeBuddy Code CLI: CODEBUDDY_BASE_URL /bili/ rewrite (OpenAI chat completions wire), budget aligned via CODEBUDDY_AUTO_COMPACT_WINDOW; real ~/.codebuddy untouched
 bili qoder                            # qoder: model endpoint is hardcoded https (no /bili/ rewrite possible) — cert-MITM via HTTPS_PROXY + NODE_EXTRA_CA_CERTS, default model hosts whitelisted (#653)
 bili trae                             # Trae CLI (ByteDance, closed Go binary, no base-URL override) — cert-MITM via HTTPS_PROXY + SSL_CERT_FILE, model host from TRAE_CLI_API_HOST or the default enterprise gateway (#655)
 bili jcode                            # jcode (Rust agent harness) — env-only cert-MITM launch: HTTPS_PROXY + SSL_CERT_FILE, model host api.z.ai whitelisted, local loopback providers stay direct via NO_PROXY
-bili kimi                             # Kimi Code CLI (Moonshot): honors standard proxy envs for all traffic EXCEPT an unconditional loopback bypass — non-loopback https via cert-MITM (HTTPS_PROXY + NODE_EXTRA_CA_CERTS/SSL_CERT_FILE), non-loopback http via absolute-form forward proxy; provider/model hosts from ~/.kimi-code/config.toml (KIMI_CODE_HOME respected) or the managed OAuth endpoints when none declared; loopback endpoints inventoried with a manual /bili/ prefix hint (#757)
+bili kimi                             # Kimi Code CLI (Moonshot): standard proxy envs except an unconditional loopback bypass — https via cert-MITM, http via absolute-form forward proxy; loopback endpoints inventoried with a manual /bili/ hint (#757)
 bili gemini                           # Gemini CLI (Google): GOOGLE_GEMINI_BASE_URL /bili/ rewrite to generativelanguage.googleapis.com (Google native wire), real ~/.gemini untouched
 bili iflow                            # iFlow CLI: IFLOW_BASE_URL /bili/ rewrite to apis.iflow.cn/v1 (OpenAI chat-completions wire), real ~/.iflow untouched
 bili qwen                             # Qwen Code (multi-protocol gemini-cli fork, no base-URL hook): cert-MITM via HTTPS_PROXY + NODE_EXTRA_CA_CERTS, default DashScope/Qwen model hosts whitelisted, custom relays via --mitm-domain
-bili mcode                            # MiniMax Code CLI: honors standard proxy envs for all traffic EXCEPT an unconditional loopback bypass — non-loopback https via cert-MITM (HTTPS_PROXY + NODE_EXTRA_CA_CERTS/SSL_CERT_FILE), non-loopback http via absolute-form forward proxy; provider hosts from ~/.minimax*/config.yaml (MINIMAX_DATA_DIR/MAVIS_DATA_DIR respected) or the official agent.minimax.* endpoints when none declared; loopback endpoints inventoried with a manual /bili/ prefix hint; session bound via the X-Mavis-Session-Id header (#1050)
-bili aider                            # Aider (Python pair programmer): cert-MITM via HTTPS_PROXY + SSL_CERT_FILE/REQUESTS_CA_BUNDLE; endpoint from OPENAI_API_BASE / ANTHROPIC_BASE_URL etc., --openai-api-base, or .aider.conf.yml — api.openai.com + api.anthropic.com assumed by default; loopback endpoints stay direct via NO_PROXY (#1048)
+bili mcode                            # MiniMax Code CLI: same shape as kimi (proxy envs, unconditional loopback bypass, cert-MITM/absolute-form); session bound via X-Mavis-Session-Id (#1050)
+bili aider                            # Aider (Python pair programmer): cert-MITM via HTTPS_PROXY + SSL_CERT_FILE/REQUESTS_CA_BUNDLE; endpoint from OPENAI_API_BASE / ANTHROPIC_BASE_URL / --openai-api-base / .aider.conf.yml (#1048)
 bili copilot                          # Copilot CLI (GitHub, closed Go binary) — cert-MITM via HTTPS_PROXY + SSL_CERT_FILE, api.githubcopilot.com + per-plan subdomains whitelisted (#1049)
 bili amp                              # Amp CLI (Sourcegraph, closed Go binary) — cert-MITM via HTTPS_PROXY + SSL_CERT_FILE, ampcode.com whitelisted (#1049)
-bili goose                            # Goose (Block, Rust/reqwest): rustls release builds trust no CA file — no proxy envs at all; built-in openai/anthropic legs redirected via OPENAI_HOST/ANTHROPIC_HOST, custom declarative providers via a regenerated GOOSE_PATH_ROOT overlay with base_url /bili/ rewrites (real config untouched, user edits merged back); fixed third-party providers get a warning (#1049)
+bili goose                            # Goose (Block, Rust/reqwest): rustls release builds trust no CA file — openai/anthropic legs via OPENAI_HOST/ANTHROPIC_HOST, custom providers via a regenerated GOOSE_PATH_ROOT overlay (/bili/ rewrites, real config untouched) (#1049)
 bili pi --mitm-domain api.foo.com     # add a domain to the MITM whitelist
 ```
 
@@ -541,14 +435,7 @@ Two knobs people look for first:
 
 ## How sessions work
 
-The proxy needs a stable per-conversation identifier to isolate compression
-state across concurrent users/accounts. It uses **the conversation value the
-client itself provides, verbatim** (`src/session-id.ts`) — no hashing and no
-protocol/upstream/API-key dimensions. Those dimensions were mutable mid-
-conversation (credentials rotate, users switch relays, the wire protocol can
-change), so keying on them orphaned state exactly when the user kept talking
-(#280, #286). The id is used only inside the proxy (state store, persistence,
-UI label); it is never sent upstream.
+The proxy keys compression state on **the conversation value the client itself provides, verbatim** (`src/session-id.ts`) — no hashing, no protocol/upstream/API-key dimensions (those mutate mid-conversation and orphaned state exactly when users kept talking, #280/#286). The id stays inside the proxy (state store, persistence, UI label); it is never sent upstream.
 
 Where the value comes from, first hit wins: the plugin's
 `x-bili-plugin-conversation` (honored only alongside the `x-bili-plugin`
@@ -568,22 +455,7 @@ Responses/OpenAI/Anthropic wires.
 | **omp** (via plugin) | ✅ yes | `prompt_cache_key` promoted over any fingerprint (#268) |
 | **pi** (bare) | ❌ no | nothing → anonymous prefix affinity below |
 
-**Header-less clients (pi-like): anonymous prefix affinity.** When a client
-sends no conversation signal at all, the proxy resolves the session from the
-replayed history itself (`src/prefix-affinity.ts`, #309): an incoming request
-reattaches to a stored session only when its history reproduces that
-session's message chain byte-exactly from position 0; otherwise it gets its
-own deterministic `pfa-…` session. Consequences for the failure modes this
-section used to warn about (#1262):
-
-- A **resumed** conversation reattaches to its own session — including after
-  a proxy restart (#499).
-- A **new task with an identical opener does NOT inherit** another
-  conversation's blocks or protected zone: it mints a fresh session, and once
-  its history diverges it is fully separate (fork lineage is recorded for
-  debugging).
-- A request with no usable signal at all is rejected with an explicit 400
-  instead of silently colliding with something else's state.
+**Header-less clients (pi-like): anonymous prefix affinity.** With no conversation signal at all, the proxy resolves the session from the replayed history itself (`src/prefix-affinity.ts`, #309): a request reattaches to a stored session only when its history reproduces that session's message chain byte-exactly from position 0; otherwise it gets its own deterministic `pfa-…` session. Consequences (#1262): a **resumed** conversation reattaches to its own session (even after a proxy restart, #499); a **new task with an identical opener does NOT inherit** another conversation's blocks — it mints a fresh, fully separate session; a request with no usable signal at all gets an explicit 400 instead of silently colliding.
 
 Design record and threat model: [SESSION-IDENTITY.md](SESSION-IDENTITY.md). The
 message-granularity sibling (why identity is content-derived, not an
@@ -593,13 +465,7 @@ For upstream sticky-routing, the proxy forwards only identity values the
 client already supplied (e.g. a body `session_id` is forwarded upstream as
 `x-session-id`); it never synthesizes one itself.
 
-**Recommendation:** clients that send an explicit id are safe to run many
-concurrent conversations through the proxy. For header-less multi-agent use,
-prefer the client plugin (the omp/pi plugins stamp a stable id per
-conversation); otherwise pass an explicit `x-acp-session` header per
-conversation. Even without either, prefix affinity keeps distinct tasks apart
-— the cost of a diverged fork is one raw resend plus a compression-ladder
-restart.
+**Recommendation:** explicit-id clients are safe to run concurrently. For header-less multi-agent use, prefer the client plugin (stamps a stable id per conversation) or pass an explicit `x-acp-session` header — otherwise prefix affinity still keeps distinct tasks apart (a diverged fork costs one raw resend plus a compression-ladder restart).
 
 ### Derived (child) sessions inherit the parent's compressed context (#1333, #1362)
 
