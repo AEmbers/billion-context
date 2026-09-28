@@ -280,7 +280,7 @@ prints a **text summary report right in the client**, headed by a clickable
 **Web UI link**: open it for the web version of the session page — the cache
 hit-rate **line chart** plus per-break **attribution**:
 
-![web session page: cache hit-rate chart + attribution](docs/cache-web-session.png)
+![web session page: cache hit-rate chart + attribution](docs/cache-web-session.en.png)
 The report has four
 blocks that pin things down at a glance: **GRAND LEDGER** (totals + hit% with
 an explicit `HEALTHY` verdict; misses decomposed into new content /
