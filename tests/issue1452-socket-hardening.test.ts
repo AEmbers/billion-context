@@ -429,3 +429,143 @@ test("stall guard: default-off — silence after first byte does NOT cut the str
         await close(upstream);
     }
 });
+
+test("clientError backstop: silent peer after drain-end is terminated, reason=clienterror-backstop (#1529)", async () => {
+    // Adversarial shape: parse-garbage, then silence forever. allowHalfOpen:true
+    // is the ONLY pure half-open holder — a default net.Socket auto-ends its
+    // write side upon receiving our drain FIN, and that well-behaved path is
+    // pinned by the #1452 test above (clean FIN, no error).
+    const upstream = http.createServer((_req, res) => res.end("{}"));
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    const restoreBackstop = withEnv("BILI_CLIENT_ERROR_BACKSTOP_MS", "300");
+    let harness: Harness | null = null;
+    let sock: net.Socket | null = null;
+    try {
+        const h = await startProxy(upstream, true);
+        harness = h;
+        const base = captured.length;
+        assert.ok(captured.some((c) => c.msg.includes("[conn] keepAliveTimeout=") && c.msg.includes("clientErrorBackstop=300ms")), "expected startup line pinning clientErrorBackstop=300ms (knob wired)");
+        sock = net.connect({ port: h.port, host: "127.0.0.1", allowHalfOpen: true });
+        await once(sock, "connect");
+        let sawError: string | null = null;
+        sock.on("error", (e) => { sawError = e.code ?? e.message; });
+        sock.write(Buffer.alloc(65_536, 0));
+        const endedInTime = await Promise.race([
+            (async () => { await once(sock, "end"); return true; })(),
+            new Promise((r) => setTimeout(() => r(false), 5_000)),
+        ]);
+        assert.ok(endedInTime, `drain FIN must still reach the peer first (bail end() intact), sawError=${sawError}`);
+        // The backstop close itself is invisible to the peer: from FIN_WAIT_2
+        // with an empty (fully drained) recv queue the kernel transitions to
+        // TIME_WAIT quietly — no RST, no second FIN. The anchor is therefore
+        // the SERVER-side ledger line, which only the backstop path classifies
+        // as clienterror-backstop.
+        const deadline = Date.now() + 5000;
+        let line = captured.slice(base).find((c) => /closed reason=clienterror-backstop .* reqs=0$/.test(c.msg));
+        while (!line && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+            line = captured.slice(base).find((c) => /closed reason=clienterror-backstop .* reqs=0$/.test(c.msg));
+        }
+        assert.ok(line, `expected reason=clienterror-backstop ledger line, got: ${captured.slice(base).filter((c) => c.msg.includes("closed reason=")).map((c) => c.msg).join(" | ")}`);
+        assert.equal(line!.level, "debug");
+        const marker = captured.find((c) => c.level === "warn" && c.msg.includes("clientError backstop"));
+        assert.ok(marker, "expected the distinct backstop warn marker");
+        assert.equal(sawError, null, `backstop destroy must carry no unread residual bytes (no RST to the peer), got ${sawError}`);
+    } finally {
+        restoreBackstop();
+        setLogCapture(null);
+        if (sock && !sock.destroyed) sock.destroy();
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});
+
+test("clientError backstop: knob off restores hold-until-peer-FIN status quo (#1529)", async () => {
+    const upstream = http.createServer((_req, res) => res.end("{}"));
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    const restoreBackstop = withEnv("BILI_CLIENT_ERROR_BACKSTOP_MS", "0");
+    const restoreExposure = withEnv("BILI_EXPOSURE_LOG_INTERVAL_MS", "100");
+    let harness: Harness | null = null;
+    let sock: net.Socket | null = null;
+    try {
+        const h = await startProxy(upstream, true);
+        harness = h;
+        const base = captured.length;
+        assert.ok(captured.some((c) => c.msg.includes("clientErrorBackstop=0ms")), "expected startup line pinning clientErrorBackstop=0ms (knob off)");
+        // Same adversarial half-open holder as above.
+        sock = net.connect({ port: h.port, host: "127.0.0.1", allowHalfOpen: true });
+        await once(sock, "connect");
+        let closedEarly = false;
+        sock.on("close", () => { closedEarly = true; });
+        sock.write(Buffer.alloc(65_536, 0));
+        const endedInTime = await Promise.race([
+            (async () => { await once(sock, "end"); return true; })(),
+            new Promise((r) => setTimeout(() => r(false), 5_000)),
+        ]);
+        assert.ok(endedInTime, "drain FIN must reach the peer even with the backstop disabled");
+        // Past the moment a 300ms backstop would have fired: with the knob off
+        // the socket must STILL be held on our side. Observable via the
+        // [exposure] telemetry (liveConns counts connRecords entries).
+        await new Promise((r) => setTimeout(r, 800));
+        assert.ok(!closedEarly, "with backstop disabled the socket must not be terminated early");
+        const held = captured.slice(base).some((c) => /liveConns=1\b/.test(c.msg));
+        assert.ok(held, `expected an [exposure] line showing the half-open socket still held (liveConns=1), got: ${captured.slice(base).filter((c) => c.msg.startsWith("[exposure]")).map((c) => c.msg).join(" | ")}`);
+        assert.ok(!captured.slice(base).some((c) => c.msg.includes("reason=clienterror-backstop")), "disabled backstop must not fire");
+        // Peer FIN now → clean close classified server-end (we ended first at bail).
+        sock.end();
+        const deadline = Date.now() + 2000;
+        let line = captured.slice(base).find((c) => /closed reason=server-end .* reqs=0$/.test(c.msg));
+        while (!line && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+            line = captured.slice(base).find((c) => /closed reason=server-end .* reqs=0$/.test(c.msg));
+        }
+        assert.ok(line, `expected reason=server-end after peer FIN, got: ${captured.slice(base).filter((c) => c.msg.includes("closed reason=")).map((c) => c.msg).join(" | ")}`);
+    } finally {
+        restoreBackstop();
+        restoreExposure();
+        setLogCapture(null);
+        if (sock && !sock.destroyed) sock.destroy();
+        if (harness) { await harness.stop(); harness.cleanup(); }
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});
+
+test("clientError backstop: knob parse — negative / non-numeric fall back to the 30s default (#1529)", async () => {
+    // Pins the documented contract (CONFIGURATION.md + PR body): only a valid
+    // non-negative integer is honored (0 disables); a negative or non-numeric
+    // value falls back to the 30s default rather than silently disabling the
+    // backstop. The value is read at startServer, so each case boots its own
+    // proxy and reads the [conn] startup line that echoes the resolved value.
+    const upstream = http.createServer((_req, res) => res.end("{}"));
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const captured: { level: string; msg: string }[] = [];
+    setLogCapture((level, msg) => captured.push({ level, msg }));
+    const bootLine = async (value: string | undefined): Promise<string> => {
+        const restore = withEnv("BILI_CLIENT_ERROR_BACKSTOP_MS", value);
+        try {
+            const base = captured.length;
+            const h = await startProxy(upstream, true);
+            try {
+                return (captured.slice(base).find((c) => c.msg.includes("clientErrorBackstop="))?.msg ?? "");
+            } finally {
+                await h.stop(); h.cleanup();
+            }
+        } finally {
+            restore();
+        }
+    };
+    try {
+        assert.ok((await bootLine("-5")).includes("clientErrorBackstop=30000ms"), "negative knob must fall back to the 30s default");
+        assert.ok((await bootLine("garbage")).includes("clientErrorBackstop=30000ms"), "non-numeric knob must fall back to the 30s default");
+    } finally {
+        setLogCapture(null);
+        upstream.closeAllConnections?.();
+        await close(upstream);
+    }
+});

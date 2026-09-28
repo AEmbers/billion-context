@@ -634,8 +634,10 @@
 | `BILI_STREAM_STALL_MS` | 可选的流式阶段停滞守卫（#1452）：正整数 = 首个字节到达**之后**、相邻 body chunk 之间允许的最大静默毫秒数。超时后中止上游请求，客户端收到标准的带内截断信号（`upstream_stream_truncated` 错误帧 + `[DONE]`）随后干净 FIN——与上游中途 FIN 的线上结果相同，只是发现得更早。原因记录在服务端日志（`upstream stalled: no bytes for Nms …`）。默认 `0`（关闭）：短暂上游停滞继续被容忍，仅受完整的 `BILI_UPSTREAM_TIMEOUT_MS` 预算约束。分工：`BILI_UPSTREAM_TIMEOUT_MS` 是粗粒度常开的传输预算（12 分钟）；此开关是面向不能挂在死流上的交互式客户端的细粒度守卫。 |
 | `BILI_KEEP_ALIVE_TIMEOUT_MS` | 客户端侧套接字的 keep-alive 超时（毫秒，默认 `5000`，与 Node 隐式默认一致；#1452）。空闲客户端连接由 Node 内建回收器以干净 FIN 回收；此开关把原先隐式的值显式化并可配置，回收在连接生命周期台账（debug 日志）中分类为 `reason=idle-timeout`。非数字或非正值回退到 `5000`。 |
 | `BILI_EXPOSURE_LOG_INTERVAL_MS` | 长驻暴露遥测行 `[exposure] uptime=… liveConns=… tcpHandles=… handles=… sessions=… blindTunnels=… inFlight=…` 的周期（毫秒，默认 `3600000` 即每小时；#1452）。`0` 关闭。目的是让套接字句柄泄漏与僵尸连接在长期运行日志中现形，而不是靠事后取证。 |
+| `BILI_CLIENT_ERROR_BACKSTOP_MS` | clientError 排空路径的终局兜底（毫秒）（#1529，#1452 第 1 项后续）：排空 bail（300ms）对连接调用 `end()` 后，若对端始终不发 FIN，该套接字否则会在我方无限期半开滞留——keep-alive 回收器以已完成响应为键，且 Node 默认不开 SO_KEEPALIVE。bail 后静默超过此值时，代理改为销毁该套接字，在连接生命周期台账中分类为 `reason=clienterror-backstop` 并带独立的 warn 标记。对 #1452 的 RST 签名安全：整个窗口内套接字一直处于 `resume()` 排空状态，销毁时不携带未读残留字节。默认 `30000`；`0` 恢复「持有直到对端死亡」的旧行为。非数字或负值回退到 `30000`。 |
 | `ACP_SESSION_HEADER` | 会话 id 请求头名称（默认 `x-acp-session`）。 |
 | `ACP_REASONING_KEEP` | 仅 Responses API：设 `none` 丢弃全部 reasoning 项。默认让 reasoning 走压缩管道，其轮次被摘要后自动隐藏（避免无限累积破坏 Codex 的 prompt-cache 前缀）。 |
+| `ACP_RENDER_NONE` | 设为 `1` 停止向出站请求历史注入逐消息渲染标签（承载 `mNNNNN` ref 的 `` `` `` 标记）——适用于所有线格式（OpenAI chat、Anthropic、Responses）及 compact 重建（#933）。默认 `text-only`：模型靠这些 ref 在 `compress` 调用中引用消息，只有确认自己的工作流不需要基于 ref 的压缩（例如标签回声泄漏到客户端可见输出）后才应禁用。此前该变量仅在 Responses 路径与 compact 上生效；#933 扩展到了所有路径。 |
 | `ACP_LOG_FILE` | 日志文件路径（默认 XDG state 路径；`off` 关闭文件只保留 stderr）。10 MB 自动轮转。 |
 | `ACP_DUMP_SSE` | 调试用：转储原始 SSE 帧的目录——含压缩重发/截断重试的循环内上游响应（命名 `<ts>-<sid>-loop<N>-raw.sse`），外层 tee 看不到（#1455）。 |
 | `BILI_STREAM_ERROR_SHAPE` | 设为 `"completion"` 恢复 anthropic/openai 线上旧的失败形状（失败文本包在合成的成功完成里）；默认 `"protocol"` = 协议原生错误帧（#1455）。与 `compat.streamErrorShape` 同一开关，此环境变量优先。 |
