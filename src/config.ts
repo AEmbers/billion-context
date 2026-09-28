@@ -605,12 +605,6 @@ export type ProxyOptions = {
     autoRestartOnUpdate: boolean;
     /** Dist-tag channel the auto-updater follows (default "latest"). */
     updateTag: string;
-    /** Critical-defect advisory watcher (#1481): runs INDEPENDENTLY of
-     *  autoUpdate and force-installs the owner-recommended version when the
-     *  local version falls inside an affected range. Default ON. */
-    advisoryCheck: boolean;
-    /** Override for the advisory document URL (env BILI_ADVISORY_URL wins). */
-    advisoryUrl?: string;
     logFile?: string;
     /** MITM transparent-proxy mode. When enabled, an HTTP CONNECT handler is
      *  attached so clients that only know how to set HTTP_PROXY (ZCode with a
@@ -918,10 +912,6 @@ export function loadOptions(env: NodeJS.ProcessEnv = process.env): ProxyOptions 
         // liveness, so it requires an explicit opt-in (#811).
         autoRestartOnUpdate: (env.ACP_AUTO_RESTART_ON_UPDATE ?? (fileConfig.autoRestartOnUpdate === true ? "1" : "0")) !== "0",
         updateTag: (env.ACP_UPDATE_TAG ?? fileConfig.updateTag ?? "latest").trim() || "latest",
-        // Default ON: unlike autoRestartOnUpdate, this never touches process
-        // liveness — it only installs files and warns (#1481).
-        advisoryCheck: (env.BILI_ADVISORY_CHECK ?? (fileConfig.advisoryCheck === false ? "0" : "1")) !== "0",
-        advisoryUrl: env.BILI_ADVISORY_URL || fileConfig.advisoryUrl || undefined,
         logFile: env.ACP_LOG_FILE !== undefined ? (env.ACP_LOG_FILE || undefined) : fileConfig.logFile,
         mitm: {
             enabled: (env.BILI_MITM ?? (fileConfig.mitm?.enabled === false ? "0" : "1")) !== "0",
@@ -974,11 +964,6 @@ type FileConfig = {
     autoRestartOnUpdate?: boolean;
     /** Dist-tag channel the auto-updater follows (default "latest"). */
     updateTag?: string;
-    /** Set `false` to disable the critical-defect advisory watcher (#1481);
-     *  env BILI_ADVISORY_CHECK wins when set. */
-    advisoryCheck?: boolean;
-    /** Override for the advisory document URL (env BILI_ADVISORY_URL wins). */
-    advisoryUrl?: string;
     upstreamProxy?: string;
     upstreamProxyMode?: string;
     logFile?: string;

@@ -253,19 +253,6 @@ export const WEB_CLIENT = `(function () {
                 cb.innerHTML = "";
             }
         }
-        const ab = $("advisory-banner");
-        if (ab) {
-            const a = d.advisory;
-            if (a && a.id) {
-                ab.hidden = false;
-                ab.classList.add("show");
-                ab.innerHTML = '<strong>' + t("advisory.on") + '</strong> <span class="mono">[' + a.id + "]</span> " + t("advisory.desc") + "<span>" + (a.reason || "") + "</span>" + t("advisory.hint") + '<span class="mono">npm install -g billion-context@' + (a.targetFailed ? "latest" : a.target || "latest") + "</span>";
-            } else {
-                ab.hidden = true;
-                ab.classList.remove("show");
-                ab.innerHTML = "";
-            }
-        }
     }
 
     async function loadSessions(detailId) {
