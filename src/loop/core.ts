@@ -28,7 +28,7 @@ import { dumpRejectedBody } from "../error-dump.js";
 import { dumpsDir } from "../paths.js";
 import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoBody } from "../strict-echo.js";
 import { log as loggerLog } from "../logger.js";
-import { promptInputTotal, type WireProtocol } from "../util.js";
+import { promptInputTotal, safeSuffix, type WireProtocol } from "../util.js";
 import { DEGENERATE_RETRY_NUDGE } from "../degenerate-retry.js";
 
 export const MAX_LOOP_ROUNDS = 10;
@@ -593,7 +593,7 @@ export async function* runCompressLoop(
                     continuationRetried = true;
                     const tail = assistantText.length <= TRUNCATION_CONTINUATION_TAIL_CHARS
                         ? assistantText
-                        : `…${assistantText.slice(-TRUNCATION_CONTINUATION_TAIL_CHARS)}`;
+                        : `…${safeSuffix(assistantText, TRUNCATION_CONTINUATION_TAIL_CHARS)}`;
                     ctx.log(`[acp-loop] round ${round}: upstream truncated after ${assistantText.length} text chars reached the client; retrying once with continuation nudge`);
                     const nudge: CoreMessage = {
                         id: `acp_truncation_retry_r${round}`,
