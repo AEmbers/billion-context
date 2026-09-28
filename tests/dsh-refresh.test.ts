@@ -9,6 +9,7 @@ import {
     isRegistryDepSpec,
     planDshSpawn,
     refreshDshProfileBundles,
+    runDshPluginAsync,
     _setDshRunnersForTest,
     _resetDshDesktopHintForTest,
     type DshPlan,
@@ -205,5 +206,17 @@ test("refreshDshProfileBundles: no profiles root or no bili deps → silent no-o
         assert.equal(logs.length, 0);
     } finally {
         fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test("runDshPluginAsync: failure message renders the command once, no doubled subcommand (#1600)", async () => {
+    _setDshRunnersForTest({ async: () => { throw Object.assign(new Error("spawn failed"), { status: 1, stderr: 'error: profile "desktop" is managed exclusively by the Electron application' }); } });
+    try {
+        await assert.rejects(runDshPluginAsync(["plugin", "--profile", "desktop", "add", "billion-context@0.1.166"]), (err: Error) => {
+            assert.match(err.message, /^dsh plugin --profile desktop add billion-context@0\.1\.166 failed: error: profile "desktop" is managed exclusively by the Electron application$/);
+            return true;
+        });
+    } finally {
+        _setDshRunnersForTest(undefined);
     }
 });
