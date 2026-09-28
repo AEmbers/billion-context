@@ -41,11 +41,12 @@
 // available on all observed surfaces.
 
 import { ACP_TOOLS_OPENAI, ABSORB_TOOL_OPENAI } from "../compress-tool.js";
-import { fetchProxyVersion, fetchStatus, forwardTool, postIdentityRegister, proxyBaseFromEnv, proxyBaseFromUrl, reportCompactionBoundary, reportRuntimeInfoOnChange } from "./shared.js";
+import { fetchProxyVersion, fetchStatus, fitNoticeDescription, forwardTool, postIdentityRegister, proxyBaseFromEnv, proxyBaseFromUrl, reportCompactionBoundary, reportRuntimeInfoOnChange, V2_SYNTHETIC_TEXT } from "./shared.js";
 
 // OpenCode V2 TUI renders a synthetic message as a visible Notice row only when its display text fits the
-// timeline cap (~1KB): longer text renders nothing (#880). Panels go to description verbatim under the cap.
-import { V2_SYNTHETIC_TEXT } from "./shared.js";
+// timeline cap (~1KB): longer text renders nothing (#880). Under the cap, panels go to description verbatim;
+// over it, fitNoticeDescription hoists the Web UI deep link to line one and keeps whole leading lines (#1602) —
+// the full panel stays reachable through that link.
 const V2_SYNTHETIC_VISIBLE_MAX = 1024;
 // /acp-cache renders a report the user explicitly asked to read — unlike the
 // status panel whose leading lines carry the essence, its tail (LINE ITEMS)
@@ -294,6 +295,7 @@ export function createOpencodeV2Setup(options: OpencodeV2SetupOptions = {}): (ct
                             return;
                         }
                         let text: string;
+                        let webUrl: string | undefined;
                         if (pluginDisabled()) {
                             text = "bili: disabled (BILLION_CONTEXT_PLUGIN=0)";
                         } else {
@@ -305,6 +307,7 @@ export function createOpencodeV2Setup(options: OpencodeV2SetupOptions = {}): (ct
                                     const status = await fetchStatus(base, sid);
                                     if (status && typeof status.panel === "string" && status.panel.length > 0) {
                                         text = status.panel;
+                                        webUrl = typeof status.webUrl === "string" && status.webUrl.length > 0 ? status.webUrl : undefined;
                                     } else if (status && status.ok === false) {
                                         let version: string | undefined;
                                         try {
@@ -337,11 +340,10 @@ export function createOpencodeV2Setup(options: OpencodeV2SetupOptions = {}): (ct
                         try {
                             // resume:false — OpenCode V2 defaults to delivery "steer" + execution.wake(), which would
                             // start a model turn on every /acp invocation with no user input (spurious empty turns).
-                            // Short panels become the visible description verbatim; long ones keep their leading
-                            // lines plus a marker so the model-facing body never repeats the whole panel.
-                            const description = text.length > V2_SYNTHETIC_VISIBLE_MAX
-                                ? text.slice(0, V2_SYNTHETIC_VISIBLE_MAX - 20) + "\n\n[panel truncated]"
-                                : text;
+                            // Short panels become the visible description verbatim; long ones lead with the Web UI
+                            // deep link (full panel stays reachable there) and keep their leading whole lines, so
+                            // the model-facing body never repeats the whole panel (#1602).
+                            const description = fitNoticeDescription(text, V2_SYNTHETIC_VISIBLE_MAX, "panel", webUrl);
                             await ctx.session?.synthetic?.({ sessionID: sid, text: V2_SYNTHETIC_TEXT, description, resume: false });
                         } catch (err) {
                             console.error(`[bili-opencode] /acp render failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -382,9 +384,7 @@ export function createOpencodeV2Setup(options: OpencodeV2SetupOptions = {}): (ct
                             }
                         }
                         try {
-                            const description = text.length > V2_CACHE_REPORT_VISIBLE_MAX
-                                ? text.slice(0, V2_CACHE_REPORT_VISIBLE_MAX - 20) + "\n\n[report truncated]"
-                                : text;
+                            const description = fitNoticeDescription(text, V2_CACHE_REPORT_VISIBLE_MAX, "report");
                             await ctx.session?.synthetic?.({ sessionID: sid, text: V2_SYNTHETIC_TEXT, description, resume: false });
                         } catch (err) {
                             console.error(`[bili-opencode] /acp-cache render failed: ${err instanceof Error ? err.message : String(err)}`);
