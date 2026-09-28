@@ -43,6 +43,11 @@ interface LedgerLine {
     cr: number;
     tr: number;
     foldSeq: number | null;
+    model?: string;
+    /** #1535: 1 iff `model` differs from the previous sample's KNOWN model
+     *  (unknown sides never flag); marks the re-billed stable prefix on the
+     *  first request after a model switch. Sparse: omitted unless set. */
+    sw?: 1;
 }
 
 export interface CacheLedger {
@@ -61,6 +66,8 @@ export interface CacheLedger {
         nc: number;
         cr: number;
         tr: number;
+        switches: number;
+        switchMissed: number;
     };
 }
 
@@ -92,7 +99,13 @@ function prefixTokensBeforeRef(session: Session, ref: string): number {
 export function getCacheLedger(session: Session): CacheLedger {
     const meta = session.metadata ?? (session.metadata = {});
     const existing = meta[LEDGER_KEY] as CacheLedger | undefined;
-    if (existing && existing.v === 1) return existing;
+    if (existing && existing.v === 1) {
+        // Ledgers persisted before #1535 lack the switch counters — normalize
+        // in place so later arithmetic never sees undefined.
+        if (typeof existing.agg.switches !== "number") existing.agg.switches = 0;
+        if (typeof existing.agg.switchMissed !== "number") existing.agg.switchMissed = 0;
+        return existing;
+    }
     // Bootstrap: blocks already present predate ledger tracking — record
     // their high-water mark WITHOUT fold events (no usage baseline existed).
     const maxBlockId = (session.state?.blocks ?? []).reduce((n, b) => Math.max(n, refNum(b.blockId)), 0);
@@ -104,7 +117,7 @@ export function getCacheLedger(session: Session): CacheLedger {
         foldSeqCounter: 0,
         folds: [],
         lines: [],
-        agg: { requests: 0, input: 0, cached: 0, output: 0, nc: 0, cr: 0, tr: 0 },
+        agg: { requests: 0, input: 0, cached: 0, output: 0, nc: 0, cr: 0, tr: 0, switches: 0, switchMissed: 0 },
     };
     meta[LEDGER_KEY] = led;
     return led;
@@ -183,6 +196,11 @@ export function recordCacheSample(session: Session, s: { at: number; input: numb
         led.consumedFoldSeq = Math.max(led.consumedFoldSeq, hi);
     }
     const hitPct = s.input > 0 ? round1((s.cached / s.input) * 100) : 0;
+    const model = typeof session.metadata?.lastModel === "string" && session.metadata.lastModel !== ""
+        ? session.metadata.lastModel
+        : undefined;
+    const prevModel = prevLine ? prevLine.model : undefined;
+    const switched = model !== undefined && prevModel !== undefined && model !== prevModel;
     // #1286: turn counting is decoupled from compRepay attribution — the
     // consumedFoldSeq gate above applies to the pending list only. Every
     // elapsed fold counts EVERY later sample, matching buildCacheReport's
@@ -210,6 +228,8 @@ export function recordCacheSample(session: Session, s: { at: number; input: numb
         cr: dec.compRepay,
         tr: dec.ttlRepay,
         foldSeq,
+        model,
+        sw: switched ? 1 : undefined,
     });
     const agg = led.agg;
     agg.requests += 1;
@@ -219,6 +239,11 @@ export function recordCacheSample(session: Session, s: { at: number; input: numb
     agg.nc += dec.newContent;
     agg.cr += dec.compRepay;
     agg.tr += dec.ttlRepay;
+    if (switched) {
+        // #1535: charge only this sample's unexplained residual (tr) — compRepay stays booked to its fold.
+        agg.switches += 1;
+        agg.switchMissed += dec.ttlRepay;
+    }
 }
 
 /** [#1279] Price profile stamped by the last request (server.ts runPrepare).
@@ -237,7 +262,29 @@ function stampedPriceProfile(session: Session): PriceProfile | undefined {
     return Object.keys(out).length > 0 ? out : undefined;
 }
 
-export function buildSessionCacheReport(session: Session): CacheReport {
+export interface ModelSwitchEvent {
+    seq: number;
+    at: number;
+    from: string | null;
+    to: string;
+    input: number;
+    cached: number;
+    hitPct: number;
+    /** This sample's unexplained residual (tr) — the re-bill charged to the switch. */
+    attributed: number;
+}
+
+export interface ModelSwitchStats {
+    count: number;
+    missedTokens: number;
+    events: ModelSwitchEvent[];
+}
+
+export interface BiliCacheReport extends CacheReport {
+    modelSwitches: ModelSwitchStats;
+}
+
+export function buildSessionCacheReport(session: Session): BiliCacheReport {
     const led = getCacheLedger(session);
     // Effective profile = stamped value over kernel defaults (w=1, r=0.1, q=4),
     // mirroring the per-field fallback inside computeFoldEconomics. Unstamped
@@ -271,6 +318,22 @@ export function buildSessionCacheReport(session: Session): CacheReport {
             turnsToNextFold: f.k,
         }, effective),
     );
+    const events: ModelSwitchEvent[] = [];
+    for (let i = 0; i < led.lines.length; i++) {
+        const l = led.lines[i];
+        if (!l || l.sw !== 1 || l.model === undefined) continue;
+        const prev = i > 0 ? led.lines[i - 1] : undefined;
+        events.push({
+            seq: l.seq,
+            at: l.at,
+            from: prev?.model ?? null,
+            to: l.model,
+            input: l.input,
+            cached: l.cached,
+            hitPct: l.hitPct,
+            attributed: l.tr,
+        });
+    }
     return {
         generatedAt: Date.now(),
         profile: effective,
@@ -291,6 +354,20 @@ export function buildSessionCacheReport(session: Session): CacheReport {
             foldSeq: l.foldSeq,
         })),
         linesOmitted: led.sampleSeq - led.lines.length,
+        modelSwitches: { count: a.switches, missedTokens: a.switchMissed, events },
+    };
+}
+
+/** Read-only switch stats for the web sessions table — returns null instead of
+ *  bootstrapping an empty ledger just to render zeros. */
+export function readModelSwitchStats(session: Session): { count: number; missedTokens: number } | null {
+    const raw = session.metadata?.[LEDGER_KEY];
+    if (!raw || typeof raw !== "object") return null;
+    const led = raw as CacheLedger;
+    if (led.v !== 1) return null;
+    return {
+        count: typeof led.agg?.switches === "number" ? led.agg.switches : 0,
+        missedTokens: typeof led.agg?.switchMissed === "number" ? led.agg.switchMissed : 0,
     };
 }
 
@@ -300,15 +377,46 @@ export function handleAcpCache(session: Session, args?: Record<string, unknown>)
         const report = buildSessionCacheReport(session);
         if (detail === "full" && report.lines.length > FULL_DETAIL_LINES) {
             const dropped = report.lines.length - FULL_DETAIL_LINES;
-            return formatCacheReport(
+            const capped = formatCacheReport(
                 { ...report, lines: report.lines.slice(-FULL_DETAIL_LINES), linesOmitted: report.linesOmitted + dropped },
                 session.id,
                 { detail },
             );
+            return capped + "\n\n" + formatModelSwitches(report.modelSwitches, detail);
         }
-        return formatCacheReport(report, session.id, { detail });
+        return formatCacheReport(report, session.id, { detail }) + "\n\n" + formatModelSwitches(report.modelSwitches, detail);
     } catch (err) {
         loggerLog("warn", `[${session.id}] [acp_cache] report failed: ${String(err)}`);
         return `[acp_cache FAILED: ${String(err)}]`;
     }
+}
+
+function fmtTok(n: number): string {
+    const v = Math.round(n);
+    return v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e4 ? `${(v / 1e3).toFixed(1)}K` : String(v);
+}
+
+function fmtTime(at: number): string {
+    const d = new Date(at);
+    const p = (x: number) => String(x).padStart(2, "0");
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+const SWITCH_LIST_CAP = 8;
+
+function formatModelSwitches(sw: ModelSwitchStats, detail: "summary" | "full"): string {
+    const out: string[] = ["MODEL SWITCHES"];
+    if (sw.count === 0) {
+        out.push("  none observed");
+        return out.join("\n");
+    }
+    out.push(`  ${sw.count} switch(es) · ${fmtTok(sw.missedTokens)} tok re-billed (stable-prefix miss charged to the model change)`);
+    const shown = detail === "full" ? sw.events : sw.events.slice(-SWITCH_LIST_CAP);
+    for (const e of shown) {
+        out.push(`  #${e.seq} ${fmtTime(e.at)} ${e.from ?? "?"} → ${e.to} · hit ${e.hitPct.toFixed(1)}% · attributed ${fmtTok(e.attributed)}`);
+    }
+    if (shown.length < sw.events.length) {
+        out.push(`  … ${sw.events.length - shown.length} earlier switch(es) omitted (detail:"full" lists all)`);
+    }
+    return out.join("\n");
 }
