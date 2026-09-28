@@ -644,11 +644,12 @@ export class SessionStore {
         return this.store.flushSync(session.id, this.guardedBuild(session));
     }
 
-    /** Flush all dirty sessions with a pending debounce timer. Called on
-     *  SIGTERM/SIGINT for graceful shutdown. The kernel store flushes its own
-     *  pending set (builders read the live Session objects at write time, so
-     *  no session list is needed) and drains in-flight write chains. */
-    async flushAll(_sessions: Iterable<Session>): Promise<void> {
+    /** Flush all dirty content stores, then pending session writes. Called on
+     *  SIGTERM/SIGINT for graceful shutdown. Content stores live outside the
+     *  kernel StateStore, so retry them from the resident session list before
+     *  the kernel drains its pending writes and in-flight chains. */
+    async flushAll(sessions: Iterable<Session> = []): Promise<void> {
+        for (const session of sessions) this.saveContentStore(session);
         await this.store.flushAll();
     }
 
