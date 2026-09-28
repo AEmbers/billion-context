@@ -70,7 +70,8 @@ import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
-import { buildSessionCacheReport, handleAcpCache, readModelSwitchStats } from "./cache-ledger.js";
+import { buildSessionCacheReport, handleAcpCache, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
+import { warnCacheCollapse } from "./cache-warn.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
@@ -5920,25 +5921,21 @@ async function forward(
                 const rawUsage = prepared.protocol === "google" ? json.usageMetadata ?? json.usage : json.usage;
                 const u = (rawUsage ?? {}) as Record<string, unknown>;
                 const { total, cached } = usageTotals(prepared.protocol, u);
-                if (typeof total === "number") {
-                    prepared.session.stats.inputTokens += total;
-                    // lastInputTokens = true TOTAL context (protocol-correct),
-                    // net of this turn's compress savings (see stream.ts
-                    // applyRanges — the fold lands on the NEXT request).
-                    prepared.session.stats.lastInputTokens = Math.max(
-                        0,
-                        total - (prepared.session.stats.compressCreditTokens ?? 0),
-                    );
-                    prepared.session.stats.lastInputTokensSource = "usage";
-                    // #1110: a real usage report retires the one-shot overflow arm.
-                    delete prepared.session.stats.overflowArmTokens;
-                    if (typeof cached === "number") {
-                        prepared.session.stats.cachedTokens += cached;
-                        prepared.session.stats.cacheSamples += 1;
-                    }
-                    const out = usageOutputTotal(prepared.protocol, u);
-                    if (typeof out === "number") prepared.session.stats.outputTokens += out;
+                const out = usageOutputTotal(prepared.protocol, u);
+                // #1547: settle through the shared path — stats AND the cache
+                // ledger. Before this, this branch updated stats only, so
+                // stream:false sessions produced zero ledger lines and were
+                // invisible to /acp-cache, __bili/cache-report and the
+                // invalidation attribution built on them (#1536).
+                const reportedCached: number | null = typeof cached === "number" ? cached : null;
+                const billed = typeof total === "number" ? total : 0;
+                if (billed > 0 || reportedCached !== null) {
+                    settleUsageReport(prepared.session, { total: billed, reportedCached, output: out, protocol: prepared.protocol, upstream: targetOrigin });
+                    if (reportedCached !== null) warnCacheCollapse(prepared.session, billed, reportedCached);
+                    const hitPct = reportedCached !== null && billed > 0 ? Math.round((100 * reportedCached) / billed) : undefined;
+                    loggerLog("info", `[${prepared.session.id}] [acp-usage] input=${billed} ${hitPct === undefined ? "(no cache report)" : `cached=${reportedCached} (cache hit ${hitPct}%)`}${billed <= 0 ? " (zero-total: lastInputTokens kept)" : ""}`);
                 }
+                if (typeof out === "number") prepared.session.stats.outputTokens += out;
                 if (prepared.protocol === "openai") {
                     await withSessionLock(prepared.session, () => rewriteOpenaiJsonResponse(json, ctx));
                 } else if (prepared.protocol === "responses") {
