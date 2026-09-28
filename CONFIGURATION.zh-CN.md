@@ -631,6 +631,9 @@
 | `ACP_PROVIDERS` | 指向外部 `providers.json` 的路径（旧版 / 共享文件）。 |
 | `BILI_REPLAY_RETRY_BASE_MS` | acp-loop 回放重试的基础退避延迟（毫秒）：上游瞬时拒绝后重试（默认 `1500`；设 `0` 关闭延迟）。见 #189。 |
 | `BILI_REPLAY_RETRY_MAX` | acp-loop 回放重试的总次数（默认 `3`；设 `1` 彻底关闭重试 —— 旧版 fail-fast 行为）。见 #189。 |
+| `BILI_STREAM_STALL_MS` | 可选的流式阶段停滞守卫（#1452）：正整数 = 首个字节到达**之后**、相邻 body chunk 之间允许的最大静默毫秒数。超时后中止上游请求，客户端收到标准的带内截断信号（`upstream_stream_truncated` 错误帧 + `[DONE]`）随后干净 FIN——与上游中途 FIN 的线上结果相同，只是发现得更早。原因记录在服务端日志（`upstream stalled: no bytes for Nms …`）。默认 `0`（关闭）：短暂上游停滞继续被容忍，仅受完整的 `BILI_UPSTREAM_TIMEOUT_MS` 预算约束。分工：`BILI_UPSTREAM_TIMEOUT_MS` 是粗粒度常开的传输预算（12 分钟）；此开关是面向不能挂在死流上的交互式客户端的细粒度守卫。 |
+| `BILI_KEEP_ALIVE_TIMEOUT_MS` | 客户端侧套接字的 keep-alive 超时（毫秒，默认 `5000`，与 Node 隐式默认一致；#1452）。空闲客户端连接由 Node 内建回收器以干净 FIN 回收；此开关把原先隐式的值显式化并可配置，回收在连接生命周期台账（debug 日志）中分类为 `reason=idle-timeout`。非数字或非正值回退到 `5000`。 |
+| `BILI_EXPOSURE_LOG_INTERVAL_MS` | 长驻暴露遥测行 `[exposure] uptime=… liveConns=… tcpHandles=… handles=… sessions=… blindTunnels=… inFlight=…` 的周期（毫秒，默认 `3600000` 即每小时；#1452）。`0` 关闭。目的是让套接字句柄泄漏与僵尸连接在长期运行日志中现形，而不是靠事后取证。 |
 | `ACP_SESSION_HEADER` | 会话 id 请求头名称（默认 `x-acp-session`）。 |
 | `ACP_REASONING_KEEP` | 仅 Responses API：设 `none` 丢弃全部 reasoning 项。默认让 reasoning 走压缩管道，其轮次被摘要后自动隐藏（避免无限累积破坏 Codex 的 prompt-cache 前缀）。 |
 | `ACP_LOG_FILE` | 日志文件路径（默认 XDG state 路径；`off` 关闭文件只保留 stderr）。10 MB 自动轮转。 |
