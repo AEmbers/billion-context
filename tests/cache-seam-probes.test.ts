@@ -62,7 +62,6 @@ async function closeServer(srv: http.Server): Promise<void> {
  *  surface. Demands a compress call once the body exceeds the threshold. */
 function startUpstream(captured: string[], plan: number[]): http.Server {
     let calls = 0;
-    let lastDemandBytes = Infinity;
     let firstViewRefs: string[] | undefined;
     return http.createServer((req, res) => {
         const chunks: Buffer[] = [];
@@ -84,7 +83,7 @@ function startUpstream(captured: string[], plan: number[]): http.Server {
             let m: RegExpExecArray | null;
             while ((m = re.exec(body)) !== null) refs.push(m[1]!);
             if (firstViewRefs === undefined && refs.length >= 10) firstViewRefs = refs;
-            const demand = Buffer.byteLength(body) > THRESHOLD && calls < plan.length && (calls === 0 || Buffer.byteLength(body) >= lastDemandBytes * 0.9 === false || true);
+            const demand = Buffer.byteLength(body) > THRESHOLD && calls < plan.length;
             const compressArgs = (() => {
                 if (!demand) return undefined;
                 const idx = plan[calls]!;
@@ -93,7 +92,6 @@ function startUpstream(captured: string[], plan: number[]): http.Server {
                 const end = refs[refs.length - 6] ?? refs[refs.length - 1]!;
                 if (!start || !end) return undefined;
                 calls++;
-                lastDemandBytes = Buffer.byteLength(body);
                 return JSON.stringify({ content: [{ startId: start, endId: end, topic: "seam probe", summary: `Seam-probe fold covering ${start}..${end}: exercised the pipeline, verified shapes, recorded deltas.` }] });
             })();
             res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
