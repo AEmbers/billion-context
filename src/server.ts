@@ -5846,9 +5846,12 @@ async function forward(
             };
             // #1455: loop-originated upstream responses (re-request/retries) are NOT covered by the outer tee above — they were invisible to ACP_DUMP_SSE until now.
             const loopDumpDir = opts.dumpSse;
+            // #1536: LLM target origin for cache-invalidation attribution (proxyUrl is the routing CONNECT-proxy, not the endpoint).
+            let upstreamOrigin: string | undefined;
+            try { upstreamOrigin = new URL(upstreamUrl).origin; } catch { upstreamOrigin = undefined; }
             const loop = runCompressLoop(
                 streamToRead,
-                { core, config, messages: prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages, compressMessages: prepared.originalMessages, session: prepared.session, log: ctx.log, proxyUrl, protocol: prepared.protocol, textProtocol, debug: opts.debug, refreshFolded, visibilityMarkers, dumpSse: loopDumpDir ? (name, stream) => dumpStreamToFile(stream, loopDumpDir, name) : undefined },
+                { core, config, messages: prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages, compressMessages: prepared.originalMessages, session: prepared.session, log: ctx.log, proxyUrl, upstreamOrigin, protocol: prepared.protocol, textProtocol, debug: opts.debug, refreshFolded, visibilityMarkers, dumpSse: loopDumpDir ? (name, stream) => dumpStreamToFile(stream, loopDumpDir, name) : undefined },
                 parsedReq,
                 { url: upstreamUrl, headers: reqHeaders, wireTransform },
                 adapter,

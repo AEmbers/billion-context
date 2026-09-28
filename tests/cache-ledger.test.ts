@@ -545,3 +545,78 @@ test("handleAcpCache renders the model-switch section in both modes (#1535)", ()
     const none = makeSession();
     assert.match(handleAcpCache(none), /MODEL SWITCHES\n  none observed/);
 });
+
+test("unknown-cache sample is quarantined out of the closure, not booked as a miss (#1536)", () => {
+    const session = makeSession();
+    recordCacheSample(session, { at: T0 + 1000, input: 10000, cached: 9000 });
+    // provider reports no cache tokens -> cached null (unmeasurable, not a 0% miss)
+    recordCacheSample(session, { at: T0 + 2000, input: 11000, cached: null });
+    recordCacheSample(session, { at: T0 + 3000, input: 11500, cached: 11000 });
+    const r = buildSessionCacheReport(session);
+    assert.equal(r.unmeasured.samples, 1);
+    assert.equal(r.unmeasured.inputTokens, 11000);
+    // the unknown line is dropped from the rendered set (it would be a bogus 0% row)
+    assert.equal(r.lines.length, 2);
+    assert.ok(!r.lines.some((l) => l.seq === 2));
+    // closure still closes exactly over the measurable subset
+    assert.equal(r.totals.residual, 0);
+    assert.equal(r.totals.balanced, true);
+});
+
+test("wire-protocol switch is attributed as a distinct cause (#1536)", () => {
+    const session = makeSession();
+    session.metadata.lastModel = "gpt-5";
+    recordCacheSample(session, { at: T0 + 1000, input: 10000, cached: 9000, protocol: "anthropic" });
+    recordCacheSample(session, { at: T0 + 2000, input: 11000, cached: 0, protocol: "openai" });
+    const r = buildSessionCacheReport(session);
+    assert.equal(r.wireSwitches.count, 1);
+    assert.equal(r.wireSwitches.events[0]!.from, "anthropic");
+    assert.equal(r.wireSwitches.events[0]!.to, "openai");
+    assert.equal(r.modelSwitches.count, 0, "model did not change");
+    assert.ok(r.invalidation.wire > 0);
+    assert.equal(r.totals.balanced, true);
+});
+
+test("upstream-origin switch is attributed as a distinct cause (#1536)", () => {
+    const session = makeSession();
+    session.metadata.lastModel = "gpt-5";
+    recordCacheSample(session, { at: T0 + 1000, input: 10000, cached: 9000, protocol: "openai", upstream: "https://api.openai.com" });
+    recordCacheSample(session, { at: T0 + 2000, input: 11000, cached: 0, protocol: "openai", upstream: "https://relay.example.com" });
+    const r = buildSessionCacheReport(session);
+    assert.equal(r.upstreamSwitches.count, 1);
+    assert.equal(r.upstreamSwitches.events[0]!.from, "https://api.openai.com");
+    assert.equal(r.upstreamSwitches.events[0]!.to, "https://relay.example.com");
+    assert.equal(r.wireSwitches.count, 0, "wire did not change");
+    assert.ok(r.invalidation.upstream > 0);
+    assert.equal(r.totals.balanced, true);
+});
+
+test("first sample under a new daemon boot is attributed to restart/refork (#1536 #499)", () => {
+    const session = makeSession();
+    session.metadata.lastModel = "gpt-5";
+    recordCacheSample(session, { at: T0 + 1000, input: 10000, cached: 9000 });
+    // simulate the ledger surviving a daemon restart: lastBoot points at another process
+    (session.metadata["cacheLedger"] as Record<string, unknown>).lastBoot = "previous-boot";
+    recordCacheSample(session, { at: T0 + 2000, input: 11000, cached: 0 });
+    // next sample in the SAME boot must not re-flag
+    recordCacheSample(session, { at: T0 + 3000, input: 11500, cached: 11000 });
+    const r = buildSessionCacheReport(session);
+    assert.equal(r.restartDrops.count, 1);
+    assert.equal(r.restartDrops.events[0]!.to, "(restart)");
+    assert.ok(r.invalidation.restart > 0);
+    assert.equal(r.totals.balanced, true);
+});
+
+test("handleAcpCache renders the CACHE INVALIDATION breakdown incl. unmeasured (#1536)", () => {
+    const session = makeSession();
+    session.metadata.lastModel = "gpt-5";
+    recordCacheSample(session, { at: T0 + 1000, input: 10000, cached: 9000, protocol: "anthropic", upstream: "https://api.openai.com" });
+    recordCacheSample(session, { at: T0 + 2000, input: 11000, cached: 0, protocol: "openai", upstream: "https://relay.example.com" });
+    recordCacheSample(session, { at: T0 + 3000, input: 11500, cached: null });
+    const text = handleAcpCache(session);
+    assert.match(text, /CACHE INVALIDATION/);
+    assert.match(text, /wire switch:/);
+    assert.match(text, /upstream switch:/);
+    assert.match(text, /restart\/refork:/);
+    assert.match(text, /unmeasured .*excluded from hit rate/);
+});
