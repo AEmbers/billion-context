@@ -563,6 +563,32 @@ test("unknown-cache sample is quarantined out of the closure, not booked as a mi
     assert.equal(r.totals.balanced, true);
 });
 
+test("unknown-cache sample must not eat a pending fold — the next measured sample still attributes compRepay (#1536)", () => {
+    // Regression pin for the consume-cursor known-gate: an unmeasured sample
+    // arriving between a fold and the next measured sample advances neither
+    // consumedFoldSeq nor the fold owner's T; the measured sample that follows
+    // still sees the fold as pending and charges its compRepay to the owner.
+    // (Mutation check: dropping the `known &&` on the cursor advance makes the
+    // unknown sample eat the fold — owner T stays 0 and line 3 loses foldSeq.)
+    const session = makeSession();
+    withView20(session);
+    recordCacheSample(session, { at: T0 + 1000, input: 10000, cached: 9000 });
+    // fold materializes between samples: covers m00001..m00010 (5000 tok)
+    recordCacheFoldsFromBlocks(session, [block("b1", T0 + 1500, 5000, 400, "m00001")]);
+    // unmeasured post-fold sample arrives FIRST — must not consume the fold
+    recordCacheSample(session, { at: T0 + 2000, input: 11000, cached: null });
+    // measured post-fold sample: re-sends the folded region → compRepay lands on the owner
+    recordCacheSample(session, { at: T0 + 3000, input: 10500, cached: 9000 });
+    const r = buildSessionCacheReport(session);
+    const l3 = r.lines.find((l) => l.seq === 3)!;
+    assert.ok(!r.lines.some((l) => l.seq === 2), "unknown line is quarantined out of the rendered set");
+    assert.equal(l3.foldSeq, 1, "measured sample owns the fold’s compRepay");
+    const fold = r.folds.find((f) => f.seq === 1)!;
+    assert.ok(fold && fold.T > 0, "owner T > 0 — the fold’s re-pay reached its owner through the measured sample");
+    assert.equal(r.unmeasured.samples, 1);
+    assert.equal(r.totals.balanced, true);
+});
+
 test("wire-protocol switch is attributed as a distinct cause (#1536)", () => {
     const session = makeSession();
     session.metadata.lastModel = "gpt-5";
