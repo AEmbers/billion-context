@@ -13,7 +13,6 @@ import { runMcpStdio } from "../mcp.js";
 import { fetchManifest } from "../agent/shared.js";
 import { nativeProxyScriptPath } from "../agent/native-bootstrap.js";
 import { resolveZcodeNativePort } from "../config.js";
-import { lanePreferredPort } from "../instance.js";
 import { configureLogger, log as teeLog } from "../logger.js";
 import { defaultLogFile } from "../paths.js";
 import { LAUNCHER_DEFAULT_HOST, ensureProxyRunning } from "../launcher.js";
@@ -57,10 +56,12 @@ function startWatchdog(
                     } else {
                         // #1660: same zone semantics as
                         // zcode/native.ts defaultEnsureProxy — explicit
-                        // BILI_ZCODE_PORT is strict, else the zone preference.
+                        // BILI_ZCODE_PORT is strict; otherwise port 0 lets the
+                        // launcher resolve the zone preference AND settle the
+                        // actually-bound port sticky (#1660).
                         const explicit = resolveZcodeNativePort();
                         const handle = await ensureProxyRunning(
-                            { host: LAUNCHER_DEFAULT_HOST, port: explicit ?? lanePreferredPort("zcode"), passthrough: false, debug: false, strictPort: explicit !== undefined, lane: "zcode" },
+                            { host: LAUNCHER_DEFAULT_HOST, port: explicit ?? 0, passthrough: false, debug: false, strictPort: explicit !== undefined, lane: "zcode" },
                             { scriptPath: nativeProxyScriptPath() },
                         );
                         if (handle.origin !== state.origin) {

@@ -12,7 +12,6 @@ import { isPidAlive } from "../instance.js";
 import { nativeAttachOrigin, nativeProxyScriptPath, proxyEnvOrigin } from "../agent/native-bootstrap.js";
 import { reportRuntimeInfo, type RuntimeInfoReport } from "../agent/shared.js";
 import { resolveZcodeNativePort, zcodeDirectPrefixes } from "../config.js";
-import { lanePreferredPort } from "../instance.js";
 import {
     applyZcodeRouting,
     defaultZcodeRoutePolicy,
@@ -394,7 +393,7 @@ async function defaultEnsureProxy(): Promise<{ origin: string; attached: boolean
     // drift-repair below follows any drift.
     const explicit = resolveZcodeNativePort();
     const handle = await ensureProxyRunning(
-        { host: LAUNCHER_DEFAULT_HOST, port: explicit ?? lanePreferredPort("zcode"), passthrough: false, debug: false, strictPort: explicit !== undefined, lane: "zcode" },
+        { host: LAUNCHER_DEFAULT_HOST, port: explicit ?? 0, passthrough: false, debug: false, strictPort: explicit !== undefined, lane: "zcode" },
         { scriptPath: nativeProxyScriptPath() },
     );
     return { origin: handle.origin, attached: !!handle.attached };

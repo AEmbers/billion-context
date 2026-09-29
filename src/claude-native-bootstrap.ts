@@ -318,10 +318,14 @@ async function run(): Promise<void> {
         // host itself; when the walk cannot find it, chooseWatchdogParentPid
         // degrades via the wrapper's parent instead of the wrapper.
         const watchPid = chooseWatchdogParentPid();
+        // #1660: an EXPLICIT pin stays exact + strict; otherwise pass port 0
+        // so the launcher resolves the zone preference and settles the
+        // actually-bound port sticky (a pre-resolved port > 0 would skip the
+        // zone wiring entirely and never write the sticky record).
         const handle = await ensureProxyRunning(
             {
                 host: LAUNCHER_DEFAULT_HOST,
-                port: plan.port,
+                port: plan.strict ? plan.port : 0,
                 passthrough: plan.action === "passthrough",
                 debug: false,
                 parentPid: watchPid,
