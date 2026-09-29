@@ -2918,17 +2918,54 @@ export function warnResponsesReasoningPairs(
     }
 }
 
+/** #1567 hardening: a plugin-fold block's in-place anchor is redundant ONLY
+ *  while the client's own compress pair for that exact fold actually rides
+ *  the (post-prepare) history. The pair is recognized by tool name plus the
+ *  folded range quoted in its call args — flat {startId,endId} or
+ *  {content:[{startId,endId}]}, both accepted by the plugin tool API. This
+ *  restores the self-verifying carrier handoff a raw prefix strip lost: a
+ *  pruned or contract-violating client (pair absent) keeps the anchor, so an
+ *  active fold never ends up with zero carriers. It also covers kernel-side
+ *  pruning: hideConsumedCompressCalls (KEEP_LAST_ORPHANED) runs in the
+ *  pipeline BEFORE this strip, so an older pair already hidden from the wire
+ *  is absent here and its anchor correctly survives. Unparseable args count
+ *  as no match (anchor kept — fail-safe direction). Blocks predating range
+ *  recording (no startRef/endRef) degrade to "any compress call present",
+ *  the pre-hardening prefix-strip behavior. */
+function inboundCompressPairPresent(messages: BiliMessage[], b: { startRef?: string; endRef?: string }): boolean {
+    const loose = !b.startRef || !b.endRef;
+    for (const m of messages) {
+        if (m.contentType !== "tool-call" || m.toolName !== COMPRESS_TOOL_NAME) continue;
+        if (loose) return true;
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(m.text ?? "");
+        } catch {
+            continue;
+        }
+        const obj = parsed as { startId?: string; endId?: string; content?: unknown };
+        const ranges: Array<{ startId?: string; endId?: string }> = Array.isArray(obj?.content) ? (obj.content as Array<{ startId?: string; endId?: string }>) : [obj];
+        for (const r of ranges) {
+            if (r?.startId === b.startRef && r?.endId === b.endRef) return true;
+        }
+    }
+    return false;
+}
+
 export function stripKernelSummaries(messages: BiliMessage[], state: CompressionState): BiliMessage[] {
     const carried = new Set<string>();
     for (const b of state.blocks) {
         if (!b.active || !b.compressCallId) continue;
         // #1567: plugin tool API folds are minted a synthetic plugin_<ts> callId
-        // the client can never echo, so the id match below is unsatisfiable for
+        // the client can never echo, so the plain id match is unsatisfiable for
         // them — yet the client's own re-sent compress pair IS their carrier by
-        // contract, making the in-place anchor redundant. Strip on the prefix,
-        // not the echo. Preflight blocks (no compressCallId) keep skipping above:
-        // no tool call exists for them, so their anchor is the only carrier.
-        if (isPluginFoldCallId(b.compressCallId) || messages.some((m) => m.contentType === "tool-call" && m.toolCallId === b.compressCallId)) {
+        // contract, making the in-place anchor redundant. Strip it, but only
+        // while that pair actually rides the (post-prepare) history
+        // (inboundCompressPairPresent): a pruned or contract-violating client
+        // must never lose the summary outright (zero carriers).
+        // Preflight blocks (no compressCallId) keep skipping above: no tool
+        // call exists for them, so their anchor is the only carrier.
+        if (isPluginFoldCallId(b.compressCallId) ? inboundCompressPairPresent(messages, b) : messages.some((m) => m.contentType === "tool-call" && m.toolCallId === b.compressCallId)) {
             carried.add(`acp_summary_${b.blockId}`);
         }
     }
