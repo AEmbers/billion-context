@@ -2776,7 +2776,7 @@ const ACP_TAG_MARK = "\x3cacp ";
 // their anchors) for strict backends (#377).
 /** [#651] Strip oversized reasoning from closed compress turns (see
  *  src/reasoning-drop.ts) with an ops log line when anything was dropped. */
-function withReasoningDrop(
+export function withReasoningDrop(
     msgs: BiliMessage[],
     reasoning: CompressReasoningConfig | undefined,
     log: (level: string, msg: string) => void,
@@ -2786,6 +2786,16 @@ function withReasoningDrop(
     // [#684] strict-echo upstreams: reasoning must round-trip with tool_calls,
     // so #651's drop must not fire. Learned/static strictness both land here.
     if (strictEcho) return msgs;
+    // [#1658] Anthropic-wire twin of that gate, detected from the payload
+    // itself: a reasoning message carrying a signature is a SIGNED thinking
+    // block on the wire (the kernel stamps thinkingSignature from the wire
+    // signature; only the Anthropic codec does), and signed thinking must
+    // round-trip with its tool_use sibling or the upstream rejects the pair
+    // (#684 invariant). Dropping the pre-compress run would orphan it, so
+    // any signed thinking in view disables the drop for this request.
+    // Presence-based and per-request: Claude sessions without extended
+    // thinking keep #651's savings.
+    if (msgs.some((m) => m.contentType === "reasoning" && typeof m.thinkingSignature === "string" && m.thinkingSignature.length > 0)) return msgs;
     const out = dropCompressReasoning(msgs, reasoning);
     if (out.length !== msgs.length) {
         log("info", `[${sessionId}] compress-reasoning: dropped ${msgs.length - out.length} reasoning message(s) from closed compress turns (#651)`);
@@ -2825,10 +2835,12 @@ export function warnReasoningPairs(
  *  inbound assistant message WITH a thinking block now rides an outbound
  *  assistant message with none. Outbound-only asymmetry (some tool_use turns
  *  think, others don't) is ordinary Claude Code traffic: turns without
- *  extended thinking never carry a block, and #651's dropCompressReasoning
- *  creates the same shape by design — the old heuristic warned on every
- *  healthy multi-turn session. Turns match by stable tool_use id (the kernel
- *  codec round-trips it verbatim); benign asymmetry stays fully silent. */
+ *  extended thinking never carry a block. #651's dropCompressReasoning can no
+ *  longer create this shape either — since [#1658] the drop is gated out
+ *  whenever signed thinking is in view. Turns match by stable tool_use id
+ *  (the kernel codec round-trips it verbatim); benign asymmetry stays fully
+ *  silent. Any remaining fire means another path lost thinking (e.g. a fold
+ *  pruned the block while preserving the tool_use) — investigate. */
 export function warnAnthropicThinkingPairs(
     inboundMessages: unknown[],
     outboundMessages: unknown[],
