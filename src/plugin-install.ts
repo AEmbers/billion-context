@@ -1138,7 +1138,7 @@ export function applyOpencodePluginEntry(args: { data: Record<string, unknown>; 
     }
     // Exactly our one entry, already the right form — nothing to migrate:
     // leave the key (and the file) untouched.
-    if (replaced.length === 1 && replaced[0] === entry) return ["plugin present"];
+    if (replaced.length === 1 && replaced[0] === entry) return [`${key} present`];
     if (Array.isArray(raw)) {
         data[key] = [...raw.filter((x) => !isOurs(x)), entry];
     } else if (raw !== null && typeof raw === "object") {

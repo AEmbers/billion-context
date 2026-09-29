@@ -65,7 +65,7 @@ test("install and remove preserve foreign object entries in the plugins array (#
             // "plugin present" re-run: byte-identical file
             const bytes = fs.readFileSync(file, "utf8");
             const again = pluginInstall("opencode");
-            assert.match(again, /plugin present/);
+            assert.match(again, new RegExp(`${ocKey} present`));
             assert.equal(fs.readFileSync(file, "utf8"), bytes, "present re-run leaves the file byte-identical");
 
             // remove: only ours goes, the key SURVIVES with all foreign entries
