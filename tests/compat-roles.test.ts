@@ -18,15 +18,6 @@ function close(server: http.Server): Promise<void> {
     return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-async function freePort(): Promise<number> {
-    const server = http.createServer();
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const port = (server.address() as { port: number }).port;
-    await close(server);
-    return port;
-}
-
 const ROLES = { developer: "system" };
 
 test("parseCompatRoles drops non-string entries", () => {
@@ -130,9 +121,8 @@ async function startProxy(upstream: http.Server, { compatJson, bareWire }: Start
     const previous = process.env.BILI_CONFIG_FILE;
     process.env.BILI_CONFIG_FILE = biliConfig;
     const upstreamPort = (upstream.address() as { port: number }).port;
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: `http://127.0.0.1:${upstreamPort}`,
         routes: loadRoutes(),
@@ -155,6 +145,7 @@ async function startProxy(upstream: http.Server, { compatJson, bareWire }: Start
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     return {
         port,
         opts,

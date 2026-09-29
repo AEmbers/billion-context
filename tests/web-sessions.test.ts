@@ -26,15 +26,6 @@ function close(server: http.Server): Promise<void> {
     return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-async function freePort(): Promise<number> {
-    const server = http.createServer();
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const port = (server.address() as { port: number }).port;
-    await close(server);
-    return port;
-}
-
 interface Stats {
     requests: number;
     tokensSaved: number;
@@ -287,9 +278,8 @@ test("web endpoints serve overview, session list and per-session detail", async 
     _setStoreForTest(new SessionStore({ enabled: false }));
     setRegistryForTest({});
 
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1:1",
         routes: {},
@@ -309,6 +299,7 @@ test("web endpoints serve overview, session list and per-session detail", async 
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
     try {
         const ovRes = await fetch(`${base}/__bili/overview`);
@@ -474,9 +465,8 @@ test("#1535: web UI stays aligned with the model-switch column", async () => {
     _setStoreForTest(new SessionStore({ enabled: false }));
     setRegistryForTest({});
 
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1:1",
         routes: {},
@@ -495,6 +485,8 @@ test("#1535: web UI stays aligned with the model-switch column", async () => {
         mitm: { enabled: false, domains: [] },
     };
     const proxy = await startServer(opts);
+    if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
     try {
         // 1) data path: switch fields present only when switches actually happened

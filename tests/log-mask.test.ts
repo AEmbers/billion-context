@@ -25,6 +25,7 @@ import {
     maskUrlsInText,
     setMaskHostsEnabled,
 } from "../src/log-mask.ts";
+import { assertPortDead } from "./port-race.ts";
 import { rmrf } from "./tmp-rm.ts";
 
 /** #255 Part B: logs (bili.log + launcher tmp log) must carry no sensitive
@@ -358,6 +359,9 @@ test("mitm CONNECT tunnel failure: err.message host scrubbed from log (#255)", a
         proxy = await startServer(opts);
         await once(proxy, "listening");
         const proxyPort = (proxy.address() as { port: number }).port;
+        // #1689: prove the freed port is actually dead right before the tunnel
+        // attempt — a squatter would turn the expected refusal into a 200.
+        await assertPortDead(deadPort);
         const sock = net.connect(proxyPort, "127.0.0.1");
         let buf = "";
         await new Promise<void>((resolve, reject) => {

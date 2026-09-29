@@ -39,6 +39,7 @@ import os from "node:os";
 import path from "node:path";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { assertPortDead } from "../port-race.js";
 
 const OC_BIN = process.env.E2E_OC_BIN ?? "opencode";
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
@@ -162,6 +163,7 @@ type Ctx = {
   xdg: { config: string; cache: string; state: string; data: string };
   svcPort: number;
   fakePort: number;
+  svcProbed: boolean;
   fakePid?: number;
   reqLog: string;
 };
@@ -210,6 +212,7 @@ async function startCtx(): Promise<Ctx> {
     },
     svcPort: await freePort(),
     fakePort: await freePort(),
+    svcProbed: false,
     reqLog: path.join(work, "fake-chat-requests.jsonl"),
   };
   for (const d of [
@@ -286,6 +289,7 @@ async function startCtx(): Promise<Ctx> {
     JSON.stringify({ compress: { preserveRecentTokens: 0 } }, null, 2),
   );
 
+  await assertPortDead(ctx.fakePort); // #1689: prove still free right before the child binds it
   const fake = spawn(process.execPath, [FAKE_UPSTREAM], {
     env: {
       ...process.env,
@@ -391,11 +395,17 @@ function teardown(ctx: Ctx): void {
   }
 }
 
-function ocRun(
+async function ocRun(
   ctx: Ctx,
   prompt: string,
   opts: { session?: string } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  if (!ctx.svcProbed) {
+    // #1689: only before the first run — afterwards the managed service
+    // legitimately holds svcPort, so re-probing would always throw.
+    ctx.svcProbed = true;
+    await assertPortDead(ctx.svcPort);
+  }
   const args = ["run", "-m", "fake/fake-model", "--dangerously-skip-permissions"];
   if (opts.session) args.push("-s", opts.session);
   args.push(prompt);

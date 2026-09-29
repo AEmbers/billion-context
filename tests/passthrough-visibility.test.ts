@@ -16,15 +16,6 @@ function close(server: http.Server): Promise<void> {
     return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-async function freePort(): Promise<number> {
-    const server = http.createServer();
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const port = (server.address() as { port: number }).port;
-    await close(server);
-    return port;
-}
-
 test("passthroughState resolves env over file over default", () => {
     const root = path.join(tmpdir(), `bili-passthrough-state-${process.pid}-${Date.now()}`);
     const biliConfig = path.join(root, "billion-context.json");
@@ -63,9 +54,8 @@ test("web config exposes and toggles passthrough (#405)", async () => {
     const previous = { config: process.env.BILI_CONFIG_FILE, env: process.env.ACP_PASSTHROUGH };
     process.env.BILI_CONFIG_FILE = biliConfig;
     delete process.env.ACP_PASSTHROUGH;
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1:1",
         routes: {},
@@ -86,6 +76,7 @@ test("web config exposes and toggles passthrough (#405)", async () => {
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
     const getConfig = async (): Promise<{ passthrough: { enabled: boolean; source: string | null } }> =>
         await (await fetch(`${base}/__bili/config`)).json() as { passthrough: { enabled: boolean; source: string | null } };
