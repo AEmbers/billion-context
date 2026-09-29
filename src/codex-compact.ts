@@ -74,6 +74,10 @@ export function extractBiliSummary(item: unknown): string | undefined {
 // data loss. Marker items without an extractable blob (id-prefix-only, e.g.
 // minted by an older build) are still dropped; real OpenAI blobs pass through
 // untouched.
+// #1634: exact handoff header the model sees on the responses wire; the
+// output-side stripper keys off this constant (single source of truth).
+export const CODEX_FORGED_HANDOFF_HEADER = "[bili] context summary after compaction:";
+
 export function replaceBiliCompactionItems<T>(input: T[]): { items: T[]; replaced: number; dropped: number } {
     const items: T[] = [];
     let replaced = 0;
@@ -91,7 +95,7 @@ export function replaceBiliCompactionItems<T>(input: T[]): { items: T[]; replace
         items.push({
             type: "message",
             role: "user",
-            content: [{ type: "input_text", text: `[bili] context summary after compaction:\n${summary}` }],
+            content: [{ type: "input_text", text: `${CODEX_FORGED_HANDOFF_HEADER}\n${summary}` }],
         } as T);
         replaced++;
     }
@@ -150,7 +154,7 @@ export function buildTriggerForgeBody(
 // The kernel renders block summaries as system messages with this header
 // (acp-kernel SUMMARY_HEADER). Reuse the exact format so the model reads a
 // captured handoff summary the same way it reads a live kernel-rendered one.
-const FORGED_SUMMARY_HEADER = "[Compressed conversation section]";
+export const FORGED_SUMMARY_HEADER = "[Compressed conversation section]";
 
 export function renderForgedSummary(block: Pick<CompressionBlock, "summary" | "topic">): string {
     const body = block.summary.trim();
