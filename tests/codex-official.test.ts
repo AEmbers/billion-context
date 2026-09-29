@@ -82,6 +82,14 @@ test("Codex official transport preserves OAuth headers, decodes bodies, and reba
         ],
     };
     try {
+        // #1614: the id note rides only the shared-MCP lane — announce an
+        // unbound shim so this request carries what the model would echo.
+        const reg = await fetch(`http://127.0.0.1:${proxyPort}/__bili/plugin/register`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ conversationId: null, unbound: true, agent: "mcp" }),
+        });
+        assert.equal(reg.status, 200, "unbound register accepted");
         const first = await fetch(`${base}/responses`, {
             method: "POST",
             headers: {

@@ -8,6 +8,7 @@ process.env.NODE_ENV = "test";
 
 import { defaultConfig } from "acp-kernel";
 import { startServer, type ProxyOptions } from "../src/server.ts";
+import { _resetSharedMcpLaneForTest } from "../src/plugin.ts";
 
 // #1611: the conversation-id VALUE used to ride the STATIC system part
 // (withConversationIdNote), so any fork/resume/session-switch — byte-identical
@@ -48,6 +49,9 @@ interface Rig {
 }
 
 async function startRig(): Promise<Rig> {
+    // The shared-lane flag is process-global module state — reset it so each
+    // rig starts from the DEFAULT (absent) state deterministically (#1614).
+    _resetSharedMcpLaneForTest();
     const upstreamBodies: string[] = [];
     const upstream = http.createServer((req, res) => {
         const chunks: Buffer[] = [];
@@ -163,12 +167,22 @@ const SHARED_HISTORY: PostMsg[] = [
 test("#1611: byte-identical shared history under two session ids yields byte-identical system + history prefix; only the ephemeral id note differs", async () => {
     const rig = await startRig();
     try {
+        // #1614: default state — no shared shim announced — carries NO note and
+        // NO pointer at all (wire hosts route by request identity).
+        await postModel(rig, "sess-fork-x", SHARED_HISTORY);
+        await waitFor(() => rig.upstreamBodies.length >= 1, "pre-announce body");
+        assert.equal(idNoteText(rig.upstreamBodies[0]), "", "#1614: no id note before the shared lane is announced");
+        assert.ok(!sysText(rig.upstreamBodies[0]).includes("conversation id is printed at the very end"), "no pointer line either");
+
+        const reg = await fetch(rig.proxyUrl("/__bili/plugin/register"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId: null, unbound: true, agent: "mcp" }) });
+        assert.equal(reg.status, 200);
+
         await postModel(rig, "sess-fork-x", SHARED_HISTORY);
         await postModel(rig, "sess-fork-y", SHARED_HISTORY);
-        await waitFor(() => rig.upstreamBodies.length >= 2, "two upstream bodies");
+        await waitFor(() => rig.upstreamBodies.length >= 3, "three upstream bodies");
 
-        const b1 = rig.upstreamBodies[0];
-        const b2 = rig.upstreamBodies[1];
+        const b1 = rig.upstreamBodies[1];
+        const b2 = rig.upstreamBodies[2];
         assert.equal(sysText(b1), sysText(b2), "#1611: system bytes identical across different conversation ids (prefix-cache anchor)");
         assert.doesNotMatch(sysText(b1), /\[Your bili conversation id:/, "no id value in the static system part");
         assert.ok(sysText(b1).includes("conversation id is printed at the very end of this request"), "system keeps the byte-stable pointer note");
@@ -187,6 +201,8 @@ test("#1611: byte-identical shared history under two session ids yields byte-ide
 test("#1611: within one session the id note stays stable across turns and the history is append-only", async () => {
     const rig = await startRig();
     try {
+        // #1614: the note rides only the shared-MCP lane — announce it first.
+        await fetch(rig.proxyUrl("/__bili/plugin/register"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId: null, unbound: true, agent: "mcp" }) });
         await postModel(rig, "sess-stable", SHARED_HISTORY.slice(0, 3));
         await postModel(rig, "sess-stable", SHARED_HISTORY);
         await waitFor(() => rig.upstreamBodies.length >= 2, "two upstream bodies");

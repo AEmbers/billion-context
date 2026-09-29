@@ -9,6 +9,7 @@ process.env.NODE_ENV = "test";
 
 import { defaultConfig } from "acp-kernel";
 import { startServer, type ProxyOptions } from "../src/server.ts";
+import { _resetSharedMcpLaneForTest } from "../src/plugin.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 import { _resetPluginStateForTest } from "../src/plugin.ts";
@@ -54,6 +55,9 @@ interface Rig {
 }
 
 async function startRig(): Promise<Rig> {
+    // The shared-lane flag is process-global module state — reset it so each
+    // rig starts from the DEFAULT (absent) state deterministically (#1614).
+    _resetSharedMcpLaneForTest();
     const upstreamBodies: string[] = [];
     const upstream = http.createServer((req, res) => {
         const chunks: Buffer[] = [];
@@ -206,19 +210,36 @@ test("plugin manifest advertises an optional conversation_id in all three tool f
     }
 });
 
-test("wire mode: proxy prints its own conversation id in the ephemeral trailing user message; system stays id-free and byte-stable (#760/#1611)", async () => {
+test("wire mode: id note rides the tail ONLY on the shared-MCP lane; system stays id-free and byte-stable (#760/#1611/#1614)", async () => {
     const rig = await startRig();
     try {
+        // #1614: with no shared shim announced, a wire-mode host routes by
+        // request identity — no note, no pointer, nothing volatile.
         await postModel(rig, "conv-760-a");
+        await waitFor(() => rig.upstreamBodies.length >= 1, "pre-announce body");
+        assert.equal(idNoteText(rig.upstreamBodies[0]), "", "#1614: no id note before a shared shim announces");
+        const cleanSys = sysText(rig.upstreamBodies[0]);
+        assert.doesNotMatch(cleanSys, /\[Your bili conversation id:/, "no id value in system");
+        assert.doesNotMatch(cleanSys, /conversation id is printed at the very end/, "no pointer line in system either");
+
+        // An unbound shared shim announces its topology → the note and the
+        // pointer appear from the next request on. This is a one-time system
+        // change (one prefix miss at announce), never per-turn.
+        const reg = await fetch(rig.proxyUrl("/__bili/plugin/register"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId: null, unbound: true, agent: "mcp" }) });
+        assert.equal(reg.status, 200);
+        assert.equal(((await reg.json()) as { ok?: boolean }).ok, true, "unbound register accepted");
+
         await postModel(rig, "conv-760-a");
         await waitFor(() => rig.upstreamBodies.length >= 2, "two upstream bodies");
-        const sys0 = sysText(rig.upstreamBodies[0]);
+        const sys0 = sysText(rig.upstreamBodies[1]);
         const canon = canonicalOf("conv-760-a");
-        assert.match(idNoteText(rig.upstreamBodies[0]), new RegExp(`\\[Your bili conversation id: ${canon}\\.`), "id note carries the derived canonical pfa-* id");
-        assert.doesNotMatch(idNoteText(rig.upstreamBodies[0]), /\[Your bili conversation id: conv-760-a\./, "note no longer leaks the raw client session id");
+        assert.match(idNoteText(rig.upstreamBodies[1]), new RegExp(`\\[Your bili conversation id: ${canon}\\.`), "id note carries the derived canonical pfa-* id");
+        assert.doesNotMatch(idNoteText(rig.upstreamBodies[1]), /\[Your bili conversation id: conv-760-a\./, "note no longer leaks the raw client session id");
         assert.doesNotMatch(sys0, /\[Your bili conversation id:/, "#1611: id value no longer rides the static system part");
         assert.match(sys0, /conversation id is printed at the very end of this request/, "system keeps the byte-stable pointer");
-        assert.equal(sysText(rig.upstreamBodies[1]), sys0, "system bytes stable across turns (prefix-cache anchor)");
+        await postModel(rig, "conv-760-a");
+        await waitFor(() => rig.upstreamBodies.length >= 3, "third body");
+        assert.equal(sysText(rig.upstreamBodies[2]), sys0, "system bytes stable across turns (prefix-cache anchor)");
     } finally {
         await rig.closeAll();
     }
@@ -257,6 +278,9 @@ test("unknown conversation id is rejected without creating a session", async () 
 test("canonical pfa-* id (derived, not the client's own) routes to the right session; raw id still works", async () => {
     const rig = await startRig();
     try {
+        // #1614: the note (and its canonical id) rides only the shared-MCP
+        // lane — announce it so the request carries what the model echoes.
+        await fetch(rig.proxyUrl("/__bili/plugin/register"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId: null, unbound: true, agent: "mcp" }) });
         await postModel(rig, "conv-canonical");
         await waitFor(() => rig.upstreamBodies.length >= 1, "one upstream body");
         const canon = canonicalOf("conv-canonical");
@@ -412,7 +436,7 @@ test("shared shim, no env/meta id: per-call ids route two sessions independently
     }
 });
 
-test("shim: per-call id strips the forwarded arg, routes on the body field, never registers or adopts for per-call ids", async () => {
+test("shim: unbound announce at initialize; absent-id calls forward for the proxy to decide; per-call id strips the forwarded arg and routes on the body field", async () => {
     const posts: { url: string; body: Record<string, unknown> }[] = [];
     const mock = http.createServer((req, res) => {
         const chunks: Buffer[] = [];
@@ -452,11 +476,22 @@ test("shim: per-call id strips the forwarded arg, routes on the body field, neve
     try {
         h.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } });
         h.send({ jsonrpc: "2.0", method: "notifications/initialized" });
-        // No default binding → no register on initialize.
+        // No default binding → the shim announces its UNBOUND topology once so
+        // the proxy can light the shared-MCP lane (conditional id note).
+        await waitFor(() => posts.some((p) => p.url.startsWith("/__bili/plugin/register") && p.body.unbound === true), "unbound announce");
+        const announce = posts.find((p) => p.url.startsWith("/__bili/plugin/register")) as { body: Record<string, unknown> };
+        assert.equal(announce.body.conversationId, null, "announce carries conversationId: null");
+        assert.equal(announce.body.agent, "mcp");
+
+        // #1614: absent-id calls are no longer blocked shim-side — they forward
+        // and the PROXY decides (auto-split or teach-error).
         h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "acp_status", arguments: {} } });
-        await waitFor(() => h.lines.some((l) => (JSON.parse(l) as { id?: number }).id === 2), "no-id error");
-        const noId = byId(h.lines, 2) as { error?: { message?: string } };
-        assert.match(noId.error?.message ?? "", /conversation_id argument/, "no-id error hints at the per-call parameter");
+        await waitFor(() => h.lines.some((l) => (JSON.parse(l) as { id?: number }).id === 2), "no-id forward");
+        const noId = byId(h.lines, 2) as { result?: { content?: { text?: string }[]; isError?: boolean } };
+        assert.equal(noId.result?.isError, false, "absent-id call forwards and the proxy's verdict passes through");
+        assert.equal(noId.result?.content?.[0]?.text, "fine");
+        const noIdPost = posts.find((p) => p.url.startsWith("/__bili/plugin/tool") && !("conversationId" in p.body));
+        assert.ok(noIdPost, "forwarded body omits the conversationId field entirely");
 
         h.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "acp_status", arguments: { conversation_id: "X", extra: 1 } } });
         await waitFor(() => h.lines.some((l) => (JSON.parse(l) as { id?: number }).id === 3), "per-call X");
@@ -464,18 +499,18 @@ test("shim: per-call id strips the forwarded arg, routes on the body field, neve
         assert.equal(callX.result?.isError, false);
         assert.equal(callX.result?.content?.[0]?.text, "fine");
 
-        // No lazy registration for per-call ids anymore — the sticky flip comes
-        // from successful-tool evidence inside the call, not from a registration
-        // a raw-client-id request would never consume.
-        assert.equal(posts.filter((p) => p.url.startsWith("/__bili/plugin/register")).length, 0, "no lazy registration issued for a per-call id");
-        const toolPost = posts.find((p) => p.url.startsWith("/__bili/plugin/tool"));
+        // No lazy registration for per-call ids — the ONLY register ever issued
+        // is the unbound announce at initialize; the sticky flip comes from
+        // successful-tool evidence inside the call.
+        assert.equal(posts.filter((p) => p.url.startsWith("/__bili/plugin/register")).length, 1, "exactly one register: the unbound announce");
+        const toolPost = posts.find((p) => p.url.startsWith("/__bili/plugin/tool") && p.body.conversationId === "X");
         assert.equal(toolPost?.body.conversationId, "X", "routes on the body-level field");
         assert.deepEqual(toolPost?.body.args, { extra: 1 }, "conversation_id stripped from the forwarded args");
 
-        // A repeat call still issues no registration.
+        // A repeat call still issues no additional registration.
         h.send({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "acp_status", arguments: { conversation_id: "X" } } });
         await waitFor(() => h.lines.some((l) => (JSON.parse(l) as { id?: number }).id === 4), "repeat per-call X");
-        assert.equal(posts.filter((p) => p.url.startsWith("/__bili/plugin/register")).length, 0, "still no registration after a repeat call");
+        assert.equal(posts.filter((p) => p.url.startsWith("/__bili/plugin/register")).length, 1, "still exactly one register after a repeat call");
 
         // Unknown per-call id fails loudly — no orphan adoption (which would
         // mutate the shared default binding for everyone else's calls).

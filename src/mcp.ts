@@ -79,6 +79,9 @@ let conversationId = CONVERSATION_FROM_ENV;
 // #760: every conversation this shim has ever registered — the default
 // binding plus any per-call ids seen so far (issue-once each).
 const registeredConversations = new Set<string>();
+// #1614: an unbound shim (no env/meta session channel — the host shares one
+// MCP process across several conversations) announces that topology once.
+let announcedUnbound = false;
 let initialized = false;
 function send(msg: unknown): void {
     process.stdout.write(JSON.stringify(msg) + "\n");
@@ -211,6 +214,19 @@ async function handleMessage(msg: {
                     // that pipeline tools/list would otherwise race past it.
                     await registerFetch.catch(() => {});
                 }
+            } else if (!conversationId && !announcedUnbound) {
+                // #1614: no binding channel exists — this shim likely serves a
+                // host that shares one MCP process across several conversations,
+                // where per-call conversation_id (the model copies it from the
+                // proxy notes) is the only routing signal. Announce the lane so
+                // the proxy knows to print the id; fire-and-forget, issue-once.
+                announcedUnbound = true;
+                void fetch(`${resolveProxyOrigin()}/__bili/plugin/register`, {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ conversationId: null, unbound: true, agent: "mcp" }),
+                    signal: AbortSignal.timeout(5000),
+                }).catch(() => {});
             }
             sendResult(id, {
                 protocolVersion: "2025-06-18",
@@ -259,10 +275,10 @@ async function handleMessage(msg: {
             const args = { ...rawArgs };
             if (!keepForSearch) delete args.conversation_id;
             const routeOverride = keepForSearch ? undefined : perCall || undefined;
-            if (!routeOverride && !conversationId) {
-                sendError(id, ERR_TOOL, "no conversation id (pass the conversation_id argument — see the 'your bili conversation id' line in the proxy notes — or set BILI_CONVERSATION_ID or connect via Claude Code MCP session meta)");
-                return;
-            }
+            // #1614: an absent id is no longer a shim-side error — the call is
+            // forwarded and the PROXY decides (auto-route when exactly one
+            // session is active, teach otherwise). The proxy marks the lane
+            // shared either way, so the next request prints the id note.
             try {
                 const text = await forwardTool(tool, args, TOOL_TIMEOUT_MS, routeOverride);
                 sendResult(id, { content: [{ type: "text", text }], isError: false });

@@ -487,8 +487,24 @@ export function consumePluginRegisterFor(conversationId: string): { agent: strin
     return entry;
 }
 
+// #1614: the conversation-id tail note is injected ONLY when the proxy knows
+// a shared, unbound MCP shim serves this host — the one topology that cannot
+// route by binding or request identity (the model must name the target per
+// call). Bound shims (env/meta session) and pure wire-lane hosts route
+// without it, so their requests stay free of the note entirely.
+let sharedMcpLane = false;
+export function markSharedMcpLane(): void {
+    sharedMcpLane = true;
+}
+export function sharedMcpLaneActive(): boolean {
+    return sharedMcpLane;
+}
+export function _resetSharedMcpLaneForTest(): void {
+    sharedMcpLane = false;
+}
+
 export function handlePluginRegister(payload: string, res: import("node:http").ServerResponse): void {
-    let parsed: { conversationId?: unknown; agent?: unknown; identity?: unknown; parentConversationId?: unknown };
+    let parsed: { conversationId?: unknown; agent?: unknown; identity?: unknown; parentConversationId?: unknown; unbound?: unknown };
     try {
         parsed = JSON.parse(payload) as { conversationId?: unknown; agent?: unknown; identity?: unknown };
     } catch {
@@ -498,6 +514,14 @@ export function handlePluginRegister(payload: string, res: import("node:http").S
     }
     const conversationId = typeof parsed.conversationId === "string" ? parsed.conversationId.trim() : "";
     if (!conversationId) {
+        // #1614: an UNBOUND shim announces its topology (its host shares one
+        // MCP process across several conversations, so no session channel
+        // exists). It names no conversation — mark the lane, nothing else.
+        if (parsed.unbound === true) {
+            markSharedMcpLane();
+            res.end(JSON.stringify({ ok: true, unbound: true }));
+            return;
+        }
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "conversationId is required" }));
         return;
@@ -900,12 +924,30 @@ export async function handlePluginTool(
         res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
         return;
     }
-    const conversationId = typeof parsed.conversationId === "string" ? parsed.conversationId.trim() : "";
+    const bodyId = typeof parsed.conversationId === "string" ? parsed.conversationId.trim() : "";
     const tool = typeof parsed.tool === "string" ? parsed.tool : "";
+    let conversationId = bodyId;
     if (!conversationId) {
-        res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: `conversationId is required (send the same value as the ${PLUGIN_CONVERSATION_HEADER} header)` }));
-        return;
+        // #1614: an absent id means a shared unbound shim forwarded the call
+        // (the shim-side block is gone). Route ONLY when exactly one session
+        // is active since boot — ambiguity must fail loudly, never fold a
+        // sibling session. Either way the lane is now known shared, so the
+        // next request prints the id note and the model can pass it per call.
+        markSharedMcpLane();
+        const active = listSessions().filter((s) => s.restored !== true);
+        if (active.length === 1) {
+            conversationId = conversationIdForSession(active[0].id) ?? active[0].id;
+            deps.log("info", `[plugin] tool "${tool}" arrived without a conversation id; auto-routed to the only active session ${active[0].id}`);
+        } else {
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({
+                ok: false,
+                error: active.length === 0
+                    ? "no conversation id and no active session yet (pass the conversation_id argument — see the 'your bili conversation id' line in the proxy notes — or set BILI_CONVERSATION_ID or connect via Claude Code MCP session meta)"
+                    : `no conversation id and ${active.length} sessions are active — ambiguous, refusing to guess (pass the conversation_id argument — see the 'your bili conversation id' line in the proxy notes — or set BILI_CONVERSATION_ID or connect via Claude Code MCP session meta)`,
+            }));
+            return;
+        }
     }
     const { session, entry } = resolveConversation(conversationId);
     // #760: the verbatim-id fallback above can resolve a session with NO map

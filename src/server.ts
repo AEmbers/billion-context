@@ -106,7 +106,7 @@ import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConver
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
-import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
+import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, sharedMcpLaneActive, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
 import { evaluateChain, extractChainCarriers, stampOutbound, stripEmbeddedChainCarriers } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
@@ -3246,7 +3246,10 @@ async function prepareAnthropic(
         // message (never persisted, never re-sent by the client) so the static
         // system — and with it the whole cross-session history prefix — stays
         // byte-stable; the system keeps only the byte-stable pointer.
-        if (opts.compress.injectTool) rebuiltMessages = [...rebuiltMessages, { role: "user" as const, content: conversationIdTailNote(ensureCanonicalId(session)) }];
+        // #1614: the id note rides ONLY the shared-MCP lane (unbound shim —
+        // the one topology that cannot route without the model naming the
+        // target). Bound/wire-only hosts never see it.
+        if (opts.compress.injectTool && sharedMcpLaneActive()) rebuiltMessages = [...rebuiltMessages, { role: "user" as const, content: conversationIdTailNote(ensureCanonicalId(session)) }];
         if (sysNotes.length > 0) {
             rebuiltMessages = [...rebuiltMessages, ...sysNotes.map((text) => ({ role: "user" as const, content: text }))];
         }
@@ -3472,11 +3475,16 @@ async function prepareOpenai(
         // would invalidate the cache every turn.
         const sysParts: string[] = [];
         if (openaiSystemText) sysParts.push(openaiSystemText);
-        if (shouldInject) sysParts.push(withConversationIdPointerNote(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers)));
+        if (shouldInject) {
+            const basePrompt = withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers);
+            // #1614: the pointer line rides only the shared-MCP lane; the
+            // compress system itself always injects.
+            sysParts.push(sharedMcpLaneActive() ? withConversationIdPointerNote(basePrompt) : basePrompt);
+        }
         if (absorbActive) sysParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
         rebuiltMessages = injectOpenaiSystem(rebuiltMessages, sysParts);
         // #1611: id value rides the ephemeral tail (see prepareAnthropic).
-        if (shouldInject) rebuiltMessages = [...rebuiltMessages, { role: "user" as const, content: conversationIdTailNote(ensureCanonicalId(session)) }];
+        if (shouldInject && sharedMcpLaneActive()) rebuiltMessages = [...rebuiltMessages, { role: "user" as const, content: conversationIdTailNote(ensureCanonicalId(session)) }];
         if (sysNotes.length > 0) {
             rebuiltMessages = [...rebuiltMessages, ...sysNotes.map((text) => ({ role: "user" as const, content: text }))];
         }
@@ -3703,7 +3711,12 @@ async function prepareGoogle(
         // constants, so the system anchor stays identical across normal turns
         // and round-2 re-requests — skipping them here would fork the prefix
         // at every fold and collapse the upstream cache hit.
-        if (shouldInject) sysParts.push(withConversationIdPointerNote(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers)));
+        if (shouldInject) {
+            const basePrompt = withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers);
+            // #1614: pointer rides only the shared-MCP lane; the compress
+            // system stays unconditional.
+            sysParts.push(sharedMcpLaneActive() ? withConversationIdPointerNote(basePrompt) : basePrompt);
+        }
         if (absorbActive) sysParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
         googleOutboundSystem = sysParts.join("\n\n");
         // Untouched when nothing was added beyond the client's own text: the
@@ -3715,7 +3728,7 @@ async function prepareGoogle(
             toolsOut = injectGoogleTool(parsed.tools, [...(absorbActive ? [absorbTools.google] : []), ...(rulesActive ? [RULE_TOOL_GOOGLE] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).google] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_GOOGLE] : [])], surface?.toolPrompts);
         }
         // #1611: id value rides the ephemeral tail (see prepareAnthropic).
-        if (shouldInject) rebuiltContents = appendGoogleNudge(rebuiltContents, conversationIdTailNote(ensureCanonicalId(session)));
+        if (shouldInject && sharedMcpLaneActive()) rebuiltContents = appendGoogleNudge(rebuiltContents, conversationIdTailNote(ensureCanonicalId(session)));
         if (sysNotes.length > 0) {
             rebuiltContents = appendGoogleNudge(rebuiltContents, sysNotes.join("\n\n---\n\n"));
         }
@@ -3959,7 +3972,7 @@ async function prepareResponses(
             ? []
             : (session.metadata.codexForgedSummaries as string[] | undefined) ?? [];
         if (shouldInject && !isCompactionTrigger && !process.env.ACP_NO_COMPRESS_PROMPT) {
-            const prompt = withConversationIdPointerNote(withMarkerIntegrityNote(withSummaryBudgetNote(responsesTextProtocol ? buildCompressHybridSystemPrompt(prompts, surface?.promptSections) : buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers));
+            const prompt = sharedMcpLaneActive() ? withConversationIdPointerNote(withMarkerIntegrityNote(withSummaryBudgetNote(responsesTextProtocol ? buildCompressHybridSystemPrompt(prompts, surface?.promptSections) : buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers)) : withMarkerIntegrityNote(withSummaryBudgetNote(responsesTextProtocol ? buildCompressHybridSystemPrompt(prompts, surface?.promptSections) : buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers);
             const devParts = [...projection.systemParts, ...forgedSummaries, prompt];
             if (absorbActive) devParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
             const devContent = devParts.join("\n\n---\n\n");
@@ -4356,7 +4369,10 @@ function injectSystem(
     // the caller (prepareAnthropic), never merged into system.
     const baseText = extractSystem(parsed.system);
     const parts: string[] = [];
-    if (opts.compress.injectTool) parts.push(withConversationIdPointerNote(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers)));
+    if (opts.compress.injectTool) {
+        const basePrompt = withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers);
+        parts.push(sharedMcpLaneActive() ? withConversationIdPointerNote(basePrompt) : basePrompt);
+    }
     if (opts.compress.injectTool && absorbEnabled(config)) parts.push(buildAbsorbSystemPrompt(absorbToolName(config)));
     if (parts.length === 0) return parsed.system;
     const full = baseText ? `${baseText}\n\n---\n\n${parts.join("\n\n")}` : parts.join("\n\n");
@@ -5877,7 +5893,8 @@ async function forward(
                 ? `\n\n${buildAbsorbSystemPrompt(absorbToolName(loopConfig))}`
                 : "";
             const visibilityMarkers = resolveCompress(opts.routes, route?.rewrittenUrl, (parsedReq as { model?: string }).model, opts.compress).visibilityMarkers ?? true;
-            const systemPrompt = withConversationIdPointerNote(withMarkerIntegrityNote(withSummaryBudgetNote(textProtocol ? buildCompressHybridSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections) : buildCompressSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections)), visibilityMarkers)) + absorbSection;
+            const baseSystemPrompt = withMarkerIntegrityNote(withSummaryBudgetNote(textProtocol ? buildCompressHybridSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections) : buildCompressSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections)), visibilityMarkers);
+            const systemPrompt = (sharedMcpLaneActive() ? withConversationIdPointerNote(baseSystemPrompt) : baseSystemPrompt) + absorbSection;
             const adapter = pickAdapter(prepared.protocol, parsedReq, textProtocol, prepared.responsesProjection, prepared.anthropicSystem, prepared.openaiSystemText, absorbActive ? absorbToolName(loopConfig) : undefined, prepared.google, prepared.systemNotes, opts.streamErrorShape);
             const refreshFolded = async (current: CoreMessage[]): Promise<CoreMessage[]> => {
                 return withSessionLock(prepared.session, async () => {
@@ -5937,7 +5954,7 @@ async function forward(
                     await applyImageCompressionPass(prepared.session, ordered as BiliMessage[], { config: loopConfig, billing: imageBillingFor(opts, route?.rewrittenUrl), log: ctx.log });
                     const imgNote = imageFullTrailingNote(prepared.session);
                     // #1611: id value rides the ephemeral tail, mirroring the round-1 request.
-                    (ordered as BiliMessage[]).push({ id: "bili_conversation_id_note", role: "user", contentType: "text", text: conversationIdTailNote(ensureCanonicalId(prepared.session)) });
+                    if (sharedMcpLaneActive()) (ordered as BiliMessage[]).push({ id: "bili_conversation_id_note", role: "user", contentType: "text", text: conversationIdTailNote(ensureCanonicalId(prepared.session)) });
                     if (imgNote) (ordered as BiliMessage[]).push({ id: "bili_image_full_note", role: "user", contentType: "text", text: imgNote });
                     return ordered;
                 });
