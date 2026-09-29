@@ -9,6 +9,7 @@ import { adoptContentStore, contentStoreOf, ccrEnabled, drainPendingRetrievals, 
 import { IMAGE_FULL_TOOL_NAME, executeImageFull, imageCompressionEnabled } from "./image-compress.js";
 import { containsMarkerLineText, containsRenderTagText, stripAcpTags } from "./loop/tag-echo-filter.js";
 import { maxShrinkPerCompress } from "./fetch-util.js";
+import { safePrefix, safeSuffix, scrubLoneSurrogates } from "./text-safe.js";
 
 export type RewriteCtx = {
     core: CompressionCore;
@@ -192,8 +193,11 @@ function currentRefsSnapshot(ctx: RewriteCtx): string {
 // char length plus head/tail excerpts (newlines flattened to spaces) so the
 // model can verify its summary was stored intact without decompressing.
 export function summaryFingerprintLine(blockId: string, summary: string): string {
-    const head = summary.slice(0, 30).replace(/\r?\n/g, " ");
-    const tail = summary.slice(-100).replace(/\r?\n/g, " ");
+    // #1615: code-unit cuts can split a surrogate pair and the lone half
+    // breaks upstream JSON parsing of the whole body — clamp + scrub (#816
+    // family, third site; never slice model-visible text by hand again).
+    const head = scrubLoneSurrogates(safePrefix(summary, 30).replace(/\r?\n/g, " "));
+    const tail = scrubLoneSurrogates(safeSuffix(summary, 100).replace(/\r?\n/g, " "));
     return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
 }
 

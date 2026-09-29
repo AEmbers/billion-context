@@ -111,6 +111,7 @@ import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } fr
 import { evaluateChain, extractChainCarriers, stampOutbound, stripEmbeddedChainCarriers } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "./util.js";
+import { safePrefix, safeSuffix } from "./text-safe.js";
 
 import { BILI_TUNNEL_HEADER, checkTunnelDestination, classifyIp, localMachineIps, normalizeIpLiteral, parseIpLiteral, tunnelAllowlistFromEnv } from "./tunnel-guard.js";
 import { dumpRejectedBody } from "./error-dump.js";
@@ -5087,7 +5088,7 @@ async function forward(
                 // Mask all but a short prefix so the header NAME is visible
                 // (so we know the key is sent and roughly how) without leaking
                 // the credential into the log.
-                const masked = /key|auth|token/i.test(k) ? s.slice(0, 8) + "..." + s.slice(-4) + ` (${s.length} chars)` : s.slice(0, 60);
+                const masked = /key|auth|token/i.test(k) ? safePrefix(s, 8) + "..." + safeSuffix(s, 4) + ` (${s.length} chars)` : safePrefix(s, 60);
                 log("info", `[${sid}] client hdr ${k}=${masked}`);
             }
         }
