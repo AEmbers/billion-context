@@ -147,6 +147,12 @@ Three ways to use it — pick one:
 Mechanism details behind these three options (plugin lifecycle, runtime-info
 protocol, injection priority) live in [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
 
+Ports, briefly (#1660): `bili start` (manual) owns `8787`. Everything a lane
+spawns for you (native hooks, launcher lanes) lives in a separate
+self-managed zone starting at `18787` — collisions hop +1 and each lane
+remembers its drift, so zero-config installs never fight you for a port,
+and a deliberate `bili start` daemon is attached by default.
+
 ### Option 1 — Native plugin (`bili plugin install pi` / `omp` / `opencode` / `dsh` / `kimi` / `hermes` / `zcode`)
 
 The proxy lives inside the client: install once, then start the client
@@ -193,7 +199,7 @@ Notes:
 - `kimi` reports runtime-info at bootstrap only (static headers can't carry per-request window/model values) and binds subagents by per-call `conversation_id`.
 - `hermes`'s native plugin is Python: it points hermes' httpx stack at the proxy via env vars after a health check and stamps per-request headers through an `llm_request` middleware.
 - `codex` has a companion MCP-shell install too, but it needs a running proxy — not native mode.
-- `claude` has a native posture (#964): managed settings block + `SessionStart` hook + MCP shell on a stable port; opt out with `BILI_NATIVE_CLAUDE=0` (passthrough). Mechanics: [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
+- `claude` has a native posture (#964): managed settings block + `SessionStart` hook + MCP shell; the hook rides the self-managed port zone (#1660) and re-pins the managed URL to the live origin each session, so port drift self-heals. Opt out with `BILI_NATIVE_CLAUDE=0` (passthrough). Mechanics: [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md).
 - `zcode` has a native posture (#1145): managed `~/.zcode/cli/config.json` block + per-session provider `baseURL` rewrite. Full mechanics: [CLIENTS.md](CLIENTS.md).
 - `jcode` and `aider` have no native mode (no plugin/MCP/tool-injection seam: #962, #1048) — use `bili jcode` / `bili aider`.
 - `copilot`, `amp` and `goose` are launcher-only (#1049); goose cannot be cert-MITMed (rustls trusts no CA file) and rides plain-HTTP base-URL redirects instead.

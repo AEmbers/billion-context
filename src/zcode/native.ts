@@ -12,6 +12,7 @@ import { isPidAlive } from "../instance.js";
 import { nativeAttachOrigin, nativeProxyScriptPath, proxyEnvOrigin } from "../agent/native-bootstrap.js";
 import { reportRuntimeInfo, type RuntimeInfoReport } from "../agent/shared.js";
 import { resolveZcodeNativePort, zcodeDirectPrefixes } from "../config.js";
+import { lanePreferredPort } from "../instance.js";
 import {
     applyZcodeRouting,
     defaultZcodeRoutePolicy,
@@ -384,12 +385,16 @@ export async function bootstrapZcodeNative(opts: BootstrapZcodeOptions = {}): Pr
 async function defaultEnsureProxy(): Promise<{ origin: string; attached: boolean }> {
     // The spawned proxy's parent-gone watchdog (#server.ts BILI_PARENT_PID)
     // keys off OUR pid: zcode kills this MCP child when its session ends, so
-    // the per-session proxy tears itself down with it. The lane pins its
-    // default port (ZCODE_NATIVE_DEFAULT_PORT, BILI_ZCODE_PORT to override)
-    // so wrappers written by one session stay valid for the next one even
-    // when nothing else hands the port off (#1622/#1623).
+    // the per-session proxy tears itself down with it. #1660 zone semantics:
+    // BILI_ZCODE_PORT (explicit) keeps strict-port behavior; otherwise the
+    // zcode lane binds its zone preference (sticky record > 18787 base) and
+    // the proxy child's EADDRINUSE +1 ladder resolves collisions zero-config
+    // — wrappers written by one session stay valid for the next one even
+    // when nothing else hands the port off (#1622/#1623), and the store
+    // drift-repair below follows any drift.
+    const explicit = resolveZcodeNativePort();
     const handle = await ensureProxyRunning(
-        { host: LAUNCHER_DEFAULT_HOST, port: resolveZcodeNativePort(), passthrough: false, debug: false, lane: "zcode" },
+        { host: LAUNCHER_DEFAULT_HOST, port: explicit ?? lanePreferredPort("zcode"), passthrough: false, debug: false, strictPort: explicit !== undefined, lane: "zcode" },
         { scriptPath: nativeProxyScriptPath() },
     );
     return { origin: handle.origin, attached: !!handle.attached };

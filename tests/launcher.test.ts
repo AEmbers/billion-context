@@ -1194,12 +1194,15 @@ test("ensureProxyRunning: armed daemon (no lane) stays shareable with any client
     assert.equal(handle.attached, true);
 });
 
-// #1335: the attach gate — an unarmed listener (a manually started `bili start`
-// daemon: no BILI_PARENT_PID, refuses watchers, never dies with its users) is
-// never attached by default; the hook spawns its own session-owned proxy so
-// every session runs the currently installed bili and the proxy dies with the
-// last session (#1186 semantics).
-test("ensureProxyRunning: unarmed listener is not attached by default — self-managed spawn (#1335)", async () => {
+// #1335: the attach gate — an unarmed listener is never attached by
+// default; the hook spawns its own session-owned proxy so every session runs
+// the currently installed bili and the proxy dies with the last session
+// (#1186 semantics). #1660 narrows the gate to LANE'D instances: a lane'd
+// proxy with a dead/unarmed watchdog is a lifecycle-drift symptom and is
+// refused; a USER-ZONE instance (manual `bili start`: no lane, no launch
+// token) is deliberately maintained by the user and IS attachable — see the
+// dedicated user-zone test below.
+test("ensureProxyRunning: unarmed LANE'D listener is not attached by default — self-managed spawn (#1335/#1660)", async () => {
     let spawnCalls = 0;
     let registered = 0;
     let childToken = "";
@@ -1215,7 +1218,7 @@ test("ensureProxyRunning: unarmed listener is not attached by default — self-m
             },
             fetchImpl: async () => ({ ok: true }),
             fetchHealthInfo: async () => ({ ok: true, instanceId: "daemon-1", watchdog: { armed: false } }),
-            readInstanceFile: () => (spawned ? recordedInstance({ launchToken: childToken }) : recordedInstance({ instanceId: "daemon-1" })),
+            readInstanceFile: () => (spawned ? recordedInstance({ launchToken: childToken }) : recordedInstance({ instanceId: "daemon-1", lane: "claude-native" })),
             registerWatcher: async () => {
                 registered++;
                 return "refused";
@@ -1224,13 +1227,98 @@ test("ensureProxyRunning: unarmed listener is not attached by default — self-m
             scriptPath: FP_SCRIPT,
         },
     );
-    assert.equal(spawnCalls, 1, "self-managed proxy spawned instead of attaching to the unarmed daemon");
+    assert.equal(spawnCalls, 1, "self-managed proxy spawned instead of attaching to the unarmed lane'd daemon");
     assert.ok(handle.child);
     assert.equal(handle.attached, undefined);
     assert.equal(registered, 0, "no watcher registration is attempted against the refused daemon");
 });
 
-test("ensureProxyRunning: unverifiable listener (no watchdog field, pre-#1330 build) is treated as unarmed (#1335)", async () => {
+test("ensureProxyRunning: unarmed USER-ZONE daemon (manual `bili start`) is attached by default (#1660)", async () => {
+    let spawnCalls = 0;
+    let registered = 0;
+    const handle = await ensureProxyRunning(
+        { host: "127.0.0.1", port: 8787, passthrough: false, debug: false, lane: "pi" },
+        {
+            spawnImpl: () => {
+                spawnCalls++;
+                return makeFakeChild(42505);
+            },
+            fetchImpl: async () => ({ ok: true }),
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "manual-1", watchdog: { armed: false } }),
+            readInstanceFile: () => recordedInstance({ instanceId: "manual-1" }),
+            registerWatcher: async () => {
+                registered++;
+                return "ok";
+            },
+            sleep: () => new Promise((r) => setTimeout(r, 0)),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(spawnCalls, 0, "the user-maintained daemon is reused, not doubled");
+    assert.equal(handle.attached, true);
+    assert.equal(registered, 1);
+});
+
+test("ensureProxyRunning: a lane'd launch with port 0 binds the zone preference and settles it sticky (#1660)", async () => {
+    let spawnedArgs: string[] | null = null;
+    const preferred: string[] = [];
+    const settled: Array<[string, number]> = [];
+    const spawnImpl: SpawnFn = (_cmd, args) => {
+        spawnedArgs = [...args];
+        return makeFakeChild(42441);
+    };
+    const handle = await ensureProxyRunning(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false, lane: "zcode" },
+        {
+            fetchImpl: async () => ({ ok: true }),
+            spawnImpl,
+            sleep: () => Promise.resolve(),
+            readInstanceFile: () => undefined,
+            zonePreferredPort: (lane) => {
+                preferred.push(lane);
+                return 18787;
+            },
+            writeZonePort: (lane, port) => {
+                settled.push([lane, port]);
+            },
+        },
+    );
+    assert.deepEqual(preferred, ["zcode"], "the lane's zone preference resolves the spawn port");
+    assert.ok(spawnedArgs !== null);
+    const portIdx = spawnedArgs.indexOf("--port");
+    assert.equal(spawnedArgs[portIdx + 1], "18787", "zone base is the spawn port, not an OS ephemeral");
+    assert.equal(handle.port, 18787);
+    assert.deepEqual(settled, [["zcode", 18787]], "the settled port is recorded sticky for later launches");
+});
+
+test("ensureProxyRunning: an unlane'd launch keeps the OS ephemeral default — no zone, no sticky (#1660)", async () => {
+    let spawnedArgs: string[] | null = null;
+    const settled: Array<[string, number]> = [];
+    const spawnImpl: SpawnFn = (_cmd, args) => {
+        spawnedArgs = [...args];
+        return makeFakeChild(42442);
+    };
+    const handle = await ensureProxyRunning(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            fetchImpl: async () => ({ ok: true }),
+            spawnImpl,
+            sleep: () => Promise.resolve(),
+            readInstanceFile: () => undefined,
+            writeZonePort: (lane, port) => {
+                settled.push([lane, port]);
+            },
+        },
+    );
+    assert.ok(spawnedArgs !== null);
+    const portIdx = spawnedArgs.indexOf("--port");
+    const childPort = Number(spawnedArgs[portIdx + 1]);
+    assert.ok(Number.isInteger(childPort) && childPort > 0, `ephemeral port assigned, got ${childPort}`);
+    assert.equal(handle.port, childPort);
+    assert.deepEqual(settled, [], "no sticky write without a lane");
+});
+
+test("ensureProxyRunning: unverifiable lane'd listener (no watchdog field, pre-#1330 build) is treated as unarmed (#1335)", async () => {
     let spawnCalls = 0;
     let childToken = "";
     let spawned = false;
@@ -1245,7 +1333,7 @@ test("ensureProxyRunning: unverifiable listener (no watchdog field, pre-#1330 bu
             },
             fetchImpl: async () => ({ ok: true }),
             fetchHealthInfo: async () => ({ ok: true, instanceId: "stale-daemon" }),
-            readInstanceFile: () => (spawned ? recordedInstance({ launchToken: childToken }) : recordedInstance({ instanceId: "stale-daemon" })),
+            readInstanceFile: () => (spawned ? recordedInstance({ launchToken: childToken }) : recordedInstance({ instanceId: "stale-daemon", lane: "zcode" })),
             sleep: () => new Promise((r) => setTimeout(r, 0)),
             scriptPath: FP_SCRIPT,
         },
@@ -1275,7 +1363,7 @@ test("ensureProxyRunning: attachExternal escape hatch restores attaching to an u
     assert.equal(handle.attached, true, "deliberate setups keep the old behavior via the opt-in");
 });
 
-test("ensureProxyRunning: strictPort launch fails fast when its pinned port is held by an unarmed proxy (#1335/#964)", async () => {
+test("ensureProxyRunning: strictPort launch fails fast when its pinned port is held by an unarmed LANE'D proxy (#1335/#964/#1660)", async () => {
     let spawnCalls = 0;
     await assert.rejects(
         ensureProxyRunning(
@@ -1287,7 +1375,7 @@ test("ensureProxyRunning: strictPort launch fails fast when its pinned port is h
                 },
                 fetchImpl: async () => ({ ok: true }),
                 fetchHealthInfo: async () => ({ ok: true, instanceId: "daemon-1", watchdog: { armed: false } }),
-                readInstanceFile: () => recordedInstance({ origin: "http://127.0.0.1:8799", port: 8799, instanceId: "daemon-1" }),
+                readInstanceFile: () => recordedInstance({ origin: "http://127.0.0.1:8799", port: 8799, instanceId: "daemon-1", lane: "claude-native" }),
                 sleep: () => Promise.resolve(),
                 scriptPath: FP_SCRIPT,
             },
@@ -5627,11 +5715,13 @@ test("attach diagnostics record a fingerprint-mismatch skip (#1623)", async () =
 
 test("attach diagnostics record a lifecycle-gate refusal (#1623)", async () => {
     const diag: string[] = [];
+    // #1660: an unarmed instance WITHOUT a lane is a user-zone manual start
+    // and attaches by default — the refusal path needs a lane'd one.
     const inst = await findLiveAttachableInstance(
         { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
         {
             fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1" }),
-            readInstanceFile: () => recordedInstance(),
+            readInstanceFile: () => recordedInstance({ lane: "zcode" }),
             attachDiag: (m) => diag.push(m),
             scriptPath: FP_SCRIPT,
         },

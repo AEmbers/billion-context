@@ -1033,10 +1033,10 @@ type FileConfig = {
      *  Per-provider `imageBilling` overrides it; env BILI_IMAGE_BILLING wins
      *  over both. See ProviderRoute.imageBilling. */
     imageBilling?: string;
-    /** Claude-native install tuning (#964): the loopback port the managed
-     *  settings block pins ANTHROPIC_BASE_URL at and the SessionStart hook
-     *  brings a proxy up on. Default CLAUDE_NATIVE_DEFAULT_PORT; env
-     *  BILI_CLAUDE_NATIVE_PORT wins over both. */
+    /** Claude-native port override (#964/#1660): an explicit port for the
+     *  claude lane — strict-port semantics (EADDRINUSE fails loud). Undefined
+     *  (the default) means the lane's sticky zone port (ZONE_PORT_BASE base).
+     *  Env BILI_CLAUDE_NATIVE_PORT wins over the file. */
     claude?: { nativePort?: number };
     /** Native-hook attach policy (#1335): set `true` to let native hooks
      *  attach to lifecycle-less listeners (a manually started `bili start`
@@ -1080,35 +1080,48 @@ function loadConfigFile(): FileConfig {
     return {};
 }
 
-/** Default loopback port for the claude native install (#964): the value the
- *  installer bakes into ~/.claude/settings.json's env.ANTHROPIC_BASE_URL and
- *  the SessionStart hook brings a proxy up on. Documented as reserved. */
-export const CLAUDE_NATIVE_DEFAULT_PORT = 48787;
+/** #1660: the self-managed zone port base. Every launcher-spawned lane
+ *  binds here by default instead of an OS-assigned ephemeral port: a stable
+ *  origin survives instance death, and the proxy child's EADDRINUSE ladder
+ *  (+1 per attempt) resolves collisions deterministically with a sticky
+ *  record (instance.ts port-zone.json). 18787 sits below the Linux ephemeral
+ *  range (32768–60999) so the ladder never lands on OS-assigned ports; 8787
+ *  stays reserved as the USER zone (manual `bili start`). Env BILI_ZONE_PORT
+ *  overrides the base for the whole zone. */
+export const ZONE_PORT_BASE = 18787;
 
-/** The claude-native loopback port, one resolution for installer, hook, and
- *  launcher: env BILI_CLAUDE_NATIVE_PORT > config `claude.nativePort` >
- *  CLAUDE_NATIVE_DEFAULT_PORT. */
-export function resolveClaudeNativePort(env: NodeJS.ProcessEnv = process.env): number {
+export function resolveZonePortBase(env: NodeJS.ProcessEnv = process.env): number {
+    const fromEnv = Number.parseInt(env.BILI_ZONE_PORT ?? "", 10);
+    if (Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv < 65536) return fromEnv;
+    return ZONE_PORT_BASE;
+}
+
+/** #1660: an explicit user override of the claude lane's port: env
+ *  BILI_CLAUDE_NATIVE_PORT > config `claude.nativePort` > undefined. A
+ *  DEFINED value means a strict-port launch (an EADDRINUSE at bind fails
+ *  loud, #964); undefined means the lane's sticky zone port
+ *  (instance.ts lanePreferredPort) with the +1 ladder absorbing collisions.
+ *  The installer no longer persists this — zone drift is repaired by the
+ *  SessionStart hook rewriting the managed block to the live origin every
+ *  session. */
+export function resolveClaudeNativePort(env: NodeJS.ProcessEnv = process.env): number | undefined {
     const fromEnv = Number.parseInt(env.BILI_CLAUDE_NATIVE_PORT ?? "", 10);
     if (Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv < 65536) return fromEnv;
     const fromFile = loadConfigFile().claude?.nativePort;
     if (typeof fromFile === "number" && Number.isInteger(fromFile) && fromFile > 0 && fromFile < 65536) return fromFile;
-    return CLAUDE_NATIVE_DEFAULT_PORT;
+    return undefined;
 }
 
-/** ZCode native lane: default pinned port (#1622/#1623) — the same pattern
- *  as CLAUDE_NATIVE_DEFAULT_PORT. A pinned port means wrappers written into
- *  the shared provider store stay valid across sessions even when an
- *  instance dies without handoff: every respawn re-opens the same port (and
- *  a concurrent compatible listener is attached instead of doubled). Env
- *  BILI_ZCODE_PORT overrides (validated); no file config — the store is
- *  re-derived at every bootstrap, so nothing is baked at install time. */
-export const ZCODE_NATIVE_DEFAULT_PORT = 48789;
-
-export function resolveZcodeNativePort(env: NodeJS.ProcessEnv = process.env): number {
+/** #1660: explicit override of the zcode lane's port (env only — the store
+ *  is re-derived at every bootstrap, nothing is baked at install time).
+ *  Defined means a strict-port launch; undefined means the lane's sticky
+ *  zone port. Legacy wrappers pinned to the old 48789 default are migrated
+ *  by the bootstrap's origin-drift repair (routeZcodeConfig rewrites the
+ *  store to the live origin). */
+export function resolveZcodeNativePort(env: NodeJS.ProcessEnv = process.env): number | undefined {
     const fromEnv = Number.parseInt(env.BILI_ZCODE_PORT ?? "", 10);
     if (Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv < 65536) return fromEnv;
-    return ZCODE_NATIVE_DEFAULT_PORT;
+    return undefined;
 }
 
 /** Client-side routing exemptions (#1622): providers whose route declares
@@ -1132,76 +1145,6 @@ export function resolveNativeAttachExternal(env: NodeJS.ProcessEnv = process.env
     return loadConfigFile().native?.attachExternal === true;
 }
 
-/** Persist the claude-native port the installer baked into settings.json
- *  (#964). Without this, an install driven by BILI_CLAUDE_NATIVE_PORT writes
- *  that port into ~/.claude/settings.json but the SessionStart hook (which
- *  does NOT inherit claude's settings.env) later resolves the default —
- *  hooking the wrong port while claude dials the baked one. `claude plugin
- *  install` calls this; `claude plugin remove` calls clearClaudeNativePort. */
-/** #964: read-modify-write safety for user config files — refuse to write
- *  over a file that exists but is NOT valid JSON: loadConfigFile() degrades
- *  malformed input to {}, so an unguarded RMW would replace the user's
- *  corrupt-but-repairable config with a minimal one (silent clobber).
- *  Absent / empty / valid files are all safe to write. */
-function configFileRmwSafe(): boolean {
-    const p = configFile();
-    let raw: string;
-    try {
-        raw = readFileSync(p, "utf8");
-    } catch {
-        return true;
-    }
-    if (!raw.trim()) return true;
-    try {
-        JSON.parse(raw.replace(/^\uFEFF/, ""));
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-export function saveClaudeNativePort(port: number): void {
-    const p = configFile();
-    if (!configFileRmwSafe()) {
-        loggerLog("warn", `[acp-config] refusing to persist claude.nativePort=${port} — ${p} is not valid JSON; repair it first`);
-        return;
-    }
-    const cur = loadConfigFile() as { claude?: { nativePort?: number } } & Record<string, unknown>;
-    const next: { claude?: { nativePort?: number } } & Record<string, unknown> = { ...cur };
-    next.claude = { ...(cur.claude ?? {}), nativePort: port };
-    try {
-        mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
-    } catch (err) {
-        loggerLog("warn", `[acp-config] could not persist claude.nativePort=${port} at ${p} — ${err instanceof Error ? err.message : String(err)}`);
-    }
-}
-
-/** Drop the persisted claude-native port (plugin remove) so a fresh default
- *  install resolves the default port again. Never throws. */
-export function clearClaudeNativePort(): void {
-    const p = configFile();
-    if (!configFileRmwSafe()) {
-        loggerLog("warn", `[acp-config] refusing to clear claude.nativePort — ${p} is not valid JSON; repair it first`);
-        return;
-    }
-    const cur = loadConfigFile() as { claude?: { nativePort?: number } } & Record<string, unknown>;
-    if (cur.claude?.nativePort === undefined) return;
-    const next: Record<string, unknown> = { ...cur };
-    if (Object.keys(cur.claude).length > 1) {
-        const claude = { ...cur.claude } as Record<string, unknown>;
-        delete claude.nativePort;
-        next.claude = claude;
-    } else {
-        delete next.claude;
-    }
-    try {
-        mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
-    } catch (err) {
-        loggerLog("warn", `[acp-config] could not clear claude.nativePort at ${p} — ${err instanceof Error ? err.message : String(err)}`);
-    }
-}
 
 /** Template written on first run so the user has a file to edit instead
  *  of having to invent the path/schema. Left empty on purpose: the proxy

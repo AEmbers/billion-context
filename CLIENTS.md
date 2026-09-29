@@ -230,8 +230,13 @@ two small node scripts that do the work around the client:
   - **`direct` exemptions:** a provider route declaring `"direct": true` in
     the `providers` table (keyed by upstream URL — see CONFIGURATION.md)
     stays direct; the same exemption any lane can honor.
-  The lane pins its default port (`48789`, `BILI_ZCODE_PORT` to override) so
-  wrappers survive session restarts even without handoff. `BILI_ZCODE_ROUTE`
+  The lane launches its proxy in the self-managed port zone (#1660): zone
+  base `18787`, a per-lane sticky record so a past +1-ladder drift is
+  followed automatically, collisions resolved by the child's +1 ladder,
+  and the shared store rewritten to the live origin on drift — wrappers
+  survive session restarts even without handoff. `BILI_ZCODE_PORT` pins an
+  exact port instead (strict-port: a squatter is refused loudly, no hop).
+  `BILI_ZCODE_ROUTE`
   (`plans`/`none`) is a compat escape hatch, and `BILI_ZCODE_SIGNING_FIXED=1`
   flips the #1621 skips off once a ZCode build ships the signing fix.
 - **Watchdog & lifecycle:** the MCP child probes the proxy every 30 s. In
