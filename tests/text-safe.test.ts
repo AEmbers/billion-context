@@ -96,7 +96,9 @@ test("family gate: no raw negative string slices outside the allowlist", () => {
     walk(srcDir);
     const offenders: string[] = [];
     for (const f of files) {
-        const rel = path.relative(path.join(srcDir, ".."), f);
+        // #1629: path.relative yields backslashes on Windows — normalize to
+        // forward slashes so the allowlist keys match on every platform.
+        const rel = path.relative(path.join(srcDir, ".."), f).split(path.sep).join("/");
         const patterns = allowlist.get(rel) ?? [];
         for (const line of fs.readFileSync(f, "utf8").split("\n")) {
             if (!/\.slice\(-\d+\)/.test(line)) continue;
