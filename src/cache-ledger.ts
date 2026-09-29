@@ -495,6 +495,11 @@ export function settleUsageReport(
         // re-sends the unfolded history, so its usage report over-reports the
         // context the NEXT request will actually carry (see stream.ts applyRanges).
         session.stats.lastInputTokens = Math.max(0, s.total - (session.stats.compressCreditTokens ?? 0));
+        // #1569: calibration anchor for estimate-grade turns — written ONLY by
+        // real upstream usage reports (all three response shapes funnel here),
+        // never by estimate-grade samples or arming paths; dropped at native-
+        // compaction boundaries via resetSessionCompression (session.ts).
+        session.stats.lastUsageGradeTokens = session.stats.lastInputTokens;
         session.stats.lastInputTokensSource = "usage";
         // #1110: a real usage report retires the one-shot overflow arm.
         delete session.stats.overflowArmTokens;
