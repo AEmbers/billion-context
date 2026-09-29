@@ -1,5 +1,6 @@
 import type { CoreMessage } from "acp-kernel";
 import { coreToAnthropic, extractSystem, buildSystem, type AnthropicRequestBody } from "acp-kernel/wire";
+import { stampAnthropicSystemCacheControl } from "./cache-control.js";
 import { buildVisibilityMarker } from "./core.js";
 import { composeStreamFilters, createMarkerLineFilter, createTagEchoFilter } from "./tag-echo-filter.js";
 import { degenerateTurnWarning } from "../degenerate-turn.js";
@@ -150,7 +151,7 @@ function buildTextDeltaEvent(index: number, text: string): Buffer {
     );
 }
 
-export function createAnthropicAdapter(requestBody: Record<string, unknown>, originalSystem?: AnthropicRequestBody["system"], notes?: string[], errorShape: "protocol" | "completion" = "protocol"): CompressLoopAdapter {
+export function createAnthropicAdapter(requestBody: Record<string, unknown>, originalSystem?: AnthropicRequestBody["system"], notes?: string[], errorShape: "protocol" | "completion" = "protocol", cacheMarks?: Map<string, { type: "ephemeral" }>): CompressLoopAdapter {
     const model = (requestBody.model as string) ?? undefined;
     let messageId: string | undefined;
     let clientIndex = 0;
@@ -233,14 +234,19 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
 
     return {
         buildRequest(coreMessages, systemPrompt, body) {
-            const messages = coreToAnthropic(coreMessages);
+            // #1637: round-2 rebuilds apply the SAME cumulative cache_control
+            // marks through the SAME kernel applier as the steady path
+            // (coreToAnthropic) — a marker present on the trigger turn must be
+            // present here too or the byte prefix breaks at that element.
+            const messages = coreToAnthropic(coreMessages, cacheMarks);
             const baseText = originalSystem !== undefined ? extractSystem(originalSystem) : "";
             const full = baseText ? `${baseText}\n\n---\n\n${systemPrompt}` : systemPrompt;
             const system = originalSystem !== undefined ? buildSystem(full, originalSystem) : full;
+            const stamped = cacheMarks ? stampAnthropicSystemCacheControl(system) : system;
             const withNotes = notes && notes.length > 0
                 ? [...messages, ...notes.map((text) => ({ role: "user" as const, content: text }))]
                 : messages;
-            return { ...body, system, messages: withNotes };
+            return { ...body, system: stamped, messages: withNotes };
         },
 
         async *parseStream(upstream, round) {
