@@ -2327,8 +2327,9 @@ async function handle(
         storeEffectiveSearchPlanAware(session, resolvedSearchPlanAware);
         // #546: restore a client-shrunk output budget BEFORE the side gate so a
         // tool-carrying main request re-enters the pipeline at full budget (see
-        // restoreOutputBudget for the starvation mechanism).
-        restoreOutputBudget(parsed, session, log);
+        // restoreOutputBudget for the starvation mechanism). #1665: the
+        // operator-declared model output limit floors the restore target.
+        restoreOutputBudget(parsed, session, log, resolveConfiguredOutputLimit(opts.routes, route?.rewrittenUrl, (parsed as { model?: string }).model));
         // #896: the per-scope output-headroom cap (compress.outputHeadroomMaxPct,
         // three-level merge; default 0.25, aligned with billion-context-pi).
         // Resolved once here so the side-request guard below AND the main-path
