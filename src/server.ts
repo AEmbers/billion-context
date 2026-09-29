@@ -88,7 +88,7 @@ import { atomicWriteInstanceFile, clearProxyInstanceFile, entryScriptFingerprint
 import { compressLoopResponsesJson } from "./compress-loop-responses.js";
 import { hoistTrappedToolItems } from "./tool-pair-order.js";
 import { runCompressLoop, pickAdapter } from "./loop/index.js";
-import { computeAnthropicMessageMarks, stampAnthropicSystemCacheControl } from "./loop/cache-control.js";
+import { computeAnthropicMessageMarks, stampAnthropicSystemCacheControl, anthropicToolsCarryCacheControl } from "./loop/cache-control.js";
 import { reconcileSystemAnchor } from "./system-anchor.js";
 import { containsToolCallXmlFragment } from "./loop/tag-echo-filter.js";
 import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoReasoning, normalizeStrictEchoResponsesInput } from "./strict-echo.js";
@@ -3277,8 +3277,11 @@ async function prepareAnthropic(
         // #1637: cumulative cache_control marks applied through the kernel's own
         // applier (same machine the round-2 adapter uses); marks ride the last
         // STABLE message — ephemeral tails (retrievals/sysNotes/nudge/id note)
-        // never carry a breakpoint. Client-managed controls pass through untouched.
-        anthropicCacheMarks = cacheControls.size > 0 ? undefined : computeAnthropicMessageMarks(processedMessages as { id?: string }[], attachedRetrievals.length, session);
+        // never carry a breakpoint. Client-managed controls (message blocks,
+        // tools entries — WC-010's combined budget) pass through untouched.
+        anthropicCacheMarks = cacheControls.size > 0 || anthropicToolsCarryCacheControl(parsed.tools)
+            ? undefined
+            : computeAnthropicMessageMarks(processedMessages as { id?: string }[], attachedRetrievals.length, session);
         rebuiltMessages = coreToAnthropic(processedMessages as BiliMessage[], anthropicCacheMarks ?? cacheControls);
         if (sysNotes.length > 0) {
             rebuiltMessages = [...rebuiltMessages, ...sysNotes.map((text) => ({ role: "user" as const, content: text }))];

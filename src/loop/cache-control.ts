@@ -24,8 +24,9 @@ import type { AnthropicRequestBody } from "acp-kernel/wire";
  * limit.
  *
  * Client-managed caching wins: any pre-existing cache_control (harvested
- * from the client's messages, or present on system blocks) suppresses our
- * stamps entirely (pass no marks / return the system unchanged).
+ * from the client's messages, present on system blocks, or on tools entries —
+ * the 4-breakpoint budget counts all three) suppresses our stamps entirely
+ * (pass no marks / return the system unchanged).
  * BILI_NO_CACHE_CONTROL=1 disables everything.
  */
 
@@ -58,6 +59,14 @@ export function computeAnthropicMessageMarks(
     session.metadata["anthropicCacheMarkIds"] = kept;
     for (const id of kept) marks.set(id, { type: "ephemeral" });
     return marks;
+}
+
+/** WC-010: Anthropic's 4-breakpoint budget spans system blocks + tools entries
+ *  + message blocks COMBINED; anthropicToCore only harvests messages, so a
+ *  tools-only client mark must suppress ours too or the 5th breakpoint 400s. */
+export function anthropicToolsCarryCacheControl(tools: unknown): boolean {
+    if (!Array.isArray(tools)) return false;
+    return tools.some((t) => typeof t === "object" && t !== null && (t as { cache_control?: unknown }).cache_control !== undefined);
 }
 
 export function stampAnthropicSystemCacheControl(systemOut: AnthropicRequestBody["system"], ours = true): AnthropicRequestBody["system"] {

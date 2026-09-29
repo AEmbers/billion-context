@@ -101,12 +101,12 @@ interface Msg {
     content: string | { type: "text"; text: string; cache_control?: unknown }[];
 }
 
-async function postModel(rig: Rig, sessionId: string, messages: Msg[], extraHeaders: Record<string, string> = {}, upstreamPortHint?: number): Promise<Response> {
+async function postModel(rig: Rig, sessionId: string, messages: Msg[], extraHeaders: Record<string, string> = {}, upstreamPortHint?: number, tools?: unknown[]): Promise<Response> {
     const port = upstreamPortHint ?? rig.portHint();
     return fetch(`http://127.0.0.1:${rig.proxyPort}/bili/http://127.0.0.1:${port}/v1/messages`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-session-affinity": sessionId, ...extraHeaders },
-        body: JSON.stringify({ model: "l1637-model", max_tokens: 8192, stream: true, messages }),
+        body: JSON.stringify({ model: "l1637-model", max_tokens: 8192, stream: true, messages, ...(tools ? { tools } : {}) }),
     });
 }
 
@@ -120,6 +120,7 @@ async function waitFor(pred: () => boolean, what: string): Promise<void> {
 
 interface AnthropicBody {
     system?: { type: string; text?: string; cache_control?: unknown }[];
+    tools?: { name?: string; cache_control?: unknown }[];
     messages: { role: string; content: string | { type: string; text?: string; cache_control?: unknown }[] }[];
 }
 
@@ -228,5 +229,65 @@ test("#1637: BILI_NO_CACHE_CONTROL=1 disables all stamping", async () => {
         await rig.closeAll();
         if (prev === undefined) delete process.env.BILI_NO_CACHE_CONTROL;
         else process.env.BILI_NO_CACHE_CONTROL = prev;
+    }
+});
+
+test("#1639: client cache_control on TOOLS only also suppresses bili's stamps (WC-010 combined budget)", async () => {
+    const rig = await startRig();
+    try {
+        const history: Msg[] = [
+            { role: "user", content: "hello one" },
+            { role: "assistant", content: "ack one" },
+            { role: "user", content: "hello two" },
+        ];
+        const tools = [{ name: "client_tool", description: "d", input_schema: { type: "object", properties: {} }, cache_control: { type: "ephemeral" } }];
+        await postModel(rig, "sess-1639-e", history, {}, undefined, tools);
+        await waitFor(() => rig.upstreamBodies.length >= 1, "forward");
+
+        const b1 = parseBody(rig.upstreamBodies[0]);
+        const marks = markedCount(rig.upstreamBodies[0]);
+        assert.equal(marks.messages.length, 0, "bili added no message breakpoints");
+        assert.equal(marks.system, 0, "bili did not breakpoint the system");
+        const toolMarks = (b1.tools ?? []).filter((t) => t.cache_control).length;
+        assert.equal(toolMarks, 1, "client's tools breakpoint preserved verbatim");
+    } finally {
+        await rig.closeAll();
+    }
+});
+
+test("#1637: cap 3 — marks stop advancing once the budget is full and existing marks are never dropped or added", async () => {
+    const rig = await startRig();
+    const markedTexts = (body: string): string[] => {
+        const out: string[] = [];
+        for (const m of parseBody(body).messages) {
+            if (Array.isArray(m.content) && m.content.some((b) => b.cache_control)) {
+                // identify by trailing payload only: hydrated sessions prefix
+                // kernel render tags (<acp ...>mNNNNN</acp>) and the
+                // request-scoped chain checkpoint (#1395) rides the last block
+                out.push(m.content.map((b) => b.text ?? "").join("")
+                    .split("\x3c/acp\x3e").pop()!
+                    .replace(/\x3cbili-chain v="1"[^]*\/\x3e/, "")
+                    .trim());
+            }
+        }
+        return out;
+    };
+    try {
+        const sid = `sess-1639-f-${process.pid}`;
+        let history: Msg[] = [];
+        for (let turn = 1; turn <= 5; turn++) {
+            history = turn === 1
+                ? [{ role: "user", content: "u1" }]
+                : [...history, { role: "assistant", content: `a${turn - 1}` }, { role: "user", content: `u${turn}` }];
+            await postModel(rig, sid, history);
+            await waitFor(() => rig.upstreamBodies.length >= turn, `turn ${turn} forward`);
+            assert.ok(markedTexts(rig.upstreamBodies[turn - 1]).length <= 3, `turn ${turn}: never more than 3 message marks`);
+        }
+        assert.deepEqual(markedTexts(rig.upstreamBodies[2]), ["u1", "u2", "u3"], "turn 3 fills the budget");
+        assert.deepEqual(markedTexts(rig.upstreamBodies[3]), ["u1", "u2", "u3"], "turn 4: frozen, no advance past cap");
+        assert.deepEqual(markedTexts(rig.upstreamBodies[4]), ["u1", "u2", "u3"], "turn 5: still frozen — existing marks never dropped");
+        assert.equal(markedCount(rig.upstreamBodies[4]).system, 1, "system breakpoint persists throughout");
+    } finally {
+        await rig.closeAll();
     }
 });
