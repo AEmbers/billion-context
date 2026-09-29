@@ -263,21 +263,89 @@ test("bootstrap honors upstream env relocation: ZCODE_DATA_BASE_DIR is a base di
     }
 });
 
+// #1621: the v3.14+ personal store generation ships ClientRequestSigningV4,
+// which rejects the http loopback /bili/ origin at model creation — native
+// routing must degrade to off on these builds instead of producing the
+// "MCP connected but every coding-plan model fails" intermediate state.
+
+function newStoreDir(): { dir: string; file: string; original: string } {
+    const dir = mkdtempSync(path.join(tmpdir(), "zcode-native-new-"));
+    mkdirSync(path.join(dir, "v2"), { recursive: true });
+    const file = zcodeStoreCandidates(dir, "new", {})[0];
+    const original =
+        JSON.stringify({
+            schemaVersion: 1,
+            config: {
+                providerConfigRules: {
+                    providerRules: [{ providerId: "account:bigmodel-individual-coding-plan", config: { api: { baseUrl: UPSTREAM } } }],
+                },
+            },
+        }) + "\n";
+    writeFileSync(file, original);
+    return { dir, file, original };
+}
+
+test("routeZcodeConfig refuses to wrap the v3.14+ store (#1621 client signing)", async () => {
+    const { dir, file, original } = newStoreDir();
+    try {
+        const logs: string[] = [];
+        assert.equal(await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, env: {}, log: (m) => logs.push(m) }), undefined);
+        assert.match(logs[0], /client signing/);
+        assert.match(logs[0], /cert-MITM/);
+        assert.equal(readFileSync(file, "utf8"), original);
+        assert.equal(existsSync(`${file}.bili-bak`), false);
+        assert.equal(existsSync(`${file}.bili-last`), false);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("bootstrapZcodeNative degrades to off on the v3.14+ store without proxy bring-up (#1621)", async () => {
+    const { dir, file } = newStoreDir();
+    writeFileSync(file, readFileSync(file, "utf8").replace(UPSTREAM, `http://127.0.0.1:9999/bili/${UPSTREAM}`));
+    try {
+        let proxyTouched = false;
+        const logs: string[] = [];
+        const out = await bootstrapZcodeNative({
+            env: {},
+            dataDir: dir,
+            log: (m) => logs.push(m),
+            ensureProxy: async () => {
+                proxyTouched = true;
+                return { origin: "http://127.0.0.1:1", attached: false };
+            },
+        });
+        assert.deepEqual(out, { mode: "off" });
+        assert.equal(proxyTouched, false);
+        assert.match(logs[0], /client signing/);
+        // mcp-entry's off path runs unrouteZcode — a wrapper left by a
+        // pre-#1621 bili version must be stripped, not stranded.
+        unrouteZcode({ dataDir: dir, env: {}, log: () => {} });
+        assert.doesNotMatch(readFileSync(file, "utf8"), /\/bili\//);
+        const unwrapped = JSON.parse(readFileSync(file, "utf8")) as { config: { providerConfigRules: { providerRules: Array<{ config: { api: { baseUrl: string } } }> } } };
+        assert.equal(unwrapped.config.providerConfigRules.providerRules[0].config.api.baseUrl, UPSTREAM);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test("bootstrap honors ZCODE_PERSONAL_PROVIDER_CONFIG_FILE overrides (#1151)", async () => {
     const dir = dataDir();
     const alt = mkdtempSync(path.join(tmpdir(), "zcode-native-alt-"));
     try {
         const file = path.join(alt, "p.json");
-        writeFileSync(
-            file,
-            JSON.stringify({ schemaVersion: 1, config: { providerConfigRules: { providerRules: [{ providerId: "account:bigmodel-individual-coding-plan", api: { baseUrl: UPSTREAM } }] } } }) + "\n",
-        );
+        const original =
+            JSON.stringify({ schemaVersion: 1, config: { providerConfigRules: { providerRules: [{ providerId: "account:bigmodel-individual-coding-plan", config: { api: { baseUrl: UPSTREAM } } }] } } }) + "\n";
+        writeFileSync(file, original);
         const env = { ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: file };
-        const applied = await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, env, log: () => {} });
-        assert.ok(applied);
-        assert.equal(applied.kind, "new");
-        assert.equal(applied.file, file);
-        assert.match(readFileSync(file, "utf8"), /http:\/\/127\.0\.0\.1:18787\/bili\//);
+        // #1621: the override points at a v3.14+ personal store, so the
+        // signing gate refuses before any rewrite — honoring the override is
+        // proven by the refusal naming the signing conflict instead of
+        // routing the legacy store at dataDir.
+        const logs: string[] = [];
+        assert.equal(await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, env, log: (m) => logs.push(m) }), undefined);
+        assert.match(logs[0], /client signing/);
+        assert.equal(readFileSync(file, "utf8"), original);
         assert.doesNotMatch(readFileSync(zcodeStoreCandidates(dir, "legacy", {})[0], "utf8"), /\/bili\//);
     } finally {
         rmSync(dir, { recursive: true, force: true });

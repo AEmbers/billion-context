@@ -81,6 +81,17 @@ export function detectZcodeStore(dataDir: string, env: NodeJS.ProcessEnv = proce
     return { kind: "legacy", file: zcodeStoreCandidates(dataDir, "legacy", env)[0] };
 }
 
+/** #1621: the v3.14+ personal-store generation ships ClientRequestSigningV4
+ *  for coding-plan accounts. Its handshake builder rejects non-https origins
+ *  (allowInsecureHttp is never passed anywhere in zcode) and derives the
+ *  handshake path from origin alone, dropping any /bili/ prefix — so a
+ *  /bili/-wrapped baseUrl fails at model creation ("Client signing handshake
+ *  requires HTTPS."). Native routing must be skipped on these builds, not
+ *  applied. Return false here once zcode ships the signing fix. */
+export function zcodeSigningBlocksRouting(kind: ZcodeStoreKind): boolean {
+    return kind === "new";
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
     return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }

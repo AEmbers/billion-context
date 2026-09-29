@@ -18,10 +18,14 @@ import {
     resolveZcodeDataDir,
     stampZcodePluginHeader,
     unrouteZcodeText,
+    zcodeSigningBlocksRouting,
     zcodeStoreCandidates,
     ZcodeStoreKind,
     ZcodeWrappedEntry,
 } from "./json-edit.js";
+
+const SIGNING_BLOCK_MESSAGE =
+    'zcode v3.14+ client signing (#1621) rejects the http://127.0.0.1 /bili/ origin at model creation ("Client signing handshake requires HTTPS.") — skipping native routing; provider store left untouched. For compression on this build use the GUI cert-MITM setup (Settings → Network: HTTP proxy + root CA path).';
 
 export type ZcodeNativePlan =
     | { readonly mode: "off" }
@@ -177,6 +181,10 @@ export async function routeZcodeConfig(opts: RouteZcodeOptions): Promise<ZcodeRo
         return undefined;
     }
     const { kind, file } = detectZcodeStore(dataDir, env);
+    if (zcodeSigningBlocksRouting(kind)) {
+        log(SIGNING_BLOCK_MESSAGE);
+        return undefined;
+    }
     let text: string;
     try {
         text = fs.readFileSync(file, "utf8");
@@ -311,6 +319,14 @@ export async function bootstrapZcodeNative(opts: BootstrapZcodeOptions = {}): Pr
     const plan = planNativeZcode(env);
     if (plan.mode === "off") return { mode: "off" };
 
+    // #1621: degrade BEFORE any proxy bring-up; the caller's off-path runs
+    // unrouteZcode, which also strips wrappers left by older bili versions.
+    const dataDir = opts.dataDir ?? resolveZcodeDataDir(env);
+    if (zcodeSigningBlocksRouting(detectZcodeStore(dataDir, env).kind)) {
+        log(SIGNING_BLOCK_MESSAGE);
+        return { mode: "off" };
+    }
+
     let origin: string;
     let attached: boolean;
     if (plan.mode === "attach") {
@@ -326,7 +342,7 @@ export async function bootstrapZcodeNative(opts: BootstrapZcodeOptions = {}): Pr
         attached = !!handle.attached;
     }
 
-    const routed = await routeZcodeConfig({ origin, env, dataDir: opts.dataDir, log });
+    const routed = await routeZcodeConfig({ origin, env, dataDir, log });
     if (routed) log(`routed ${routed.wrapped.map((w) => w.id).join(", ")} via ${origin} → ${routed.upstream}`);
     return { mode: "active", attached, routed };
 }
