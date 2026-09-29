@@ -1336,7 +1336,13 @@ async function handle(
             });
             if (!verdict.ok) {
                 log("warn", `[tunnel] denied ${maskUrlsInText(route.upstream)}: ${verdict.message}`);
-                res.writeHead(403, { "content-type": "application/json" });
+                // #1686: a resolution failure is transport-class (the resolver was
+                // momentarily unreachable; the name itself may be perfectly valid),
+                // not a permission decision — 403 tells clients "never will succeed"
+                // and kills their retry logic mid-outage. Policy denials stay 403;
+                // a malformed embedded URL is a client error (400).
+                const status = verdict.code === "unresolvable" ? 502 : verdict.code === "invalid" ? 400 : 403;
+                res.writeHead(status, { "content-type": "application/json" });
                 res.end(JSON.stringify({ error: verdict.message, code: "tunnel_destination_denied", detail: verdict.code }));
                 return;
             }
