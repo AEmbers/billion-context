@@ -203,9 +203,10 @@ two small node scripts that do the work around the client:
   legacy `~/.zcode/v2/config.json` (`provider.<id>.options.baseURL`) and the
   v3.14+ personal store `~/.zcode/v2/provider_config.json`
   (`config.providerConfigRules.providerRules[].config.api.baseUrl`) — when
-  both exist, the new store wins. The original file is snapshotted to
-  `<file>.bili-bak` once per user edit (the snapshot always reflects your last
-  real state, never bili's own writes); every other key is preserved
+  both exist, the new store wins (on those v3.14+ builds native routing
+  degrades to off instead — see Known limitations). The original file is
+  snapshotted to `<file>.bili-bak` once per user edit (the snapshot always
+  reflects your last real state, never bili's own writes); every other key is
   byte-for-byte. Legacy-generation clients load provider config at startup —
   restart ZCode once after installing; newer builds pick up routing changes
   mid-session (~1 s polling). The `SessionStart` hook runs the same bootstrap
@@ -228,7 +229,15 @@ two small node scripts that do the work around the client:
   MITM-rebuilt bodies on `zcode.z.ai` login traffic — native mode does not
   touch that surface (model traffic flows through the provider store, not the
   GUI proxy); if you also run the GUI-proxy/MITM setup, keep the
-  `"mitm://zcode.z.ai": { "passthrough": true }` route. Inert when
+  `"mitm://zcode.z.ai": { "passthrough": true }` route. On v3.14+ builds,
+  ClientRequestSigningV4 for coding-plan accounts rejects non-HTTPS origins at
+  model creation and derives its handshake path from origin alone (dropping
+  any /bili/ prefix), so a /bili/-wrapped baseURL fails with "Client signing
+  handshake requires HTTPS." (#1621). The conflict is hardcoded on the ZCode
+  side, so native mode detects the v3.14+ store generation and skips the
+  rewrite entirely — it logs the reason and leaves traffic direct; use the GUI
+  cert-MITM setup for compression on these builds until ZCode ships a signing
+  fix. Pre-3.14 legacy-store clients are unaffected. Inert when
   `BILLION_CONTEXT_PROXY` is set (attach mode owns the proxy) or
   `BILI_PROVIDER_REWRITES` is defined. Opt-out: `BILI_NATIVE_ZCODE=0`.
 
