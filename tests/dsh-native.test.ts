@@ -419,7 +419,10 @@ async function waitFor(cond: () => boolean, what: string): Promise<void> {
 
 function mockCtx() {
     const tools: RegisteredTool[] = [];
-    const commands: Array<{ name: string; handler: () => Promise<{ kind: string; text: string }> }> = [];
+    // #1677: handlers may receive the host-passed invocation (carrying the invoking
+    // agent's session id); tests call them with or without it to cover both paths.
+    type CmdInvocation = { agent?: { session?: { id?: unknown } } };
+    const commands: Array<{ name: string; handler: (invocation?: CmdInvocation) => Promise<{ kind: string; text: string }> }> = [];
     let initiator: { session?: { id?: unknown } } | undefined = undefined;
     // #955 runtime-info sources: tests can attach llm/agentDefaultModel and
     // replay them through the same dynamic ctx.inject path production uses.
@@ -427,7 +430,7 @@ function mockCtx() {
     let agentDefaultModel: { currentSelection?: () => { provider?: string; model?: string } | undefined } | undefined = undefined;
     return {
         tools: { register: (t: RegisteredTool) => tools.push(t) },
-        commands: { register: (c: { name: string; handler: () => Promise<{ kind: string; text: string }> }) => commands.push(c) },
+        commands: { register: (c: { name: string; handler: (invocation?: { agent?: { session?: { id?: unknown } } }) => Promise<{ kind: string; text: string }> }) => commands.push(c) },
         agents: { currentInitiator: () => initiator },
         setInitiator: (i: { session?: { id?: unknown } } | undefined) => (initiator = i),
         registeredTools: tools,
@@ -539,6 +542,134 @@ test("apply() /acp-cache (#1146): forwards acp_cache bound to the initiator sess
         });
     } finally {
         rmrf(home);
+        _resetRegisterForTest(undefined);
+    }
+});
+
+// #1677: the command executor hands the invoking agent to the handler via the
+// invocation; the command path carries NO AsyncLocalStorage attribution, so the
+// old code always fell back to fetchStatusLatest and showed ANOTHER session's panel.
+test("apply() /acp (#1677): resolves the invoking agent's session id from the host-passed invocation, not latest", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-1677-acp-"));
+    const statusUrls: string[] = [];
+    try {
+        await withEnv({ DSH_HOME: home, BILLION_CONTEXT_PROXY: undefined }, async () => {
+            const cap = await startMockProxy([], (url) => {
+                statusUrls.push(url);
+                if (url.includes("conversationId=session-inv")) return { ok: true, conversationId: "session-inv", panel: "PANEL-SPECIFIC" };
+                if (url.includes("fallback=latest")) return { ok: true, conversationId: "conv-latest", panel: "PANEL-LATEST" };
+                return undefined;
+            });
+            try {
+                _resetRegisterForTest(cap.origin);
+                process.env.BILLION_CONTEXT_PROXY = cap.origin;
+                const ctx = mockCtx();
+                apply(ctx);
+                const acpCmd = ctx.registeredCommands.find((c) => c.name === "acp");
+                assert.ok(acpCmd, "acp registered");
+
+                // NO initiator set — only the invocation carries the session id
+                const out = await acpCmd.handler({ agent: { session: { id: "session-inv" } } });
+                assert.equal(out.kind, "success");
+                assert.ok(out.text.includes("PANEL-SPECIFIC"), `expected the invoking session's panel, got: ${out.text}`);
+                assert.ok(!out.text.includes("PANEL-LATEST"), "must not fall back to the latest session");
+                assert.ok(!out.text.includes("not known to the proxy"), "a resolvable session must not be annotated");
+                assert.ok(statusUrls.some((u) => u.includes("conversationId=session-inv")), "status was queried for the invoking session");
+                assert.ok(!statusUrls.some((u) => u.includes("fallback=latest")), "no latest-fallback query for a resolvable session");
+            } finally {
+                cap.close();
+                _resetRegisterForTest(undefined);
+            }
+        });
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+        _resetRegisterForTest(undefined);
+    }
+});
+
+test("apply() /acp-cache (#1677): binds acp_cache to the invoking agent's session id from the invocation", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-1677-cache-"));
+    try {
+        await withEnv({ DSH_HOME: home, BILLION_CONTEXT_PROXY: undefined }, async () => {
+            const calls: Array<{ conversationId: string; tool: string; args: unknown }> = [];
+            const cap = await startMockProxy(calls, (url) =>
+                url.includes("fallback=latest") ? { ok: true, conversationId: "conv-latest", panel: "PANEL-OK" } : undefined);
+            try {
+                _resetRegisterForTest(cap.origin);
+                process.env.BILLION_CONTEXT_PROXY = cap.origin;
+                const ctx = mockCtx();
+                apply(ctx);
+                const cacheCmd = ctx.registeredCommands.find((c) => c.name === "acp-cache");
+                assert.ok(cacheCmd, "acp-cache registered");
+
+                // NO initiator set — only the invocation carries the session id
+                const out = await cacheCmd.handler({ agent: { session: { id: "session-inv" } } });
+                assert.equal(out.kind, "success");
+                assert.deepEqual(calls, [{ conversationId: "session-inv", tool: "acp_cache", args: {} }]);
+                assert.ok(!out.text.includes("not known to the proxy"), "a resolvable session must not be annotated");
+            } finally {
+                cap.close();
+                _resetRegisterForTest(undefined);
+            }
+        });
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+        _resetRegisterForTest(undefined);
+    }
+});
+
+test("apply() /acp (#1677): invocation wins over ALS attribution; unresolvable sessions are annotated, never silent", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-1677-prio-"));
+    const statusUrls: string[] = [];
+    try {
+        await withEnv({ DSH_HOME: home, BILLION_CONTEXT_PROXY: undefined }, async () => {
+            const cap = await startMockProxy([], (url) => {
+                statusUrls.push(url);
+                if (url.includes("conversationId=session-inv")) return { ok: true, conversationId: "session-inv", panel: "PANEL-INVOKE" };
+                if (url.includes("conversationId=session-init")) return { ok: true, conversationId: "session-init", panel: "PANEL-INIT" };
+                if (url.includes("fallback=latest")) return { ok: true, conversationId: "conv-latest", panel: "PANEL-LATEST" };
+                return undefined;
+            });
+            try {
+                _resetRegisterForTest(cap.origin);
+                process.env.BILLION_CONTEXT_PROXY = cap.origin;
+                const ctx = mockCtx();
+                apply(ctx);
+                const acpCmd = ctx.registeredCommands.find((c) => c.name === "acp");
+                assert.ok(acpCmd, "acp registered");
+
+                // (a) both present → the invocation's session wins over ALS attribution
+                ctx.setInitiator({ session: { id: "session-init" } });
+                statusUrls.length = 0;
+                const win = await acpCmd.handler({ agent: { session: { id: "session-inv" } } });
+                assert.equal(win.kind, "success");
+                assert.ok(win.text.includes("PANEL-INVOKE"), "invocation session must take priority over ALS attribution");
+                assert.ok(statusUrls.some((u) => u.includes("conversationId=session-inv")));
+                assert.ok(!statusUrls.some((u) => u.includes("conversationId=session-init")), "ALS session must not be queried when an invocation is present");
+
+                // (b) requested session unknown to the proxy → falls back to latest AND names both sessions
+                ctx.setInitiator(undefined);
+                statusUrls.length = 0;
+                const ghost = await acpCmd.handler({ agent: { session: { id: "session-ghost" } } });
+                assert.equal(ghost.kind, "success");
+                assert.ok(ghost.text.includes("PANEL-LATEST"), "unknown session falls back to the latest-active panel");
+                assert.ok(ghost.text.includes("session-ghost") && ghost.text.includes("conv-latest"), "the fallback note names the requested and the shown session");
+                assert.ok(ghost.text.includes("not known to the proxy"), "unknown-session fallback is explicitly flagged");
+                assert.ok(statusUrls.some((u) => u.includes("fallback=latest")), "unknown session triggers the latest-fallback query");
+
+                // (c) no session at all (no invocation, no ALS) → latest fallback, flagged as unidentified
+                statusUrls.length = 0;
+                const none = await acpCmd.handler();
+                assert.equal(none.kind, "success");
+                assert.ok(none.text.includes("PANEL-LATEST"));
+                assert.ok(none.text.includes("could not identify the current session"), "no-session fallback is explicitly flagged");
+            } finally {
+                cap.close();
+                _resetRegisterForTest(undefined);
+            }
+        });
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
         _resetRegisterForTest(undefined);
     }
 });
