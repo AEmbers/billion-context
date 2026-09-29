@@ -178,6 +178,38 @@ test("applyZcodeRouting new creates the canonical bigmodel rules when empty — 
     );
 });
 
+test("applyZcodeRouting default route all wraps every usable entry and reports skips (#1622)", () => {
+    const doc = {
+        provider: {
+            "builtin:bigmodel-coding-plan": { options: { baseURL: UPSTREAM } },
+            "custom:mine": { options: { baseURL: "https://example.com/v1" } },
+            "local:relay": { options: { baseURL: "http://127.0.0.1:9090/v1" } },
+            "no:url": {},
+        },
+    };
+    const out = applyZcodeRouting(JSON.stringify(doc), "legacy", ORIGIN_A);
+    assert.deepEqual(out.wrapped.map((w) => w.id), ["builtin:bigmodel-coding-plan", "custom:mine"]);
+    assert.deepEqual(out.skipped.map((s) => s.id), ["local:relay", "no:url"]);
+    assert.ok(out.skipped.every((s) => s.reason.length > 0));
+});
+
+test("applyZcodeRouting default route all skips v3.14+ signing accounts per entry (#1621)", () => {
+    const doc = {
+        schemaVersion: 1,
+        config: {
+            providerConfigRules: {
+                providerRules: [
+                    { providerId: "account:bigmodel-individual-coding-plan", config: { api: { baseUrl: UPSTREAM } } },
+                    { providerId: "custom:x", config: { api: { baseUrl: "https://example.com" } } },
+                ],
+            },
+        },
+    };
+    const out = applyZcodeRouting(JSON.stringify(doc), "new", ORIGIN_A);
+    assert.deepEqual(out.wrapped.map((w) => w.id), ["custom:x"]);
+    assert.deepEqual(out.skipped.map((s) => s.id), ["account:bigmodel-individual-coding-plan"]);
+});
+
 test("applyZcodeRouting refuses malformed or wrong-shaped input loudly", () => {
     assert.throws(() => applyZcodeRouting("{oops", "legacy", ORIGIN_A), /not valid JSON/);
     assert.throws(() => applyZcodeRouting("[]", "legacy", ORIGIN_A), /must be a JSON object/);
