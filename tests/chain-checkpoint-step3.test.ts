@@ -340,9 +340,13 @@ test("#1421 E3: stale-unmatched → stripped, processed normally, re-stamped on 
         assert.equal(resp.status, 200);
         await resp.text();
         const chainLogs = logs.filter((l) => l.msg.includes("[chain]"));
-        assert.equal(chainLogs.length, 1, JSON.stringify(chainLogs));
-        assert.ok(chainLogs[0]!.msg.includes("verdict=stale"), chainLogs[0]!.msg);
-        assert.ok(chainLogs[0]!.msg.includes("processing normally"));
+        const verdictLog = chainLogs.find((l) => l.msg.includes("verdict=stale"));
+        assert.ok(verdictLog, JSON.stringify(chainLogs));
+        assert.ok(verdictLog!.msg.includes("processing normally"), verdictLog!.msg);
+        const stampLog = chainLogs.find((l) => l.msg.includes("kind=chain-stamp"));
+        assert.ok(stampLog, `expected egress stamp audit line, got ${JSON.stringify(chainLogs)}`);
+        assert.equal(stampLog!.level, "debug");
+        assert.equal(chainLogs.length, 2, JSON.stringify(chainLogs));
         assert.equal(captured.length, 1);
         assert.ok(captured[0]!.body.includes('"compress"'), "processed normally");
         const outParsed = JSON.parse(captured[0]!.body);
@@ -363,7 +367,10 @@ test("#1421 E4: plain request → processed AND outbound carries a self-verifyin
         });
         assert.equal(resp.status, 200);
         await resp.text();
-        assert.equal(logs.filter((l) => l.msg.includes("[chain]")).length, 0, "no inbound checkpoint, no [chain] log");
+        const chainLogs = logs.filter((l) => l.msg.includes("[chain]"));
+        assert.equal(chainLogs.length, 1, `expected only the egress stamp audit line, got ${JSON.stringify(chainLogs)}`);
+        assert.equal(chainLogs[0]!.level, "debug");
+        assert.ok(chainLogs[0]!.msg.includes("kind=chain-stamp"), chainLogs[0]!.msg);
         assert.equal(captured.length, 1);
         assert.ok(captured[0]!.body.includes('"compress"'));
         assert.ok(captured[0]!.body.includes(L + "bili-chain "), "outbound stamped");

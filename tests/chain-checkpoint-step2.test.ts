@@ -405,7 +405,10 @@ test("#1395 step 2 / #1421 step 3 T3: plain request → no [chain] log; processe
         });
         assert.equal(resp.status, 200);
         await resp.text();
-        assert.equal(logs.filter((l) => l.msg.includes("[chain]")).length, 0, "no inbound checkpoint signal, no [chain] log");
+        const chainLogs = logs.filter((l) => l.msg.includes("[chain]"));
+        assert.equal(chainLogs.length, 1, `expected only the egress stamp audit line, got ${JSON.stringify(chainLogs)}`);
+        assert.equal(chainLogs[0]!.level, "debug");
+        assert.ok(chainLogs[0]!.msg.includes("kind=chain-stamp"), chainLogs[0]!.msg);
         assert.equal(captured.length, 1);
         assert.ok(captured[0]!.body.includes('"compress"'));
         assert.ok(captured[0]!.body.includes(L + "bili-chain "), "#1421: every processed outbound leaves its own self-verifying stamp");
