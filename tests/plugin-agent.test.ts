@@ -1520,12 +1520,16 @@ test("plugin install/remove roundtrips for pi/omp/codex/opencode under a fake HO
         assert.match(pluginInstall("codex"), /installed/);
         const toml = fs.readFileSync(path.join(home, "config.toml"), "utf8");
         assert.match(toml, /\[mcp_servers\.bili\]\ncommand = /);
-        assert.match(toml, /BILI_MCP_PROXY = "http:\/\/127\.0\.0\.1:8787"/);
+        // #1660: no baked origin — the MCP shell discovers the live proxy at
+        // startup (env > instance file > 8787), so the block cannot go stale.
+        assert.doesNotMatch(toml, /BILI_MCP_PROXY/);
         fs.writeFileSync(path.join(home, "config.toml"), toml + "\n[mcp_servers.other]\ncommand = \"x\"\n");
         assert.match(pluginInstall("codex"), /already installed/);
-        fs.writeFileSync(path.join(home, "config.toml"), fs.readFileSync(path.join(home, "config.toml"), "utf8").replace("8787", "9999"));
+        // a user-tampered command (their own node path) is not canonical →
+        // refreshed back to the current canonical block
+        fs.writeFileSync(path.join(home, "config.toml"), fs.readFileSync(path.join(home, "config.toml"), "utf8").replace(JSON.stringify(process.execPath), JSON.stringify("/tampered/node")));
         assert.match(pluginInstall("codex"), /refreshed/);
-        assert.match(fs.readFileSync(path.join(home, "config.toml"), "utf8"), /BILI_MCP_PROXY = "http:\/\/127\.0\.0\.1:8787"/);
+        assert.doesNotMatch(fs.readFileSync(path.join(home, "config.toml"), "utf8"), /tampered/);
         assert.match(pluginRemove("codex"), /removed/);
         const tomlAfter = fs.readFileSync(path.join(home, "config.toml"), "utf8");
         assert.doesNotMatch(tomlAfter, /mcp_servers\.bili/);
@@ -1542,8 +1546,8 @@ test("plugin install/remove roundtrips for pi/omp/codex/opencode under a fake HO
         assert.match(tomlEdge, /\[mcp_servers\.other\]\ncommand = "x"\n/);
 
         // #638: a malformed block (args as string - legal TOML, invalid codex
-        // schema) with a matching origin must NOT short-circuit to "already
-        // installed"; reinstall must self-heal it to the canonical block.
+        // schema). Legacy blocks carried a baked env origin — the heal must
+        // drop it, not preserve it (#1660).
         const selfRoot = path.dirname(path.dirname(path.resolve("src/plugin-install.ts")));
         const malformed = `[mcp_servers.other]\ncommand = "x"\n[mcp_servers.bili]\ncommand = "node"\nargs = '[\"${path.join(selfRoot, "dist", "mcp.js")}\"]'\nenv = { BILI_MCP_PROXY = "http://127.0.0.1:8787" }\n`;
         fs.writeFileSync(path.join(home, "config.toml"), malformed);
@@ -1552,6 +1556,7 @@ test("plugin install/remove roundtrips for pi/omp/codex/opencode under a fake HO
         const tomlHealed = fs.readFileSync(path.join(home, "config.toml"), "utf8");
         assert.match(tomlHealed, /args = \[/);
         assert.doesNotMatch(tomlHealed, /args = '\[/);
+        assert.doesNotMatch(tomlHealed, /BILI_MCP_PROXY/, "legacy baked origin dropped on heal (#1660)");
         assert.match(tomlHealed, /\[mcp_servers\.other\]\ncommand = "x"\n/);
         // A now-canonical block stays "already installed" on rerun.
         assert.match(pluginInstall("codex"), /already installed/);

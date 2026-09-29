@@ -474,12 +474,12 @@ test('bootstrapZcodeNative respects zcode route:"none" without proxy bring-up (#
     }
 });
 
-test("resolveZcodeNativePort and zcodeDirectPrefixes map env into the lane (#1622)", async () => {
-    const { resolveZcodeNativePort, ZCODE_NATIVE_DEFAULT_PORT, zcodeDirectPrefixes } = await import("../src/config.ts");
+test("resolveZcodeNativePort: env-only explicit override, undefined without one (#1622/#1660)", async () => {
+    const { resolveZcodeNativePort, zcodeDirectPrefixes } = await import("../src/config.ts");
     assert.equal(resolveZcodeNativePort({ BILI_ZCODE_PORT: "41234" }), 41234);
-    assert.equal(resolveZcodeNativePort({ BILI_ZCODE_PORT: "not-a-port" }), ZCODE_NATIVE_DEFAULT_PORT);
-    assert.equal(resolveZcodeNativePort({ BILI_ZCODE_PORT: "70000" }), ZCODE_NATIVE_DEFAULT_PORT);
-    assert.equal(resolveZcodeNativePort({}), ZCODE_NATIVE_DEFAULT_PORT);
+    assert.equal(resolveZcodeNativePort({ BILI_ZCODE_PORT: "not-a-port" }), undefined);
+    assert.equal(resolveZcodeNativePort({ BILI_ZCODE_PORT: "70000" }), undefined);
+    assert.equal(resolveZcodeNativePort({}), undefined, "#1660: no default — the zcode lane rides the zone preference");
     const dir = mkdtempSync(path.join(tmpdir(), "zcode-native-config-"));
     const cfg = path.join(dir, "providers.json");
     writeFileSync(cfg, JSON.stringify({

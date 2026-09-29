@@ -60,11 +60,21 @@ test("parseZcodeConfig: defensive — non-object / missing provider / non-string
 function withHome(home: string, fn: () => void): void {
     const saved = process.env.HOME;
     process.env.HOME = home;
+    // Windows os.homedir() resolves through USERPROFILE, not HOME — mirror the
+    // sandbox there or a real machine's ~/.zcode store leaks into readZcodeConfig
+    // (zcodeDataRoot falls back to os.homedir()/".zcode").
+    const savedProfile = process.env.USERPROFILE;
+    const mirrorProfile = process.platform === "win32";
+    if (mirrorProfile) process.env.USERPROFILE = home;
     try {
         fn();
     } finally {
         if (saved === undefined) delete process.env.HOME;
         else process.env.HOME = saved;
+        if (mirrorProfile) {
+            if (savedProfile === undefined) delete process.env.USERPROFILE;
+            else process.env.USERPROFILE = savedProfile;
+        }
     }
 }
 

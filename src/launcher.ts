@@ -42,9 +42,11 @@ import {
     entryScriptFingerprint,
     isPidAlive,
     isProxyInstanceFile,
+    lanePreferredPort,
     readProxyInstanceFile,
     readStartingMarker,
     removeStartingMarker,
+    writeZonePort,
     type ProxyInstanceFile,
     type ProxyStartingMarker,
 } from "./instance.js";
@@ -252,6 +254,13 @@ export interface LauncherDeps {
      *  construction — tests drive win32 paths from a POSIX host. Defaults
      *  to process.platform. */
     platform?: NodeJS.Platform;
+    /** #1660: zone-port seam for tests. The preferred port a lane'd launch
+     *  tries before the proxy child's +1 ladder (default: the lane's sticky
+     *  record > zone base, instance.ts), and the sticky-settle write
+     *  (default: stateDir()/port-zone.json). Tests inject pure sinks so a
+     *  lane'd fake launch never touches the developer's real zone record. */
+    zonePreferredPort?: (lane: string) => number;
+    writeZonePort?: (lane: string, port: number) => void;
 }
 
 export function isLaunchClient(value: string): value is ClientName {
@@ -2538,6 +2547,16 @@ export function attachGateAllows(health: HealthInfo, attachExternal: boolean): b
     return health.watchdog?.armed === true;
 }
 
+/** #1660: the user-sovereignty zone marker — neither a declared lane nor a
+ *  launcher launch token exists only for a manually started `bili start`
+ *  daemon. By definition the user maintains it (they typed the command; it
+ *  has no session lifecycle BY DESIGN, not by drift), so lanes may attach to
+ *  it despite the unarmed watchdog — code-fingerprint and config-shape
+ *  compatibility still apply, and an older build stays incompatible. */
+function isUserZoneInstance(inst: ProxyInstanceFile): boolean {
+    return inst.lane === undefined && inst.launchToken === undefined;
+}
+
 function gateRefusalMessage(inst: ProxyInstanceFile, health: HealthInfo): string {
     const reason = health.watchdog && health.watchdog.armed === false
         ? "it reports NO session-lifecycle watchdog (started without BILI_PARENT_PID, e.g. manual `bili start`)"
@@ -2567,7 +2586,9 @@ function pickAttachable(
         if (opts.strictPort && c.inst.port !== opts.port) { diag?.(`native-attach: skip ${c.inst.origin} (pid ${c.inst.pid}): port mismatch`); continue; }
         // #1335: lifecycle gate — an unarmed (or unverifiable) listener is
         // never an attach target by default; log the refusal once per origin.
-        if (!attachGateAllows(c.health, attachExternal)) {
+        // #1660: a user-zone instance (manual `bili start`) is exempt — the
+        // missing watchdog is the user's deliberate posture, not drift.
+        if (!attachGateAllows(c.health, attachExternal) && !isUserZoneInstance(c.inst)) {
             if (!refusedLog.has(c.inst.origin)) {
                 refusedLog.add(c.inst.origin);
                 console.error(gateRefusalMessage(c.inst, c.health));
@@ -2886,11 +2907,23 @@ export async function ensureProxyRunning(
     // itself and retries on EADDRINUSE, reporting the real origin through
     // the instance file via this launchToken.
     const launchToken = randomUUID();
-    // #446: with no explicit --port the launcher binds an OS-assigned
-    // ephemeral port — its private proxy never squats on 8787, so clients
-    // pointed there only ever reach an explicitly-started `bili start`.
-    // The child's EADDRINUSE retry covers the pick/spawn race.
-    const port = opts.port > 0 ? opts.port : await pickEphemeralPort(opts.host);
+    // #1660: a lane'd launch with no explicit port binds the SELF-MANAGED
+    // ZONE — the lane's sticky port (a past ladder drift it still points at)
+    // else the zone base — instead of an OS-assigned ephemeral. An undeclared
+    // lane (manual `bili start`, the user zone on 8787) keeps the ephemeral
+    // default. The child's EADDRINUSE +1 ladder covers the pick/spawn race
+    // AND a squatted preferred port (zero-config resolution: the lane lands
+    // on base+1 and records it sticky; #1660).
+    const zoneLane = opts.lane !== undefined && opts.port <= 0 ? opts.lane : undefined;
+    const preferredPort = deps?.zonePreferredPort ?? lanePreferredPort;
+    const port = opts.port > 0
+        ? opts.port
+        : zoneLane !== undefined
+          ? preferredPort(zoneLane)
+          : await pickEphemeralPort(opts.host);
+    const settleZonePort = (settled: number): void => {
+        if (zoneLane !== undefined) (deps?.writeZonePort ?? writeZonePort)(zoneLane, settled);
+    };
     if (!script) throw new Error("bili: cannot resolve launcher script path");
     const logPath = path.join(os.tmpdir(), `bili-proxy-${port}.log`);
     const logFd = fs.openSync(logPath, "a");
@@ -2992,6 +3025,10 @@ export async function ensureProxyRunning(
             const inst = readInstance();
             if (isProxyInstanceFile(inst) && inst.launchToken === launchToken) {
                 if (await probeHealth(inst.origin, fetchImpl)) {
+                    // #1660: settle the lane's sticky record on the port the
+                    // child actually bound (preferred or laddered) so every
+                    // later launch of this lane tries it first.
+                    settleZonePort(inst.port);
                     return { origin: inst.origin, port: inst.port, child, logPath };
                 }
                 continue;
@@ -3003,6 +3040,7 @@ export async function ensureProxyRunning(
             // A stale record (dead pid / legacy plain) cannot vouch for anything.
             const stale = !isProxyInstanceFile(inst) || !isPidAlive(inst.pid);
             if (stale && (await probeHealth(proxyOrigin(opts.host, port), fetchImpl))) {
+                settleZonePort(port);
                 return { origin: proxyOrigin(opts.host, port), port, child, logPath };
             }
         }

@@ -177,6 +177,6 @@ test("hermetic registry e2e", { skip: skipReason }, async (t) => {
         // entry === `billion-context@${NEW_VERSION}` (the re-pin assertion).
         assert.deepEqual(cfg.plugins, ["billion-context"]);
         assert.deepEqual(cfg.compaction, { auto: false });
-        assert.match(res.stdout, /plugin present/);
+        assert.match(res.stdout, /plugins present/);
     });
 });
