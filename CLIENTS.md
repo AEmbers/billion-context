@@ -227,15 +227,13 @@ two small node scripts that do the work around the client:
   - **loopback targets (#809):** an http loopback `baseURL` (localhost /
     127.x.x.x / ::1) is never re-proxied — wrapping it would stack bili onto
     itself or onto your own local relay.
-  - **`direct` exemptions:** `zcode.direct` in `billion-context.json` lists
-    provider IDs or URL substrings that must stay direct.
-  Scope is configurable: `zcode.route` = `"all"` (default) | `"plans"`
-  (the pre-#1622 whitelist behavior) | `"none"` (opt out entirely), env
-  override `BILI_ZCODE_ROUTE`. `zcode.fixedPort` / `BILI_ZCODE_PORT` pins the
-  spawned proxy's port so wrappers survive session restarts even without
-  handoff. `zcode.assumeSigningFixed` / `BILI_ZCODE_SIGNING_FIXED` flips the
-  #1621 skips off once a ZCode build ships the signing fix. See
-  CONFIGURATION.md (*zcode*) for the full schema.
+  - **`direct` exemptions:** a provider route declaring `"direct": true` in
+    the `providers` table (keyed by upstream URL — see CONFIGURATION.md)
+    stays direct; the same exemption any lane can honor.
+  The lane pins its default port (`48789`, `BILI_ZCODE_PORT` to override) so
+  wrappers survive session restarts even without handoff. `BILI_ZCODE_ROUTE`
+  (`plans`/`none`) is a compat escape hatch, and `BILI_ZCODE_SIGNING_FIXED=1`
+  flips the #1621 skips off once a ZCode build ships the signing fix.
 - **Watchdog & lifecycle:** the MCP child probes the proxy every 30 s. In
   attach mode it waits forever (it never touches a user-owned proxy); in spawn
   mode a dead proxy is respawned and the routing rewritten to the new origin.
@@ -271,8 +269,7 @@ two small node scripts that do the work around the client:
   side, so native mode detects the v3.14+ store generation and skips the
   rewrite entirely — it logs the reason and leaves traffic direct; use the GUI
   cert-MITM setup for compression on these accounts until ZCode ships a signing
-  fix; once it does, set `zcode.assumeSigningFixed` (or
-  `BILI_ZCODE_SIGNING_FIXED=1`) and they route again. Under the default
+  fix; once it does, set `BILI_ZCODE_SIGNING_FIXED=1` and they route again. Under the default
   `route:"all"` only those accounts are skipped — every other provider on the
   store keeps routing; the whole-store degrade (routing entirely off) now
   only applies under `route:"plans"`, where the plan accounts ARE the signing

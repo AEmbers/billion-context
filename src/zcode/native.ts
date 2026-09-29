@@ -11,7 +11,7 @@ import { LAUNCHER_DEFAULT_HOST, ensureProxyRunning, findLiveAttachableInstance }
 import { isPidAlive } from "../instance.js";
 import { nativeAttachOrigin, nativeProxyScriptPath, proxyEnvOrigin } from "../agent/native-bootstrap.js";
 import { reportRuntimeInfo, type RuntimeInfoReport } from "../agent/shared.js";
-import { resolveZcodeLane } from "../config.js";
+import { resolveZcodeNativePort, zcodeDirectPrefixes } from "../config.js";
 import {
     applyZcodeRouting,
     defaultZcodeRoutePolicy,
@@ -173,11 +173,16 @@ function removeSnapshots(file: string): void {
     } catch {}
 }
 
-/** Policy for entry points that don't thread a resolved lane through
- *  options (drift repair, exit handoff): read env + config file now. */
-function zcodePolicyFromEnv(env: NodeJS.ProcessEnv): ZcodeRoutePolicy {
-    const lane = resolveZcodeLane(env);
-    return { route: lane.route, direct: lane.direct, assumeSigningFixed: lane.assumeSigningFixed };
+/** Policy for entry points that don't thread a resolved policy through
+ *  options (mcp-entry watchdog, SessionStart hook, drift repair, exit
+ *  handoff): read env + providers table now. Route scope is env-only
+ *  (BILI_ZCODE_ROUTE) — the compat escape hatch; exemptions come from
+ *  `direct: true` provider routes (#1622). */
+export function zcodePolicyFromEnv(env: NodeJS.ProcessEnv): ZcodeRoutePolicy {
+    const raw = (env.BILI_ZCODE_ROUTE ?? "").trim().toLowerCase();
+    const route = raw === "plans" || raw === "none" ? raw : "all";
+    const signRaw = (env.BILI_ZCODE_SIGNING_FIXED ?? "").trim().toLowerCase();
+    return { route, directPrefixes: zcodeDirectPrefixes(env), assumeSigningFixed: signRaw === "1" || signRaw === "true" };
 }
 
 /** Rewrite the detected provider store so the coding-plan traffic flows
@@ -340,12 +345,11 @@ export async function bootstrapZcodeNative(opts: BootstrapZcodeOptions = {}): Pr
     const plan = planNativeZcode(env);
     if (plan.mode === "off") return { mode: "off" };
 
-    // #1622: route scope comes from env + billion-context.json (zcode.route).
-    // "none" is an explicit opt-out — behave like plan "off".
-    const lane = resolveZcodeLane(env);
-    const policy: ZcodeRoutePolicy = { route: lane.route, direct: lane.direct, assumeSigningFixed: lane.assumeSigningFixed };
+    // #1622: routing is on by default; BILI_ZCODE_ROUTE=none is the env-only
+    // opt-out (behaves like plan "off"), "plans" the legacy whitelist mode.
+    const policy = zcodePolicyFromEnv(env);
     if (policy.route === "none") {
-        log('zcode route is "none" (BILI_ZCODE_ROUTE / billion-context.json zcode.route) — leaving the provider store direct');
+        log('zcode route is "none" (BILI_ZCODE_ROUTE) — leaving the provider store direct');
         return { mode: "off" };
     }
 
@@ -380,11 +384,12 @@ export async function bootstrapZcodeNative(opts: BootstrapZcodeOptions = {}): Pr
 async function defaultEnsureProxy(): Promise<{ origin: string; attached: boolean }> {
     // The spawned proxy's parent-gone watchdog (#server.ts BILI_PARENT_PID)
     // keys off OUR pid: zcode kills this MCP child when its session ends, so
-    // the per-session proxy tears itself down with it. fixedPort (#1622)
-    // pins the lane so wrappers written by one session stay valid for the
-    // next one even when nothing else hands the port off.
+    // the per-session proxy tears itself down with it. The lane pins its
+    // default port (ZCODE_NATIVE_DEFAULT_PORT, BILI_ZCODE_PORT to override)
+    // so wrappers written by one session stay valid for the next one even
+    // when nothing else hands the port off (#1622/#1623).
     const handle = await ensureProxyRunning(
-        { host: LAUNCHER_DEFAULT_HOST, port: resolveZcodeLane().fixedPort ?? 0, passthrough: false, debug: false, lane: "zcode" },
+        { host: LAUNCHER_DEFAULT_HOST, port: resolveZcodeNativePort(), passthrough: false, debug: false, lane: "zcode" },
         { scriptPath: nativeProxyScriptPath() },
     );
     return { origin: handle.origin, attached: !!handle.attached };

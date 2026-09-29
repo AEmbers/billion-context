@@ -60,6 +60,14 @@ export type ProviderRoute = {
      *  verbatim, no session state. For upstreams whose anti-cheat fingerprints
      *  the request body (e.g. ZCode 405/3012). */
     passthrough?: boolean;
+    /** Client-side routing exemption (#1622): this upstream never gets pointed
+     *  through bili at all. Store-rewriting native lanes (zcode today) skip
+     *  matching entries instead of wrapping them, so traffic flows
+     *  client→upstream untouched — unlike `passthrough`, which still
+     *  terminates at the proxy. Matched by the same longest-URL-prefix rule
+     *  as every other provider field, so it is generic across lanes (an MITM
+     *  lane could honor it by skipping interception for the domain). */
+    direct?: boolean;
     /** Per-provider image billing mode (#767): "bytes" = ceil(base64/4)
      *  (conservative, matches byte-counting relays); "pixels" = dimension-
      *  based tile estimate (matches first-party pixel-tile upstreams);
@@ -1030,24 +1038,6 @@ type FileConfig = {
      *  brings a proxy up on. Default CLAUDE_NATIVE_DEFAULT_PORT; env
      *  BILI_CLAUDE_NATIVE_PORT wins over both. */
     claude?: { nativePort?: number };
-    /** ZCode native lane (#1622): scope of provider-store routing, explicit
-     *  exemptions, and an optional fixed loopback port. Defaults mirror the
-     *  in-process natives (pi/dsh): route EVERY provider, never re-proxy a
-     *  loopback target. Env BILI_ZCODE_ROUTE / BILI_ZCODE_PORT win. */
-    zcode?: {
-        /** "all" (default) wraps every provider entry; "plans" restores the
-         *  pre-#1622 coding-plan whitelist; "none" disables routing. */
-        route?: "all" | "plans" | "none";
-        /** Provider IDs or URL substrings exempted from wrapping. */
-        direct?: string[];
-        /** Pin the spawned proxy to a fixed loopback port (default: ephemeral).
-         *  Mitigates ZCode's per-session baseURL caching (#1623): a respawned
-         *  proxy re-opens the same port, so even stale cached URLs recover. */
-        fixedPort?: number;
-        /** Set `true` once ZCode ships the client-signing fix (#1621) to let
-         *  coding-plan accounts route again. */
-        assumeSigningFixed?: boolean;
-    };
     /** Native-hook attach policy (#1335): set `true` to let native hooks
      *  attach to lifecycle-less listeners (a manually started `bili start`
      *  daemon — no session-lifecycle watchdog, outlives every session, often
@@ -1106,34 +1096,28 @@ export function resolveClaudeNativePort(env: NodeJS.ProcessEnv = process.env): n
     return CLAUDE_NATIVE_DEFAULT_PORT;
 }
 
-/** Resolved ZCode native-lane settings (env > config file > defaults).
- *  Kept free of client-module imports: native.ts maps this onto json-edit's
- *  ZcodeRoutePolicy (structural) and the spawn port. */
-export interface ZcodeLaneConfig {
-    readonly route: "all" | "plans" | "none";
-    readonly direct: readonly string[];
-    readonly fixedPort: number | undefined;
-    readonly assumeSigningFixed: boolean;
+/** ZCode native lane: default pinned port (#1622/#1623) — the same pattern
+ *  as CLAUDE_NATIVE_DEFAULT_PORT. A pinned port means wrappers written into
+ *  the shared provider store stay valid across sessions even when an
+ *  instance dies without handoff: every respawn re-opens the same port (and
+ *  a concurrent compatible listener is attached instead of doubled). Env
+ *  BILI_ZCODE_PORT overrides (validated); no file config — the store is
+ *  re-derived at every bootstrap, so nothing is baked at install time. */
+export const ZCODE_NATIVE_DEFAULT_PORT = 48789;
+
+export function resolveZcodeNativePort(env: NodeJS.ProcessEnv = process.env): number {
+    const fromEnv = Number.parseInt(env.BILI_ZCODE_PORT ?? "", 10);
+    if (Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv < 65536) return fromEnv;
+    return ZCODE_NATIVE_DEFAULT_PORT;
 }
 
-function normalizeZcodeRoute(value: unknown): "all" | "plans" | "none" | undefined {
-    return value === "all" || value === "plans" || value === "none" ? value : undefined;
-}
-
-export function resolveZcodeLane(env: NodeJS.ProcessEnv = process.env): ZcodeLaneConfig {
-    const file = loadConfigFile().zcode;
-    const route = normalizeZcodeRoute(env.BILI_ZCODE_ROUTE?.trim().toLowerCase())
-        ?? normalizeZcodeRoute(file?.route)
-        ?? "all";
-    const direct = Array.isArray(file?.direct) ? file!.direct!.filter((d): d is string => typeof d === "string" && d.length > 0) : [];
-    const portEnv = Number.parseInt(env.BILI_ZCODE_PORT ?? "", 10);
-    const portFile = file?.fixedPort;
-    const fixedPort = Number.isInteger(portEnv) && portEnv > 0 && portEnv < 65536 ? portEnv
-        : typeof portFile === "number" && Number.isInteger(portFile) && portFile > 0 && portFile < 65536 ? portFile
-        : undefined;
-    const signEnv = (env.BILI_ZCODE_SIGNING_FIXED ?? "").trim().toLowerCase();
-    const assumeSigningFixed = signEnv === "1" || signEnv === "true" || file?.assumeSigningFixed === true;
-    return { route, direct, fixedPort, assumeSigningFixed };
+/** Client-side routing exemptions (#1622): providers whose route declares
+ *  `direct: true` are never pointed through bili by store-rewriting native
+ *  lanes. Returns the normalized URL keys (the same key space findRoute
+ *  matches against). */
+export function zcodeDirectPrefixes(env: NodeJS.ProcessEnv = process.env): string[] {
+    const routes = loadRoutes(env);
+    return Object.entries(routes).filter(([, r]) => r.direct === true).map(([k]) => k);
 }
 
 /** #1335: the native-hook attach-gate escape hatch. True when the user
@@ -1258,7 +1242,7 @@ export function parseRouteEntry(v: unknown): ProviderRoute | undefined {
     // is the KEY in the providers map (identical to the /bili/<url> string),
     // so it is NOT repeated inside the value.
     if (v && typeof v === "object" && !Array.isArray(v)) {
-        const obj = v as { models?: Record<string, ModelEntry>; proxy?: string; compressProtocol?: string; compress?: CompressSettings; compat?: { roles?: unknown }; passthrough?: boolean; imageBilling?: unknown };
+        const obj = v as { models?: Record<string, ModelEntry>; proxy?: string; compressProtocol?: string; compress?: CompressSettings; compat?: { roles?: unknown }; passthrough?: boolean; direct?: boolean; imageBilling?: unknown };
         const route: ProviderRoute = { models: obj.models };
         if (typeof obj.proxy === "string") route.proxy = obj.proxy;
         if (obj.compressProtocol === "marker" || obj.compressProtocol === "tools") route.compressProtocol = obj.compressProtocol;
@@ -1266,6 +1250,7 @@ export function parseRouteEntry(v: unknown): ProviderRoute | undefined {
         const compatRoles = parseCompatRoles(obj.compat?.roles);
         if (compatRoles) route.compat = { roles: compatRoles };
         if (typeof obj.passthrough === "boolean") route.passthrough = obj.passthrough;
+        if (typeof obj.direct === "boolean") route.direct = obj.direct;
         const imageBilling = parseImageBilling(obj.imageBilling);
         if (imageBilling) route.imageBilling = imageBilling;
         return route;

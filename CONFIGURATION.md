@@ -155,36 +155,11 @@ Top-level keys that control how the proxy listens and behaves globally.
 - **Status:** ACTIVE
 - **Description:** How inline (base64) images are charged by the preflight size gate and output clamp (#488/#496/#767). `"bytes"` charges each image at `base64 length / 4` tokens — conservative, and correct for byte-billing relays. `"pixels"` parses the image header (PNG/JPEG/WebP/GIF/BMP) without decoding the body and charges first-party pixel-tile billing (OpenAI high-detail model: 512px tiles, short side scaled up to 768px, long side capped at 2048px → 765–2805 tokens per image; unparsable formats fall back to a flat 16384). Remote (`https://`) images always charge a flat 4096 in either mode. A per-provider `providers.<url>.imageBilling` wins over this global, and the `BILI_IMAGE_BILLING` env var wins over both (live-read, no restart).
 
-### `zcode`
-
-- **Type:** object
-- **Default:** `{ "route": "all" }`
-- **Status:** ACTIVE
-- **Description:** Routing scope for the ZCode **native plugin mode** (`bili plugin install zcode`, #1145/#1622). The per-session bootstrap rewrites the provider store so model traffic flows through the local proxy; this section controls **which** entries wrap:
-
-  ```json
-  {
-    "zcode": {
-      "route": "all",
-      "direct": ["account:work-relay", "internal.example.com"],
-      "fixedPort": 48787,
-      "assumeSigningFixed": false
-    }
-  }
-  ```
-
-- **`route`** — `"all"` (default): every provider entry with a usable http(s) `baseURL` rides compression — the same semantics as the in-process natives (pi/dsh). `"plans"`: the pre-#1622 behavior (only the bigmodel coding-plan accounts). `"none"`: opt out entirely (the bootstrap leaves the store direct; wrappers from previous sessions are still stripped).
-- **`direct`** — exemptions: provider IDs (exact match) or URL substrings (domain/path) that must stay direct. Loopback `baseURL`s are always exempt regardless (#809 — an http loopback target is never re-proxied).
-- **`fixedPort`** — pin the spawned proxy's port (1–65535). Wrappers written into the shared store then survive session restarts even without handoff, because every session spawns the same port. Default: ephemeral.
-- **`assumeSigningFixed`** — set `true` once your ZCode build ships the ClientRequestSigningV4 fix; the #1621 per-entry skips (coding-plan accounts on v3.14+ personal stores) flip off and those accounts route again.
-
-  Skipped entries are always logged with their reason (`[bili-zcode] skipped N entries: …`) — nothing is silently dropped. Env overrides: `BILI_ZCODE_ROUTE`, `BILI_ZCODE_PORT`, `BILI_ZCODE_SIGNING_FIXED`. The #1621 client-signing wall itself: [CLIENTS.md](CLIENTS.md) (*ZCode → Known limitations*).
-
 ---
 
 ## Providers
 
-The `providers` block maps **upstream URLs** to per-provider configuration. Each key is a URL prefix; each value can declare model context windows, a per-provider proxy, a compression protocol, compression overrides, an image billing mode, and a per-route passthrough.
+The `providers` block maps **upstream URLs** to per-provider configuration. Each key is a URL prefix; each value can declare model context windows, a per-provider proxy, a compression protocol, compression overrides, an image billing mode, a per-route passthrough, and a client-side direct exemption.
 
 ```jsonc
 {
@@ -279,6 +254,21 @@ The two schemes never overlap: a `mitm://` key targets only MITM (login-client) 
   {
     "providers": {
       "mitm://zcode.z.ai": { "passthrough": true }
+    }
+  }
+  ```
+
+### `direct`
+
+- **Type:** `boolean`
+- **Default:** *(none — the route rides bili)*
+- **Status:** ACTIVE
+- **Description:** Client-side routing exemption (#1622): when `true`, this upstream is never pointed through bili **on the client side**. Store-rewriting native lanes (ZCode today) skip matching provider-store entries instead of wrapping them, so traffic flows client → upstream untouched — unlike [`passthrough`](#passthrough), which still terminates at the proxy. Matched by the same longest-URL-prefix rule as every other provider field, so any lane can honor it identically. Use it for upstreams that must see the client's real origin (e.g. an account whose request signing derives from the origin) or for providers you simply don't want routed through this machine's bili:
+
+  ```jsonc
+  {
+    "providers": {
+      "https://api.moonshot.cn/v1": { "direct": true }
     }
   }
   ```
@@ -753,9 +743,9 @@ Environment variables take precedence over the config file. They are useful for 
 | `BILI_LAUNCHER_PLUGIN` | Set `0` to disable the launcher's bili MCP server injection for claude/codex (pure wire mode); `1` forces plugin mode. Default: injected — except codex with a local/private upstream (sglang/vllm/ollama cannot parse codex's namespace tool type, so bili auto-falls back to wire tools there). See [Launcher Reference](#launcher-reference). |
  | `BILI_LAUNCHER_DIRECT` | Set `1` for direct-URL routing in the launcher (drop MITM/CA trust). See [Launcher Reference](#launcher-reference). |
  | `BILI_NATIVE_ATTACH_EXTERNAL` | Attach-gate escape hatch (#1335). Native hooks attach to a running proxy only when it reports an armed session-lifecycle watchdog (`watchdog.armed == true` in `/__bili/health`) — a manually started `bili start` daemon has no lifecycle owner (refuses watcher registration, never dies with sessions, often runs an older build), so by default each session spawns its own ephemeral proxy instead of attaching to one. Set to `1`/`true` when you deliberately run a resident daemon for your native hooks to ride on: any code/lane-compatible listener becomes attachable again regardless of watchdog state (including pre-#1330 builds that report no `watchdog` field at all) — you then own the daemon's lifetime and version yourself. `"native": { "attachExternal": true }` in the config file does the same; the env var wins (`0`/`false` closes the gate even over a permissive file). Default is closed. Full mechanics (reuse rules, listener table, escape hatch): [TECHNICAL-NOTES.md](TECHNICAL-NOTES.md#proxy-reuse-and-the-attach-gate-1225-1335-1232). |
- | `BILI_ZCODE_ROUTE` | zcode native-plugin routing scope (#1622): `all` (default — every provider entry with a usable http(s) baseURL rides compression, pi/dsh parity), `plans` (pre-#1622 bigmodel coding-plan whitelist), `none` (opt out; the bootstrap leaves the store direct). File equivalent `"zcode": { "route": … }`. See [`zcode`](#zcode). |
- | `BILI_ZCODE_PORT` | Pin the port (1–65535) of the proxy the zcode native lane spawns; wrappers in the shared store then survive session restarts even without handoff. File equivalent `"zcode": { "fixedPort": … }`. |
- | `BILI_ZCODE_SIGNING_FIXED` | `1`/`true` = assume your ZCode build fixed ClientRequestSigningV4 (#1621): the per-entry skips for coding-plan accounts on v3.14+ personal stores flip off and they route again. File equivalent `"zcode": { "assumeSigningFixed": true }`. |
+ | `BILI_ZCODE_ROUTE` | zcode native-plugin routing scope (#1622): `all` (default — every provider entry with a usable http(s) baseURL rides compression, pi/dsh parity), `plans` (pre-#1622 bigmodel coding-plan whitelist), `none` (opt out; the bootstrap leaves the store direct). Compat escape hatch — there is **no** file equivalent; routing is on by default. |
+ | `BILI_ZCODE_PORT` | Override the pinned default port (`48789`) of the proxy the zcode native lane spawns; wrappers written into the shared store then survive session restarts even without handoff. |
+ | `BILI_ZCODE_SIGNING_FIXED` | `1`/`true` = assume your ZCode build fixed ClientRequestSigningV4 (#1621): the per-entry skips for coding-plan accounts on v3.14+ personal stores flip off and they route again. Temporary escape hatch — there is **no** file equivalent. |
  | `BILI_CLAUDE_UPSTREAM` | claude direct mode: your relay endpoint, when `ANTHROPIC_BASE_URL` already points at a relay the launcher would otherwise bypass. |
 | `BILI_CODEX_COMPACT` | Codex native-compaction handling. Default `intercept`: bili intercepts codex's compaction requests and forges a local handoff to the ACP state when the safety gate passes (transform ok + steady-state usage < 90% of the window + at least one active compressed block) — trigger form forges a 2-frame SSE, endpoint form forges `{output}` — and never contacts upstream. Forged ACP summaries are re-injected as a history-borne handoff message (developer-message fallback) so compressed content stays visible after codex truncates its history. Set `pass` to opt out and forward codex's compaction requests upstream (native compaction backstops). On any gate failure the request passes through untouched. |
 

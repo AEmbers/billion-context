@@ -87,13 +87,15 @@ export function detectZcodeStore(dataDir: string, env: NodeJS.ProcessEnv = proce
  *  explicit exemptions are opt-in. */
 export interface ZcodeRoutePolicy {
     readonly route: "all" | "plans" | "none";
-    readonly direct: readonly string[];
+    /** Normalized provider-route URL keys declaring `direct: true` (#1622):
+    *  entries whose upstream matches one of these prefixes stay direct. */
+    readonly directPrefixes: readonly string[];
     /** #1621 escape hatch for ZCode builds that fixed ClientRequestSigningV4. */
     readonly assumeSigningFixed: boolean;
 }
 
 export function defaultZcodeRoutePolicy(): ZcodeRoutePolicy {
-    return { route: "all", direct: [], assumeSigningFixed: false };
+    return { route: "all", directPrefixes: [], assumeSigningFixed: false };
 }
 
 /** #1621: the v3.14+ personal-store generation ships ClientRequestSigningV4
@@ -125,13 +127,17 @@ function isLoopbackHttpUrl(url: string): boolean {
         || host === "127.0.0.1" || /^127\.\d+\.\d+\.\d+$/.test(host);
 }
 
-/** An exemption hits when the item names the provider ID verbatim or appears
- *  as a substring of the upstream URL (domain or path pattern). */
-function directExemptionHit(id: string, upstream: string | undefined, direct: readonly string[]): boolean {
-    for (const item of direct) {
-        if (item.length === 0) continue;
-        if (item === id) return true;
-        if (upstream !== undefined && upstream.includes(item)) return true;
+/** An exemption hits when a `direct: true` provider-route key matches the
+ *  upstream — same boundary rule as findRoute (upstream === key OR upstream
+ *  starts with key + "/"), so "https://x.com" never matches
+ *  "https://x.com.evil". Provider-ID granularity is not offered: two store
+ *  entries sharing one upstream URL are exempted together (the URL is the
+ *  user-facing identity in the providers table). */
+function directExemptionHit(upstream: string | undefined, directPrefixes: readonly string[]): boolean {
+    if (upstream === undefined) return false;
+    for (const key of directPrefixes) {
+        if (key.length === 0) continue;
+        if (upstream === key || upstream.startsWith(key + "/")) return true;
     }
     return false;
 }
@@ -145,7 +151,7 @@ function zcodeEntrySkipReason(id: string, upstream: string | undefined, hasBaseU
     }
     if (!hasBaseUrl) return "no usable http(s) baseUrl — left untouched";
     if (upstream !== undefined && isLoopbackHttpUrl(upstream)) return `loopback target (${upstream}) never re-proxied (#809)`;
-    if (directExemptionHit(id, upstream, policy.direct)) return "direct exemption";
+    if (directExemptionHit(upstream, policy.directPrefixes)) return "direct exemption (providers route `direct: true`)";
     return undefined;
 }
 

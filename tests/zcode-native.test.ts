@@ -363,9 +363,9 @@ test("bootstrap honors ZCODE_PERSONAL_PROVIDER_CONFIG_FILE overrides (#1151)", a
 
 // #1622: route scope + exemptions. Default "all" mirrors the in-process
 // natives (pi/dsh): every provider rides compression, loopback targets are
-// never re-proxied (#809), `direct` opts specific providers/URLs out, and
-// the #1621 signing wall degrades to a per-entry skip instead of blocking
-// the whole store.
+// never re-proxied (#809), providers-route `direct: true` keys opt specific
+// upstreams out, and the #1621 signing wall degrades to a per-entry skip
+// instead of blocking the whole store.
 
 test('route:"all" wraps every non-exempt provider and reports skips (#1622)', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "zcode-native-all-"));
@@ -395,7 +395,7 @@ test('route:"all" wraps every non-exempt provider and reports skips (#1622)', as
             dataDir: dir,
             env: {},
             log: (m) => logs.push(m),
-            policy: { route: "all", direct: ["account:kimi", "moonshot.cn"], assumeSigningFixed: false },
+            policy: { route: "all", directPrefixes: ["https://api.moonshot.cn/v1"], assumeSigningFixed: false },
         });
         assert.ok(applied);
         assert.deepEqual(applied.wrapped, [{ id: "account:deepseek", upstream: "https://api.deepseek.com/v1" }]);
@@ -473,15 +473,25 @@ test('bootstrapZcodeNative respects zcode route:"none" without proxy bring-up (#
     }
 });
 
-test("resolveZcodeLane maps env and file into the lane config (#1622)", async () => {
-    const { resolveZcodeLane } = await import("../src/config.ts");
-    const lane = resolveZcodeLane({ BILI_ZCODE_ROUTE: "none", BILI_ZCODE_PORT: "41234", BILI_ZCODE_SIGNING_FIXED: "true" });
-    assert.equal(lane.route, "none");
-    assert.equal(lane.fixedPort, 41234);
-    assert.equal(lane.assumeSigningFixed, true);
-    assert.equal(resolveZcodeLane({ BILI_ZCODE_ROUTE: "garbage" }).route, "all");
-    assert.equal(resolveZcodeLane({ BILI_ZCODE_PORT: "not-a-port" }).fixedPort, undefined);
-    assert.equal(resolveZcodeLane({ BILI_ZCODE_PORT: "70000" }).fixedPort, undefined);
+test("resolveZcodeNativePort and zcodeDirectPrefixes map env into the lane (#1622)", async () => {
+    const { resolveZcodeNativePort, ZCODE_NATIVE_DEFAULT_PORT, zcodeDirectPrefixes } = await import("../src/config.ts");
+    assert.equal(resolveZcodeNativePort({ BILI_ZCODE_PORT: "41234" }), 41234);
+    assert.equal(resolveZcodeNativePort({ BILI_ZCODE_PORT: "not-a-port" }), ZCODE_NATIVE_DEFAULT_PORT);
+    assert.equal(resolveZcodeNativePort({ BILI_ZCODE_PORT: "70000" }), ZCODE_NATIVE_DEFAULT_PORT);
+    assert.equal(resolveZcodeNativePort({}), ZCODE_NATIVE_DEFAULT_PORT);
+    const dir = mkdtempSync(path.join(tmpdir(), "zcode-native-config-"));
+    const cfg = path.join(dir, "providers.json");
+    writeFileSync(cfg, JSON.stringify({
+        "https://api.moonshot.cn/v1": { direct: true },
+        "https://api.deepseek.com/v1": {},
+    }));
+    try {
+        const prefixes = zcodeDirectPrefixes({ ACP_PROVIDERS: cfg });
+        assert.ok(prefixes.includes("https://api.moonshot.cn/v1"));
+        assert.ok(!prefixes.includes("https://api.deepseek.com/v1"));
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 // #1623: the shared provider store is a last-writer-wins pointer across all

@@ -12,7 +12,7 @@
 import { runMcpStdio } from "../mcp.js";
 import { fetchManifest } from "../agent/shared.js";
 import { nativeProxyScriptPath } from "../agent/native-bootstrap.js";
-import { resolveZcodeLane } from "../config.js";
+import { resolveZcodeNativePort } from "../config.js";
 import { configureLogger, log as teeLog } from "../logger.js";
 import { defaultLogFile } from "../paths.js";
 import { LAUNCHER_DEFAULT_HOST, ensureProxyRunning } from "../launcher.js";
@@ -25,6 +25,7 @@ import {
     repairSharedStoreDrift,
     routeZcodeConfig,
     unrouteZcode,
+    zcodePolicyFromEnv,
 } from "./native.js";
 
 const WATCHDOG_INTERVAL_MS = 30000;
@@ -32,7 +33,7 @@ const WATCHDOG_FAILURE_LIMIT = 3;
 const HANDOFF_TIMEOUT_MS = 5000;
 
 function startWatchdog(
-    state: { origin: string; policy: ZcodeRoutePolicy; fixedPort?: number },
+    state: { origin: string; policy: ZcodeRoutePolicy },
     attached: boolean,
     log: (msg: string) => void,
 ): void {
@@ -54,7 +55,7 @@ function startWatchdog(
                         log(`attached proxy ${state.origin} unhealthy — waiting for it to recover`);
                     } else {
                         const handle = await ensureProxyRunning(
-                            { host: LAUNCHER_DEFAULT_HOST, port: state.fixedPort ?? 0, passthrough: false, debug: false, lane: "zcode" },
+                            { host: LAUNCHER_DEFAULT_HOST, port: resolveZcodeNativePort(), passthrough: false, debug: false, lane: "zcode" },
                             { scriptPath: nativeProxyScriptPath() },
                         );
                         if (handle.origin !== state.origin) {
@@ -121,12 +122,9 @@ export async function main(): Promise<void> {
         process.exit(0);
     }
     await activateZcodePluginMode(applied, { log });
-    const lane = resolveZcodeLane();
-    const state = {
-        origin: applied.origin,
-        policy: { route: lane.route, direct: lane.direct, assumeSigningFixed: lane.assumeSigningFixed },
-        fixedPort: lane.fixedPort,
-    };
+    // #1622: the watchdog respawn path must re-route with the SAME policy
+    // (BILI_ZCODE_ROUTE / providers direct) — not the hardcoded default.
+    const state = { origin: applied.origin, policy: zcodePolicyFromEnv(process.env) };
     startWatchdog(state, bootstrap.attached, log);
     installExitHandoff(state, log);
     runMcpStdio();

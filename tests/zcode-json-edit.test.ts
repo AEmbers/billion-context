@@ -24,8 +24,8 @@ const ORIGIN_A = "http://127.0.0.1:18787";
 const ORIGIN_B = "http://127.0.0.1:28787";
 const UPSTREAM = ZCODE_BIGMODEL_ANTHROPIC_UPSTREAM;
 // #1622 made route:"all" the default; these tests pin the explicitly-selected
-// pre-#1622 whitelist behavior (still available via zcode.route = "plans").
-const PLANS_POLICY: ZcodeRoutePolicy = { route: "plans", direct: [], assumeSigningFixed: false };
+// pre-#1622 whitelist behavior (still available via BILI_ZCODE_ROUTE=plans).
+const PLANS_POLICY: ZcodeRoutePolicy = { route: "plans", directPrefixes: [], assumeSigningFixed: false };
 
 function dataDir(): string {
     return mkdtempSync(path.join(tmpdir(), "zcode-json-edit-"));
