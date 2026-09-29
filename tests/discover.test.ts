@@ -20,6 +20,7 @@ import {
     OPENCODE_DEFAULT_MODEL_HOSTS,
     type ClientConfig,
 } from "../src/client-config.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 test("parseZcodeConfig: reads baseURL from each provider entry", () => {
     const obj = {
@@ -93,7 +94,7 @@ test("readZcodeConfig: reads <home>/v2/config.json", () => {
             assert.equal(cfg.providers.p.baseURL, "https://z.example.com/api");
         });
     } finally {
-        fs.rmSync(tmp, { recursive: true, force: true });
+        rmrf(tmp);
     }
 });
 
@@ -107,7 +108,7 @@ test("readZcodeConfig: missing dir or unparseable file → empty providers", () 
             assert.deepEqual(readZcodeConfig(tmp), { providers: {} });
         });
     } finally {
-        fs.rmSync(tmp, { recursive: true, force: true });
+        rmrf(tmp);
     }
 });
 
@@ -177,7 +178,7 @@ test("readZcodeConfig: finds the legacy store under upstream env relocation (ZCO
         const cfg = readZcodeConfig(path.join(tmp, ".zcode"), { ZCODE_DATA_BASE_DIR: tmp });
         assert.equal(cfg.providers.moved.baseURL, "https://moved.example.com/api");
     } finally {
-        fs.rmSync(tmp, { recursive: true, force: true });
+        rmrf(tmp);
     }
 });
 
@@ -216,7 +217,7 @@ test("readZcodeConfig: merges legacy config.json with provider_config.json, pers
             assert.equal(cfg.providers.shared.baseURL, "https://new.example.com/api");
         });
     } finally {
-        fs.rmSync(tmp, { recursive: true, force: true });
+        rmrf(tmp);
     }
 });
 
@@ -241,7 +242,7 @@ test("readZcodeConfig: honors ZCODE_PERSONAL_PROVIDER_CONFIG_FILE override (#115
             assert.equal(cfg.providers["custom:alt"].baseURL, "https://alt.example.com/v1");
         });
     } finally {
-        fs.rmSync(tmp, { recursive: true, force: true });
+        rmrf(tmp);
     }
 });
 
@@ -374,7 +375,7 @@ async function withTempHome<T>(fn: (home: string, env: NodeJS.ProcessEnv) => Pro
     } finally {
         process.env.HOME = savedHome;
         _resetDiscoveryCacheForTest();
-        fs.rmSync(tmp, { recursive: true, force: true });
+        rmrf(tmp);
     }
 }
 

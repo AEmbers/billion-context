@@ -28,6 +28,7 @@ import {
 } from "../src/plugin-install.ts";
 import { ZONE_PORT_BASE, resolveClaudeNativePort, resolveNativeAttachExternal } from "../src/config.ts";
 import { chooseWatchdogParentPid, isClaudeHostArgv, isTransientShArgv, planClaudeNativeBootstrap, readPsProcInfo, readWinProcInfo, resolveClaudeHostPid, splitWindowsCommandLine } from "../src/claude-native-bootstrap.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 // #1248: the live tests below spawn real proxies/processes and observe real
 // /proc, ps output and network ports. On loaded shared machines (multi-agent
@@ -205,7 +206,7 @@ test("resolveNativeAttachExternal: env parsing (1/true open, 0/false close, junk
     } finally {
         if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
         else process.env.XDG_CONFIG_HOME = prev;
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -232,7 +233,7 @@ test("resolveNativeAttachExternal: file native.attachExternal requires exact tru
     } finally {
         if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
         else process.env.XDG_CONFIG_HOME = prev;
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -521,7 +522,7 @@ test("resolveClaudeHostPid: live ps walk finds a spawned claude host", { timeout
         // A pid that cannot exist must read as gone, not crash.
         assert.equal(readPsProcInfo(999_999_999), null);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
         if (claude !== null && claude.pid !== undefined && claude.pid > 1) {
             try {
                 process.kill(claude.pid, "SIGKILL");
@@ -971,7 +972,7 @@ test("hook e2e: an occupied stable port fails loud — never port-hops", { timeo
         assert.equal(await canConnect(port + 1), false, "no port-hop proxy on port+1");
     } finally {
         squatter.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -1022,7 +1023,7 @@ function killPid(pid: number): void {
 async function rmHome(home: string): Promise<void> {
     for (let i = 0; ; i++) {
         try {
-            fs.rmSync(home, { recursive: true, force: true });
+            rmrf(home);
             return;
         } catch {
             if (i >= 50) throw new Error(`cleanup: could not remove ${home} after 5s`);

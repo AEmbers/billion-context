@@ -7,11 +7,12 @@ import { startServer, type ProxyOptions, isSideRequest, outputBudgetField, resto
 import { estimateRawBodyTokens } from "../src/preflight.ts";
 import { inspectContextOverflow } from "../src/util.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 import { getSession, _resetSessionsForTest } from "../src/session.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 // #388: side requests (title-gen / small utility calls) share the main session
 // key but must not touch kernel state. The proxy routes them as pure passthrough
@@ -682,6 +683,6 @@ test("e2e: the overflow arm survives a restart round-trip; usage after reload re
         await closeRig(rig);
         store.cancelAll();
         store2?.cancelAll();
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });

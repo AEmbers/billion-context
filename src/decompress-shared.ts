@@ -13,7 +13,7 @@ import {
     type InlineRestoreResult,
 } from "acp-kernel";
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import { tmpdir } from "node:os";
 import { markDirty, preCompactionArchiveOf, peekSession, findSessionByCanonicalId, type Session } from "./session.js";
 import { getStore } from "./persist.js";
@@ -64,6 +64,33 @@ export type ProxyToolCtx = {
     session: Session;
     log: (msg: string) => void;
 };
+
+/** #1691: honor the documented `toFile` argument. A non-empty string writes the
+ *  restore to the caller's path regardless of body size (never inflates context;
+ *  relative paths resolve against the proxy cwd). An explicit destination is an
+ *  intentional artifact, so it is deliberately NOT pushed into trackedTempFiles —
+ *  the reaper/beforeExit cleanup must never remove a file asked for by name.
+ *  Returns the "written to" pointer text on success (degraded partial on write
+ *  failure), or null when toFile was omitted so the caller uses its default. */
+function toFilePointer(args: Record<string, unknown>, ctx: ProxyToolCtx, header: string, body: string): string | null {
+    const raw = args.toFile;
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw !== "string") {
+        ctx.log(`[acp-decompress] toFile must be a string (got ${typeof raw}) — using default output`);
+        return null;
+    }
+    const target = raw.trim();
+    if (target === "") return null;
+    const resolved = resolvePath(target);
+    try {
+        mkdirSync(dirname(resolved), { recursive: true });
+        writeFileSync(resolved, body, { encoding: "utf8", mode: 0o600 });
+        return `${header}\nContent (${body.length} chars) written to: ${resolved}\nUse the read tool to access it.`;
+    } catch (e) {
+        ctx.log(`[acp-decompress] toFile write failed: ${resolved} — ${String(e)}`);
+        return `${header}\n[Failed to write to ${resolved}: ${String(e)}]\n${safePrefix(body, 4000)}...`;
+    }
+}
 
 /** Resolve a decompress request to a result string, honoring the `full` flag
  *  and the cross-round original-content cache on the session.
@@ -128,6 +155,8 @@ export function resolveDecompress(
     }
 
     const header = `[Block ${blockId} content — ${count} item(s)${full ? ", full" : ""}]`;
+    const toFileOut = toFilePointer(args, ctx, header, body);
+    if (toFileOut !== null) return toFileOut;
     const safeBlockId = blockId.replace(/[^a-zA-Z0-9_-]/g, "-");
     const outPath = body.length > 10000 ? join(tmpdir(), `acp-decompress-${safeBlockId}-${Date.now()}.txt`) : null;
     if (outPath) {
@@ -281,7 +310,10 @@ function resolveDecompressRange(args: Record<string, unknown>, ctx: ProxyToolCtx
     const header = `[Block ${block.blockId} content — ${startRaw}–${endRaw} — ${parts.length} item(s)]`;
     let injText: string;
     const body = parts.join("\n\n");
-    if (body.length > 10000) {
+    const toFileOut = toFilePointer(args, ctx, header, body);
+    if (toFileOut !== null) {
+        injText = toFileOut;
+    } else if (body.length > 10000) {
         const safeBlockId = block.blockId.replace(/[^a-zA-Z0-9_-]/g, "-");
         // [#1207 review F4] Span in the filename (two spans of one block in the
         // same millisecond must not clobber each other) and 0600 (folded

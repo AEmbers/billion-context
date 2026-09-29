@@ -12,6 +12,7 @@ import {
     pluginStatusAll,
     selfPackageRoot,
 } from "../src/plugin-install.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 const NPM_ROOT = "/usr/local/lib/node_modules/billion-context";
 
@@ -138,8 +139,8 @@ test("pluginInstall/remove/status opencode end-to-end (dev form under tsx)", (t)
         else process.env.BILI_MCP_PROXY = prevMcp;
         if (prevBin === undefined) delete process.env.BILI_CLIENT_BIN;
         else process.env.BILI_CLIENT_BIN = prevBin;
-        fs.rmSync(xdg, { recursive: true, force: true });
-        fs.rmSync(state, { recursive: true, force: true });
+        rmrf(xdg);
+        rmrf(state);
     });
 
     const file = path.join(xdg, "opencode", "opencode.json");
@@ -200,8 +201,8 @@ function withOcConfig(t: import("node:test").TestContext, initial: OcMcpCfg): { 
         else process.env.XDG_STATE_HOME = prevState;
         if (prevOpen === undefined) delete process.env.OPENCODE_CONFIG;
         else process.env.OPENCODE_CONFIG = prevOpen;
-        fs.rmSync(xdg, { recursive: true, force: true });
-        fs.rmSync(state, { recursive: true, force: true });
+        rmrf(xdg);
+        rmrf(state);
     });
     const file = path.join(xdg, "opencode", "opencode.json");
     fs.mkdirSync(path.dirname(file), { recursive: true });

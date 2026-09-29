@@ -651,15 +651,29 @@ export type ProxyOptions = {
      *  derivedFrom lineage. Disable with `resumeInheritance: false` or env
      *  BILI_RESUME_INHERITANCE=0. */
     resumeInheritance?: boolean;
-    /** Content detection of the bili→bili chain awareness: when an inbound
-     *  request carries ACP artifacts (render tags / ACP tool-call history)
-     *  but no x-bili-hop header and no local compression state for the
-     *  session, record one advisory observation and process normally (#1086,
-     *  advisory-only since #1357) — never verbatim passthrough.
-     *  Default ON; escape valve via env BILI_CHAIN_CONTENT=0 or
-     *  `chainContentDetection: false` in the config file (env wins). The
+    /** Body-content detection of the bili→bili chain awareness: when an inbound
+     *  request carries ACP artifacts / a `<bili-chain …/>` checkpoint in the
+     *  BODY but no x-bili-hop header, record an advisory observation and/or apply
+     *  first-processor-wins passthrough (#1086/#1421). OFF by default (#1683
+     *  follow-up): scanning the body can false-positive on CCR/file-introduced
+     *  text and model-echoed tags, so by default ONLY the x-bili-hop header drives
+     *  chain recognition. Re-enable via env BILI_CHAIN_CONTENT=1 or
+     *  `chainContentDetection: true` in the config file (env wins). The
      *  x-bili-hop signal is unaffected by this switch. */
     chainContentDetection?: boolean;
+    /** Egress emission of the model-visible `<bili-chain …/>` checkpoint
+     *  carrier (#1683): when set, every request THIS instance processes leaves
+     *  with a digest-bearing stamp so a downstream bili applies first-processor-
+     *  wins even if x-bili-hop was stripped in transit (#1421). The carrier
+     *  lands in a slot the terminal MODEL also reads (trailing user message on
+     *  openai/responses; trailing text part on anthropic/google), so models
+     *  treat it as phantom user input and burn tokens commenting on it — hence
+     *  OFF by default. Enable it for the narrow multi-bili + hop-header-
+     *  stripped-middlebox case via env BILI_CHAIN_STAMP=1 or
+     *  `chainEgressStamp: true` in the config file (env wins). Independent of
+     *  chainContentDetection (inbound body-detection is also default OFF); the
+     *  x-bili-hop passthrough is unaffected either way. */
+    chainEgressStamp?: boolean;
     /** #1085: freeze the client's head-system text into a per-session sticky
      *  anchor and append detected changes to the conversation as trailing
      *  notes, keeping the forwarded prefix byte-stable for the provider's
@@ -942,7 +956,8 @@ export function loadOptions(env: NodeJS.ProcessEnv = process.env): ProxyOptions 
         subagentSplit: (env.BILI_SUBAGENT_SPLIT ?? (fileConfig.subagentSplit === false ? "0" : "1")) !== "0",
         forkAdoption: (env.BILI_FORK_ADOPTION ?? (fileConfig.forkAdoption === true ? "1" : "0")) !== "0",
         resumeInheritance: (env.BILI_RESUME_INHERITANCE ?? (fileConfig.resumeInheritance === false ? "0" : "1")) !== "0",
-        chainContentDetection: (env.BILI_CHAIN_CONTENT ?? (fileConfig.chainContentDetection === false ? "0" : "1")) !== "0",
+        chainContentDetection: (env.BILI_CHAIN_CONTENT ?? (fileConfig.chainContentDetection === true ? "1" : "0")) !== "0",
+        chainEgressStamp: (env.BILI_CHAIN_STAMP ?? (fileConfig.chainEgressStamp === true ? "1" : "0")) !== "0",
         stableSystemAnchor: (env.BILI_STABLE_SYSTEM_ANCHOR ?? (fileConfig.stableSystemAnchor === true ? "1" : "0")) !== "0",
     };
 }
@@ -1013,11 +1028,17 @@ type FileConfig = {
     /** Set `false` to disable resume-fork inheritance (#1486, default ON;
      *  env BILI_RESUME_INHERITANCE=0 wins over the file). */
     resumeInheritance?: boolean;
-    /** Set `false` to disable the ACP-artifact content detection of the
-     *  bili→bili chain awareness (#1086, advisory-only since #1357);
-     *  x-bili-hop stays active either way.
-     *  Env BILI_CHAIN_CONTENT=0 wins over the file. */
+    /** Set `true` to enable body-content detection of the bili→bili chain
+     *  awareness (#1086/#1421); OFF by default — by default only x-bili-hop drives
+     *  chain recognition, since body scanning can false-positive on CCR/file-
+     *  introduced text and model-echoed tags (#1683). Env BILI_CHAIN_CONTENT=1
+     *  wins over the file. */
     chainContentDetection?: boolean;
+    /** Set `true` to enable egress emission of the model-visible
+     *  `<bili-chain …/>` checkpoint carrier (#1683, default OFF; env
+     *  BILI_CHAIN_STAMP=1 wins over the file). Independent of
+     *  chainContentDetection. */
+    chainEgressStamp?: boolean;
     /** Set `true` to enable the sticky head-system anchor (#1085, default
      *  OFF; env BILI_STABLE_SYSTEM_ANCHOR wins). */
     stableSystemAnchor?: boolean;
