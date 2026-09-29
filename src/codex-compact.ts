@@ -19,21 +19,27 @@ export function codexCompactMode(): CodexCompactMode {
 // The `originator` header is only sent for non-default thread originators, so
 // the UA (DEFAULT_ORIGINATOR in codex's default_client.rs) is the reliable
 // client signal. Codex ships multiple clients with different UA prefixes
-// (codex_cli_rs/, codex_exec/, codex desktop/, ...); known prefixes match
-// case-insensitively because variants like Codex Desktop send an initial
-// capital ("Codex Desktop/x.y.z", #1169). In addition, a lenient fallback
-// matches lowercase "codex" anywhere in the UA for unknown variants (#645).
-// The fallback stays CASE-SENSITIVE on purpose: a case-insensitive substring
-// would pull non-codex relays with "Codex"-shaped UAs into codex treatment and
-// re-fork them mid-conversation (#1106). A new client variant must not silently
-// fall out of detection (#645) — register its prefix above.
+// (codex_cli_rs/, codex_exec/, codex desktop/, ...); known prefixes match at
+// the START of the UA case-insensitively because variants like Codex Desktop
+// send an initial capital ("Codex Desktop/x.y.z", #1169). In addition, a
+// lenient fallback covers unknown variants (#645): any whitespace-delimited
+// UA component STARTING with lowercase "codex". Token-level, not substring:
+// a bare "includes" misclassified non-codex clients whose UAs merely mention
+// "codex" mid-token or in parens (e.g. "vendor/codex-wrapper", #1641), which
+// then rode the full codex treatment (compaction forge + user-role summary
+// replacement). The fallback stays CASE-SENSITIVE on purpose: a
+// case-insensitive match would pull non-codex relays with "Codex"-shaped UAs
+// into codex treatment and re-fork them mid-conversation (#1106). A new
+// client variant must not silently fall out of detection (#645) — token-level
+// keeps any future "codex_*/…" variant covered; register an exact prefix
+// above only when the variant sends an initial capital.
 export function isCodexClient(headers: Record<string, string | string[] | undefined>): boolean {
     const ua = headers["user-agent"];
     if (!ua) return false;
     const s = Array.isArray(ua) ? ua[0] : ua;
     if (typeof s !== "string") return false;
     if (CODEX_UA_PREFIXES.some((p) => s.toLowerCase().startsWith(p))) return true;
-    return s.includes("codex");
+    return s.split(/\s+/).some((t) => t.startsWith("codex"));
 }
 
 export function hasCompactionTrigger(input: unknown): boolean {
