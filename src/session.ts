@@ -142,6 +142,19 @@ export type Session = {
          *  Cleared by resetSessionCompression (native-compaction boundary).
          *  Persisted (survives restart like the rest of stats). */
         localInputEstimate?: number;
+        /** #1569: last netted input value written by a REAL upstream usage
+         *  report (the arming paths never touch it — they only pose as
+         *  usage-grade for lastInputTokens). While > 0, effectiveTokenCount
+         *  sizes nudges on the calibrated CJK-aware estimate of the CURRENT
+         *  view instead of the char-count upper bound: the anchor's own
+         *  billing proves the optimistic rate holds for this session's
+         *  content class, while the upper bound over-counts code/JSON-heavy
+         *  payloads ~3.5× and lit spurious nudge bands during estimate-grade
+         *  turns. Never-reporting upstreams keep the fail-closed upper-bound
+         *  behavior (#553/#728) — their anchor stays absent. Dropped with the
+         *  other baseline stats at native-compaction boundaries. Absent on
+         *  legacy session files → legacy path. */
+        lastUsageGradeTokens?: number;
         /** #1097 content store: total acp_retrieve calls issued this session. */
         retrieveCalls: number;
         /** #1097: acp_retrieve calls that resolved to stored content. */
@@ -562,6 +575,9 @@ export function resetSessionCompression(session: Session): void {
     // (measured against the pre-compaction wire) would read high and blind
     // the nudge fallback early; let the next prepare* re-measure.
     session.stats.localInputEstimate = 0;
+    // #1569: pre-compaction billing evidence describes a payload lineage that
+    // no longer exists — fall back to legacy sizing until a fresh report lands.
+    delete session.stats.lastUsageGradeTokens;
     session.stats.contextTokens = 0;
     session.metadata.nativeCompactionAt = Date.now();
     markDirty(session);
