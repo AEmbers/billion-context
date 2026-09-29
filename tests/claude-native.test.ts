@@ -840,16 +840,32 @@ test("installer refuses malformed settings.json instead of overwriting", () => {
 
 // — hook e2e (real dist script brings up a real proxy) ——————————————————
 
-function freePort(): Promise<number> {
-    return new Promise((resolve, reject) => {
-        const srv = net.createServer();
-        srv.listen(0, "127.0.0.1", () => {
-            const port = (srv.address() as net.AddressInfo).port;
-            srv.close(() => resolve(port));
+function freePort(exclude: readonly number[] = []): Promise<number> {
+    // bind(0) can hand out the same port twice (measured ~1.3e-4/pair on
+    // Linux) — re-roll when the pick collides with one we already rely on.
+    const pick = (): Promise<number> =>
+        new Promise((resolve, reject) => {
+            const srv = net.createServer();
+            srv.listen(0, "127.0.0.1", () => {
+                const port = (srv.address() as net.AddressInfo).port;
+                srv.close(() => resolve(port));
+            });
+            srv.on("error", reject);
         });
-        srv.on("error", reject);
-    });
+    return (async () => {
+        for (;;) {
+            const port = await pick();
+            if (!exclude.includes(port)) return port;
+        }
+    })();
 }
+
+test("freePort(exclude) never hands back an excluded port", async () => {
+    const portA = await freePort();
+    for (let i = 0; i < 25; i++) {
+        assert.notEqual(await freePort([portA]), portA);
+    }
+});
 
 function canConnect(port: number, timeoutMs = 1000): Promise<boolean> {
     return new Promise((resolve) => {
@@ -965,7 +981,7 @@ test("hook e2e: a healthy proxy on ANOTHER port is never attached (static URL)",
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-claude-hook-"));
     const xdg = { home, config: path.join(home, "cfg"), state: path.join(home, "state"), cache: path.join(home, "cache"), data: path.join(home, "data") };
     const portA = await freePort();
-    const portB = await freePort();
+    const portB = await freePort([portA]);
     const instFile = path.join(xdg.state, "billion-context", "proxy-origin");
     let pidA = 0;
     let pidB = 0;

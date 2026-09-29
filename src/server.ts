@@ -108,7 +108,7 @@ import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConver
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
-import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
+import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, isPluginFoldCallId, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
 import { evaluateChain, extractChainCarriers, stampOutbound, stripEmbeddedChainCarriers } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
@@ -2327,8 +2327,9 @@ async function handle(
         storeEffectiveSearchPlanAware(session, resolvedSearchPlanAware);
         // #546: restore a client-shrunk output budget BEFORE the side gate so a
         // tool-carrying main request re-enters the pipeline at full budget (see
-        // restoreOutputBudget for the starvation mechanism).
-        restoreOutputBudget(parsed, session, log);
+        // restoreOutputBudget for the starvation mechanism). #1665: the
+        // operator-declared model output limit floors the restore target.
+        restoreOutputBudget(parsed, session, log, resolveConfiguredOutputLimit(opts.routes, route?.rewrittenUrl, (parsed as { model?: string }).model));
         // #896: the per-scope output-headroom cap (compress.outputHeadroomMaxPct,
         // three-level merge; default 0.25, aligned with billion-context-pi).
         // Resolved once here so the side-request guard below AND the main-path
@@ -2767,14 +2768,16 @@ const ACP_TAG_MARK = "\x3cacp ";
 //
 // Per mode (see TECHNICAL-NOTES.md "Two compression modes"): in plugin/launcher mode the
 // tool call is ALWAYS in the re-sent history (the agent owns compression), so
-// this strips every acp_summary and the carrier is the tool call; in proxy mode
+// this strips every acp_summary and the carrier is the tool call — recognized
+// by the plugin_<ts> callId minted at the tool API (#1567: an id-match alone
+// was unsatisfiable there); in proxy mode
 // the tool call is usually absent (ephemeral server-side execution) or
 // nonexistent (preflight), so acp_summary survives as the carrier and
 // systemToUser later re-voices the survivors as USER messages (leaving them at
 // their anchors) for strict backends (#377).
 /** [#651] Strip oversized reasoning from closed compress turns (see
  *  src/reasoning-drop.ts) with an ops log line when anything was dropped. */
-function withReasoningDrop(
+export function withReasoningDrop(
     msgs: BiliMessage[],
     reasoning: CompressReasoningConfig | undefined,
     log: (level: string, msg: string) => void,
@@ -2784,6 +2787,16 @@ function withReasoningDrop(
     // [#684] strict-echo upstreams: reasoning must round-trip with tool_calls,
     // so #651's drop must not fire. Learned/static strictness both land here.
     if (strictEcho) return msgs;
+    // [#1658] Anthropic-wire twin of that gate, detected from the payload
+    // itself: a reasoning message carrying a signature is a SIGNED thinking
+    // block on the wire (the kernel stamps thinkingSignature from the wire
+    // signature; only the Anthropic codec does), and signed thinking must
+    // round-trip with its tool_use sibling or the upstream rejects the pair
+    // (#684 invariant). Dropping the pre-compress run would orphan it, so
+    // any signed thinking in view disables the drop for this request.
+    // Presence-based and per-request: Claude sessions without extended
+    // thinking keep #651's savings.
+    if (msgs.some((m) => m.contentType === "reasoning" && typeof m.thinkingSignature === "string" && m.thinkingSignature.length > 0)) return msgs;
     const out = dropCompressReasoning(msgs, reasoning);
     if (out.length !== msgs.length) {
         log("info", `[${sessionId}] compress-reasoning: dropped ${msgs.length - out.length} reasoning message(s) from closed compress turns (#651)`);
@@ -2823,10 +2836,12 @@ export function warnReasoningPairs(
  *  inbound assistant message WITH a thinking block now rides an outbound
  *  assistant message with none. Outbound-only asymmetry (some tool_use turns
  *  think, others don't) is ordinary Claude Code traffic: turns without
- *  extended thinking never carry a block, and #651's dropCompressReasoning
- *  creates the same shape by design — the old heuristic warned on every
- *  healthy multi-turn session. Turns match by stable tool_use id (the kernel
- *  codec round-trips it verbatim); benign asymmetry stays fully silent. */
+ *  extended thinking never carry a block. #651's dropCompressReasoning can no
+ *  longer create this shape either — since [#1658] the drop is gated out
+ *  whenever signed thinking is in view. Turns match by stable tool_use id
+ *  (the kernel codec round-trips it verbatim); benign asymmetry stays fully
+ *  silent. Any remaining fire means another path lost thinking (e.g. a fold
+ *  pruned the block while preserving the tool_use) — investigate. */
 export function warnAnthropicThinkingPairs(
     inboundMessages: unknown[],
     outboundMessages: unknown[],
@@ -2916,11 +2931,54 @@ export function warnResponsesReasoningPairs(
     }
 }
 
+/** #1567 hardening: a plugin-fold block's in-place anchor is redundant ONLY
+ *  while the client's own compress pair for that exact fold actually rides
+ *  the (post-prepare) history. The pair is recognized by tool name plus the
+ *  folded range quoted in its call args — flat {startId,endId} or
+ *  {content:[{startId,endId}]}, both accepted by the plugin tool API. This
+ *  restores the self-verifying carrier handoff a raw prefix strip lost: a
+ *  pruned or contract-violating client (pair absent) keeps the anchor, so an
+ *  active fold never ends up with zero carriers. It also covers kernel-side
+ *  pruning: hideConsumedCompressCalls (KEEP_LAST_ORPHANED) runs in the
+ *  pipeline BEFORE this strip, so an older pair already hidden from the wire
+ *  is absent here and its anchor correctly survives. Unparseable args count
+ *  as no match (anchor kept — fail-safe direction). Blocks predating range
+ *  recording (no startRef/endRef) degrade to "any compress call present",
+ *  the pre-hardening prefix-strip behavior. */
+function inboundCompressPairPresent(messages: BiliMessage[], b: { startRef?: string; endRef?: string }): boolean {
+    const loose = !b.startRef || !b.endRef;
+    for (const m of messages) {
+        if (m.contentType !== "tool-call" || m.toolName !== COMPRESS_TOOL_NAME) continue;
+        if (loose) return true;
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(m.text ?? "");
+        } catch {
+            continue;
+        }
+        const obj = parsed as { startId?: string; endId?: string; content?: unknown };
+        const ranges: Array<{ startId?: string; endId?: string }> = Array.isArray(obj?.content) ? (obj.content as Array<{ startId?: string; endId?: string }>) : [obj];
+        for (const r of ranges) {
+            if (r?.startId === b.startRef && r?.endId === b.endRef) return true;
+        }
+    }
+    return false;
+}
+
 export function stripKernelSummaries(messages: BiliMessage[], state: CompressionState): BiliMessage[] {
     const carried = new Set<string>();
     for (const b of state.blocks) {
         if (!b.active || !b.compressCallId) continue;
-        if (messages.some((m) => m.contentType === "tool-call" && m.toolCallId === b.compressCallId)) {
+        // #1567: plugin tool API folds are minted a synthetic plugin_<ts> callId
+        // the client can never echo, so the plain id match is unsatisfiable for
+        // them — yet the client's own re-sent compress pair IS their carrier by
+        // contract, making the in-place anchor redundant. Strip it, but only
+        // while that pair actually rides the (post-prepare) history
+        // (inboundCompressPairPresent): a pruned or contract-violating client
+        // must never lose the summary outright (zero carriers).
+        // Preflight blocks (no compressCallId) keep skipping above: no tool
+        // call exists for them, so their anchor is the only carrier.
+        if (isPluginFoldCallId(b.compressCallId) ? inboundCompressPairPresent(messages, b) : messages.some((m) => m.contentType === "tool-call" && m.toolCallId === b.compressCallId)) {
             carried.add(`acp_summary_${b.blockId}`);
         }
     }
@@ -3926,7 +3984,42 @@ async function prepareResponses(
     const renderTags: "text-only" | "none" = process.env.ACP_RENDER_NONE || isCompactionTrigger ? "none" : "text-only";
 
     try {
+        // [#1638] Plugin mode: position-preserve mid-history system/developer
+        // items. Clients like OMP append custom_message-derived developer
+        // notifications mid-history and re-send them every turn; the kernel
+        // hoists system/developer content from ANY position into
+        // projection.systemParts, so the merged developer block injected at
+        // the front of the rebuilt input churns every turn and breaks the
+        // upstream prefix cache (sawtooth down to the instructions-only
+        // residual). Marking the non-head items with an unknown type just for
+        // the duration of responsesToCore keeps them out of systemParts and
+        // puts them in the projection layout as coreId-less slots, which
+        // patchResponsesInput re-emits verbatim in their original position —
+        // the position-preserved semantics the openai-chat wire already has
+        // (head-only hoist, kernel src/wire/openai.ts). Proxy mode (native
+        // codex) keeps the hoist-and-anchor behavior (#1085).
+        const inplaceSysDev: { item: { type?: string; role?: unknown }; type: string | undefined }[] = [];
+        if (pluginMode && Array.isArray(parsed.input)) {
+            let head = true;
+            for (const rawItem of parsed.input) {
+                const item = rawItem as { type?: string; role?: unknown };
+                const isSysDevMsg = (item.type === undefined || item.type === "message") &&
+                    (item.role === "system" || item.role === "developer");
+                if (isSysDevMsg) {
+                    if (head) continue;
+                    inplaceSysDev.push({ item, type: item.type });
+                    item.type = "__bili_inplace_sysdev";
+                    continue;
+                }
+                if (item.type === "additional_tools" || item.type === "mcp_list_tools") continue;
+                head = false;
+            }
+        }
         const projection = responsesToCore(parsed);
+        for (const { item, type } of inplaceSysDev) {
+            if (type === undefined) delete item.type;
+            else item.type = type;
+        }
         responsesProjection = projection;
         // Compaction-trigger requests are the compression mechanism itself —
         // their payload shape must not gain anchor state or note items.
@@ -4002,6 +4095,7 @@ async function prepareResponses(
             if (absorbActive) devParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
             const devContent = devParts.join("\n\n---\n\n");
             responsesDevContent = devContent;
+            if (forgedSummaries.length > 0) log("debug", `[${sessionId}] [inject] ${forgedSummaries.length} captured summary block(s) re-injected into developer message`);
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
             if (!process.env.ACP_NO_INJECT_TOOL && injectTools) {
                 const respExtra = [...(absorbActive ? [absorbTools.responses] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
@@ -4012,6 +4106,7 @@ async function prepareResponses(
         } else if (projection.systemParts.length > 0 || forgedSummaries.length > 0) {
             const devContent = [...projection.systemParts, ...forgedSummaries].join("\n\n---\n\n");
             responsesDevContent = devContent;
+            if (forgedSummaries.length > 0) log("debug", `[${sessionId}] [inject] ${forgedSummaries.length} captured summary block(s) re-injected into developer message`);
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
         }
         if (sysNotes.length > 0) {
@@ -4039,6 +4134,7 @@ async function prepareResponses(
                         : rebuiltInput;
                     inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) });
                     rebuiltInput = inputItems;
+                    log("debug", `[${sessionId}] [inject] ephemeral nudge appended as trailing user turn (${rendered.text.length} chars)`);
                 }
             } catch {
             }
@@ -4054,6 +4150,7 @@ async function prepareResponses(
                 : rebuiltInput;
             inputItems.push({ type: "message", role: "user", content: imgNote });
             rebuiltInput = inputItems;
+            log("debug", `[${sessionId}] [inject] image-full restore note appended as trailing user turn (${imgNote.length} chars)`);
         }
         transformOk = true;
     } catch (err) {
@@ -5105,7 +5202,10 @@ async function forward(
     if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainContentDetection !== false) {
         try {
             const stamped = stampOutbound(JSON.parse(wireBody), prepared.protocol, instanceId);
-            if (stamped !== null) wireBody = JSON.stringify(stamped);
+            if (stamped !== null) {
+                wireBody = JSON.stringify(stamped);
+                log("debug", `[${prepared.session.id}] [stamp] outbound ${prepared.protocol} request carries checkpoint carrier`);
+            }
         } catch (err) {
             log("debug", `[${prepared.session.id}] [chain] outbound stamping failed (${String(err)}); forwarding unstamped`);
         }
