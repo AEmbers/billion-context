@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync }from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { defaultConfig } from "acp-kernel";
@@ -11,6 +11,7 @@ import type { ProxyOptions } from "../src/config.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 import { classifyIp, checkTunnelDestination, tunnelAllowlistFromEnv, parseIpLiteral, normalizeIpLiteral, type ResolveHost } from "../src/tunnel-guard.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 /** #409: the /bili/<absolute-url> tunnel must not reach the proxy's own
  *  management plane, link-local metadata, or (for remote clients) any
@@ -230,7 +231,7 @@ test("integration: tunnel cannot reach the proxy's own management plane (#409 Po
         process.env.BILI_CONFIG_FILE = prevConfig;
         proxy.closeAllConnections?.();
         await close(proxy);
-        try { rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
+        try { rmrf(root); } catch { /* best-effort */ }
     }
 });
 
@@ -291,6 +292,6 @@ test("integration: metadata destination never contacted (403 before any socket);
         await close(proxy);
         echo.closeAllConnections?.();
         await close(echo);
-        try { rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
+        try { rmrf(root); } catch { /* best-effort */ }
     }
 });

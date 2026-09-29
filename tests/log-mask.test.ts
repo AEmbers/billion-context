@@ -25,6 +25,7 @@ import {
     maskUrlsInText,
     setMaskHostsEnabled,
 } from "../src/log-mask.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 /** #255 Part B: logs (bili.log + launcher tmp log) must carry no sensitive
  *  info — credential header values are masked, and non-public API endpoints
@@ -262,7 +263,7 @@ test("proxy debug logs: no credentials, no non-public host in ANY log line (#255
         else process.env.ACP_DUMP_REQ = prev.dumpReq;
         await close(proxy!);
         await close(upstream);
-        fs.rmSync(tmpRoot, { recursive: true, force: true });
+        rmrf(tmpRoot);
     }
 });
 
@@ -314,7 +315,7 @@ test("proxy error log: connection failure to non-public upstream leaks nothing (
         if (prev.xdgState === undefined) delete process.env.XDG_STATE_HOME;
         else process.env.XDG_STATE_HOME = prev.xdgState;
         await close(proxy!);
-        fs.rmSync(tmpRoot, { recursive: true, force: true });
+        rmrf(tmpRoot);
     }
 });
 
@@ -378,7 +379,7 @@ test("mitm CONNECT tunnel failure: err.message host scrubbed from log (#255)", a
         if (prev.dataHome === undefined) delete process.env.XDG_DATA_HOME;
         else process.env.XDG_DATA_HOME = prev.dataHome;
         await close(proxy!);
-        fs.rmSync(tmpRoot, { recursive: true, force: true });
+        rmrf(tmpRoot);
     }
 });
 
@@ -438,6 +439,6 @@ test("ws upgrade rejection: host header scrubbed from log (#255)", async () => {
         if (prev.xdgState === undefined) delete process.env.XDG_STATE_HOME;
         else process.env.XDG_STATE_HOME = prev.xdgState;
         await close(proxy!);
-        fs.rmSync(tmpRoot, { recursive: true, force: true });
+        rmrf(tmpRoot);
     }
 });

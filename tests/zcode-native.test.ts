@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync }from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -16,6 +16,7 @@ import {
     unrouteZcode,
 } from "../src/zcode/native.ts";
 import { detectCurrentZcodeOrigin, zcodeStoreCandidates } from "../src/zcode/json-edit.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 // #1145: the per-session bootstrap lifecycle — plan decision table, health
 // probe, routing with #1002 snapshot discipline, stamp, unroute, restore.
@@ -111,7 +112,7 @@ test("routeZcodeConfig wraps the store and snapshots pre-bili state once", async
         assert.match(readFileSync(rerouted.file, "utf8"), /http:\/\/127\.0\.0\.1:28787\/bili\//);
         assert.equal(readFileSync(`${rerouted.file}.bili-bak`, "utf8"), original);
     } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -130,7 +131,7 @@ test("routeZcodeConfig re-snapshots user edits made while native mode is active"
         assert.deepEqual(restored, { restored: true });
         assert.equal(readFileSync(file, "utf8"), userEdited);
     } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -145,7 +146,7 @@ test("routeZcodeConfig reports why it cannot route instead of guessing", async (
         assert.equal(await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: empty, log: (m) => logs.push(m) }), undefined);
         assert.match(logs[0], /nothing to route/);
     } finally {
-        rmSync(empty, { recursive: true, force: true });
+        rmrf(empty);
     }
     await assert.rejects(routeZcodeConfig({ origin: "http://127.0.0.1", dataDir: dataDir(), log: () => {} }), /cannot derive a port/);
 });
@@ -159,7 +160,7 @@ test("activateZcodePluginMode stamps the header into the routed entries", async 
         const parsed = JSON.parse(readFileSync(applied.file, "utf8")) as { provider: Record<string, { options: { headers?: Record<string, string> } }> };
         assert.equal(parsed.provider["builtin:bigmodel-coding-plan"].options.headers?.["x-bili-plugin"], "zcode");
     } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -174,7 +175,7 @@ test("unrouteZcode strips wrappers in place and drops snapshots", async () => {
         assert.equal(existsSync(`${file}.bili-bak`), false);
         assert.equal(existsSync(`${file}.bili-last`), false);
     } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -193,7 +194,7 @@ test("bootstrapZcodeNative honors the off plan without touching the proxy", asyn
         assert.deepEqual(out, { mode: "off" });
         assert.equal(called, false);
     } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -209,7 +210,7 @@ test("bootstrapZcodeNative attaches to a healthy proxy and routes", async () => 
             assert.equal(out.routed.origin, origin);
         });
     } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -222,7 +223,7 @@ test("bootstrapZcodeNative fails closed on an unhealthy attach target", async ()
             /not healthy/,
         );
     } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -243,7 +244,7 @@ test("bootstrapZcodeNative spawns through the injected ensureProxy seam", async 
             assert.equal(out.routed.origin, origin);
         });
     } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -261,7 +262,7 @@ test("bootstrap honors upstream env relocation: ZCODE_DATA_BASE_DIR is a base di
         assert.ok(restoreZcodeBackup({ env: { ZCODE_DATA_BASE_DIR: base }, log: () => {} }).restored);
         assert.doesNotMatch(readFileSync(file, "utf8"), /\/bili\//);
     } finally {
-        rmSync(base, { recursive: true, force: true });
+        rmrf(base);
     }
 });
 
@@ -356,8 +357,8 @@ test("bootstrap honors ZCODE_PERSONAL_PROVIDER_CONFIG_FILE overrides (#1151)", a
         assert.equal(readFileSync(file, "utf8"), original);
         assert.doesNotMatch(readFileSync(zcodeStoreCandidates(dir, "legacy", {})[0], "utf8"), /\/bili\//);
     } finally {
-        rmSync(dir, { recursive: true, force: true });
-        rmSync(alt, { recursive: true, force: true });
+        rmrf(dir);
+        rmrf(alt);
     }
 });
 

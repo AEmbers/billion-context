@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync }from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -10,6 +10,7 @@ import { BILI_ACP_READONLY_TOOLS_RESPONSES, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_T
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
 import { _resetSessionsForTest, getSession, type Session } from "../src/session.ts";
 import { executeSearchContext, executeSearchContextTarget } from "../src/decompress-shared.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 function makeSession(id: string): Session {
     return {
@@ -211,6 +212,6 @@ test("#841 cold-loaded historical session: read-only, file untouched, no save sc
     } finally {
         _setStoreForTest(new SessionStore({ enabled: false }));
         _resetSessionsForTest();
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });

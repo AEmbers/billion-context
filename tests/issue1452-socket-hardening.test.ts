@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import { once } from "node:events";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync }from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { defaultConfig } from "acp-kernel";
@@ -13,6 +13,7 @@ import { SessionStore, _setStoreForTest } from "../src/persist.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 import { streamStallMs, _liveUpstreamTimersForTest } from "../src/fetch-util.ts";
 import { setLogCapture } from "../src/logger.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 function close(server: http.Server | net.Server): Promise<void> {
     return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
@@ -74,7 +75,7 @@ async function startProxy(upstream: http.Server | net.Server, debug: boolean): P
         stop: async () => { await close(proxy); },
         cleanup: () => {
             if (previous === undefined) delete process.env.BILI_CONFIG_FILE; else process.env.BILI_CONFIG_FILE = previous;
-            rmSync(root, { recursive: true, force: true });
+            rmrf(root);
         },
     };
 }

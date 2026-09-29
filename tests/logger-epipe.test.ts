@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isStreamWriteError } from "../src/logger.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -92,7 +93,7 @@ test("closed stderr pipe: no uncaughtException storm, file-only logging, one war
     const warns = lines.filter((l) => l.includes("[warn]"));
 
     try { child.kill(); } catch { /* already exited */ }
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmrf(dir);
 
     assert.equal(code, 0, `child must exit cleanly, got ${code}; stderr: ${earlyErr.slice(0, 500)}`);
     assert.match(out, /FIRED 0/, "the uncaughtException handler must never fire");

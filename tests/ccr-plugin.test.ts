@@ -14,8 +14,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync }from "node:fs";
 import path from "node:path";
+import { rmrf } from "./tmp-rm.ts";
 
 process.env.NODE_ENV = "test";
 process.env.BILI_PERSIST = "0";
@@ -458,7 +459,7 @@ test("#1345 load-time diagnostic: one warn per divergent field at config load", 
     } finally {
         setLogCapture(null);
         if (prevCfg === undefined) delete process.env.BILI_CONFIG_FILE; else process.env.BILI_CONFIG_FILE = prevCfg;
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
