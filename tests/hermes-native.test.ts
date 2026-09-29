@@ -130,7 +130,11 @@ describe("installer lane (bili plugin install hermes)", () => {
         const restore = setHermesEnv(home, emptyBin);
         try {
             const msg = pluginInstall("hermes");
-            assert.match(msg, /the hermes CLI was not found on PATH — enable it manually: hermes plugins enable billion-context/);
+            // The exact head differs by platform: a POSIX ENOENT prints "the
+            // hermes CLI was not found on PATH …", while a Windows shell probe
+            // fails with a localized cmd error and prints "enabling via the
+            // hermes CLI failed (…) …". Both end in the same manual instruction.
+            assert.match(msg, /enable it manually: hermes plugins enable billion-context/);
             assert.equal(hermesStatus(), "installed");
         } finally {
             restore();

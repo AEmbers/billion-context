@@ -11,8 +11,15 @@ import { globalVerdict, laneVerdict, renderDoctorReport, runDoctor, type DoctorL
 import { PLUGIN_AGENTS, inspectLanePresence } from "../src/plugin-install.ts";
 
 function withEnv(vars: Record<string, string | undefined>, fn: () => void | Promise<void>): Promise<void> | void {
+    const effective: Record<string, string | undefined> = { ...vars };
+    // Windows os.homedir() resolves through USERPROFILE, not HOME — mirror the
+    // sandboxed HOME there or real-machine config (~/.dsh, ~/.zcode, …) leaks
+    // into tests that believe they are running in an empty home.
+    if (process.platform === "win32" && effective.HOME !== undefined && effective.USERPROFILE === undefined) {
+        effective.USERPROFILE = effective.HOME;
+    }
     const saved: Record<string, string | undefined> = {};
-    for (const [k, v] of Object.entries(vars)) {
+    for (const [k, v] of Object.entries(effective)) {
         saved[k] = process.env[k];
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;

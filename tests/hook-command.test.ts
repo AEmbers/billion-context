@@ -133,6 +133,12 @@ test("the emitted command really runs: bare token + spaced argument, through eve
         assert.ok(!command.includes("\\"), command);
         const ran: string[] = [];
         for (const shell of platformShells()) {
+            // `& "spaced head"` is the PowerShell call-operator form. cmd never
+            // sees it in production (hooks resolve a bare `node`; see the design
+            // note in plugin-install.ts) and cannot parse `&` — so don't demand
+            // cmd compatibility for it. The dedicated PowerShell test below
+            // covers that form where it is actually used.
+            if (shell.name === "cmd" && command.startsWith("& ")) continue;
             const r = runInShell(shell, command);
             if (r.missing) continue;
             assert.equal(r.status, 0, `${shell.name} exited ${r.status} for: ${command}\n${r.out}`);
