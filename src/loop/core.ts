@@ -6,7 +6,7 @@ import {
 } from "acp-kernel";
 import { handleAcpStatus } from "../acp-status.js";
 import { handleAcpCache, noteForwardedBody, settleUsageReport } from "../cache-ledger.js";
-import { lastCompressSuffix, withSessionLock, type Session } from "../session.js";
+import { diagnoseSuccessWithoutUsage, lastCompressSuffix, withSessionLock, type Session } from "../session.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import {
     parseCompressInput,
@@ -675,6 +675,8 @@ export async function* runCompressLoop(
                 usage.cachedTokens !== undefined
             ) {
                 recordUsage(ctx, usage, round);
+            } else {
+                diagnoseSuccessWithoutUsage(ctx.session, "acp-loop");
             }
             let resolvedText = assistantText;
             let allCalls = calls;

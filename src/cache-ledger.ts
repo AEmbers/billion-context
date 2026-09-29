@@ -11,7 +11,7 @@ import {
     type PriceProfile,
 } from "acp-kernel";
 import { log as loggerLog } from "./logger.js";
-import type { Session } from "./session.js";
+import { reanchorNudgeOnUsageDrop, type Session } from "./session.js";
 
 // Render window for handleAcpCache's detail:"full" text view (#1489). The
 // ledger itself is unbounded — this only bounds how many lines the text
@@ -503,6 +503,9 @@ export function settleUsageReport(
         session.stats.lastInputTokensSource = "usage";
         // #1110: a real usage report retires the one-shot overflow arm.
         delete session.stats.overflowArmTokens;
+        // #1595: a real report landing far below a stale-high nudge reference
+        // retires that reference too (one call covers all three lanes).
+        reanchorNudgeOnUsageDrop(session);
     }
     if (s.reportedCached !== null && s.total > 0) {
         session.stats.cachedTokens += s.reportedCached;
