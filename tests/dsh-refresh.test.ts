@@ -9,6 +9,7 @@ import {
     isRegistryDepSpec,
     planDshSpawn,
     refreshDshProfileBundles,
+    runDshPlugin,
     _setDshRunnersForTest,
     type DshPlan,
 } from "../src/dsh-channel.ts";
@@ -120,11 +121,32 @@ test("refreshDshProfileBundles: one profile's failure does not stop the rest and
         _setDshRunnersForTest({ async: recordingAsyncRunner(calls, new Set(["a"])) });
         await assert.doesNotReject(refreshDshProfileBundles("0.1.121", (l, m) => logs.push(`${l}: ${m}`), { ...process.env, DSH_HOME: home }));
         assert.deepEqual(calls, ["plugin --profile b add billion-context@0.1.121"]);
-        assert.ok(logs.some((l) => l.startsWith("warn") && l.includes("dsh profile a") && l.includes("failed")));
+        const failLog = logs.find((l) => l.startsWith("warn") && l.includes("dsh profile a"));
+        assert.ok(failLog, "expected a warn log for the failed profile");
+        // #1675: error text renders the executed argv — no duplicated "plugin" token
+        assert.ok(failLog.endsWith(`dsh plugin --profile a add billion-context@0.1.121 failed: boom`), failLog);
+        assert.ok(!failLog.includes("plugin plugin"), failLog);
         assert.ok(logs.some((l) => l.includes("refreshed 1 dsh profile bundle(s) to 0.1.121")));
     } finally {
         _setDshRunnersForTest(undefined);
         rmrf(home);
+    }
+});
+
+test("runDshPlugin: failure message renders the executed argv, no duplicated 'plugin' (#1675)", () => {
+    try {
+        _setDshRunnersForTest({ sync: () => { throw Object.assign(new Error("exit 1"), { status: 1, stderr: "pnpm not found on PATH" }); } });
+        assert.throws(
+            () => runDshPlugin(["plugin", "--profile", "web", "add", "billion-context@0.1.171"]),
+            (err: unknown) => {
+                const msg = (err as Error).message;
+                assert.equal(msg, "dsh plugin --profile web add billion-context@0.1.171 failed: pnpm not found on PATH");
+                assert.ok(!msg.includes("plugin plugin"), msg);
+                return true;
+            },
+        );
+    } finally {
+        _setDshRunnersForTest(undefined);
     }
 });
 
