@@ -7,6 +7,36 @@ where, and the known limitations. If you just need "which command do I type",
 start from the [README](README.md) — this file is for when something doesn't
 behave and you want to know why.
 
+## Conversation-id routing and the id note (who sees what)
+
+ACP tools are routed by request identity, not by arguments — wire-lane hosts
+never need the model to be taught a conversation id. The one exception is the
+**unbound shared MCP shim**: a single `bili mcp` process serving a host that
+runs many conversations and provides no session signal. Only that topology
+receives the `[Your bili conversation id: pfa-…]` tail note (and the matching
+system pointer line); every other request stays free of both (#1614).
+
+| Topology | Id note + pointer? | How tool calls route |
+|---|---|---|
+| Wire-only hosts — `/bili/` URL prefix, MITM launchers, gemini-family base-URL routes | never | request identity: the header/body signals table under [How sessions work](README.md#how-sessions-work) |
+| Bound MCP shim — Claude Code plugin mode (`CLAUDE_CODE_SESSION_ID`), headless runs (`BILI_CONVERSATION_ID`), clients that send `_meta.ui.sessionId` at initialize | never | the binding, registered at initialize |
+| Unbound shared shim — generic MCP hosts (Cursor, mcp-inspector, custom scripts) and any client sharing one MCP process across conversations without session meta (kimi/zcode subagent lanes, OpenCode's opt-in `--with-mcp` face) | yes, from the shim's one-time announce on | per-call `conversation_id` argument the model copies from the note (#760) |
+
+Shared-lane behavior details:
+
+- The announce is `{"conversationId": null, "unbound": true}` at initialize
+  and lights a proxy-process-global flag. Granularity caveat: while any
+  unbound shim is connected, **every** session through that proxy carries the
+  note (~50 uncached tail tokens per request) — the proxy cannot know which
+  session's model will call the shared shim.
+- Absent-id tool calls are decided by the proxy: exactly one active session →
+  auto-routed there (logged); zero active or several active → a 400 teaching
+  error naming the per-call argument. Compress is destructive — the proxy
+  never guesses between sessions.
+- Self-healing: the flag is in-memory. After a proxy restart the first
+  unbound announce (or first absent-id call) re-arms it; per-call ids keep
+  working regardless.
+
 ---
 
 ## dsh (deepseek-harness)

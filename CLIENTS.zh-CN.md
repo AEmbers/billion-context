@@ -2,6 +2,22 @@
 
 [README 快速上手](README.zh-CN.md#快速上手)里一行带不过来的客户端细节都在这里:各模式(启动器 / `/bili/` URL 前缀 / 原生插件)如何把流量接进代理、往哪儿写了什么、已知局限有哪些。只想知道「该敲哪条命令」的话,从 [README](README.zh-CN.md) 开始 —— 这个文件是给「行为不对劲、想知道为什么」的场景准备的。
 
+## 会话 id 路由与 id note(谁会看到)
+
+ACP 工具按请求身份路由、不靠参数 —— wire 宿主永远不需要教模型一个会话 id。唯一例外是**无绑定共享 MCP shim**:一个 `bili mcp` 进程服务一个多会话、且不给会话信号的宿主。只有这种拓扑会收到 `[Your bili conversation id: pfa-…]` 尾部 note(和配套的 system pointer 行),其它所有请求两者都不带(#1614)。
+
+| 拓扑 | 有 id note + pointer? | 工具调用怎么路由 |
+|---|---|---|
+| 纯 wire 宿主 —— `/bili/` URL 前缀、MITM 启动器、gemini 系 base-URL 路由 | 从不 | 请求身份:[会话机制](README.zh-CN.md#会话机制)里的头/体信号表 |
+| 有绑定 MCP shim —— Claude Code 插件模式(`CLAUDE_CODE_SESSION_ID`)、headless(`BILI_CONVERSATION_ID`)、initialize 时发 `_meta.ui.sessionId` 的客户端 | 从不 | initialize 时注册的绑定 |
+| 无绑定共享 shim —— 通用 MCP 宿主(Cursor、mcp-inspector、自写脚本)及任何跨会话共享一个 MCP 进程、无会话信号的客户端(kimi/zcode 子代理泳道、OpenCode 可选的 `--with-mcp` 面) | 有 —— 自 shim 一次性上报起 | 模型从 note 抄写的逐调用 `conversation_id` 参数(#760) |
+
+共享泳道行为细则:
+
+- 上报内容是 initialize 时的 `{"conversationId": null, "unbound": true}`,点亮一个 proxy 进程级 flag。粒度警示:只要有任一 unbound shim 在连,该 proxy 上的**所有**会话都带 note(每请求约 50 个未缓存尾部 token)—— 代理无法预知哪个会话的模型会去调共享 shim。
+- 缺 id 的工具调用由 proxy 裁决:恰好一个活跃会话 → 自动路由过去(并记日志);零个或多个活跃 → 400 教学错误,点名逐调用参数。compress 是破坏性操作 —— proxy 绝不在会话之间猜。
+- 自愈:flag 仅内存态。proxy 重启后第一个 unbound 上报(或第一个缺 id 调用)会重新点亮;逐调用 id 无论如何始终可用。
+
 ---
 
 
