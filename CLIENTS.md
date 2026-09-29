@@ -282,6 +282,36 @@ two small node scripts that do the work around the client:
   `BILLION_CONTEXT_PROXY` is set (attach mode owns the proxy) or
   `BILI_PROVIDER_REWRITES` is defined. Opt-out: `BILI_NATIVE_ZCODE=0`.
 
+## Codex (OpenAI Codex CLI)
+
+Codex is the one client a plugin install cannot make self-sufficient. The seam
+matrix explains why: claude has a `SessionStart` hook + managed settings block,
+zcode has a provider store whose `baseURL` can be rewritten — codex has neither.
+Its model traffic routes via environment variables only (`HTTPS_PROXY` /
+`SSL_CERT_FILE` — this is how `bili codex` works); the default
+ChatGPT-login provider has no config-file routing seam, and a managed
+`model_providers` block would force `env_key` API-key auth and **drop the
+subscription login**. An MCP server cannot inject env into its parent process,
+so the plugin can never route codex's own traffic. Three postures:
+
+| Posture | What you get |
+|---|---|
+| `bili codex` (launcher) | Full zero-config: a self-managed lane proxy (#1660 zone, sticky port) + cert-MITM env injected into codex — tools *and* compression |
+| `bili plugin install codex` + a running bili + self-exported `HTTPS_PROXY` | Tools + compression for power users who manage their own env |
+| `bili plugin install codex` alone | The four tools appear in codex but no conversation is proxied, so there is nothing for them to act on; `tools/list` fails with -32003 (`bili proxy unreachable … — start bili or set BILI_MCP_PROXY`) when nothing is reachable |
+
+The install writes a single `[mcp_servers.bili]` block into `~/.codex/config.toml`
+(command = node, args = dist/mcp.js). #1660 removed the install-time origin bake
+(#403: a baked URL went stale after drift/reboot and left the tools pointing at
+a dead port); the shell resolves the proxy at session start — env
+`BILI_MCP_PROXY` > the live-instance record (any lane's proxy, or a
+`bili start` daemon) > the 8787 user-zone default — so a drifted or rebooted
+proxy never strands a dead URL, and the shell simply attaches to whatever is
+alive. Session binding is headless: the launcher passes
+`BILI_CONVERSATION_ID` at spawn time, and the plugin shell binds the next NEW
+session otherwise; per-call `conversation_id` overrides work as everywhere
+(#760).
+
 ## Gemini family (Gemini CLI / iFlow CLI / Qwen Code)
 
 Three launchers for the gemini-cli architecture family (#1043 tier 1). Two of
