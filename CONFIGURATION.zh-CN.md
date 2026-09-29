@@ -155,6 +155,31 @@
 - **状态：** ACTIVE
 - **说明：** 预检尺寸门与输出钳制对内联（base64）图片的计费方式（#488/#496/#767）。`"bytes"` 按 `base64 长度 / 4` 计 token —— 保守，且对字节计费 relay 正确。`"pixels"` 只解析图片头（PNG/JPEG/WebP/GIF/BMP）、不解码完整图像，按第一方像素 tile 计费（OpenAI high-detail 模型：512px tile、短边放大到 768px、长边封顶 2048px → 每图 765–2805 token；无法解析的格式回退为固定 16384）。远程（`https://`）图片在两种模式下都固定计 4096。按 provider 的 `providers.<url>.imageBilling` 优先于本全局项，而 `BILI_IMAGE_BILLING` 环境变量优先于两者（实时读取，无需重启）。
 
+### `zcode`
+
+- **类型：** object
+- **默认值：** `{ "route": "all" }`
+- **状态：** ACTIVE
+- **说明：** ZCode **原生插件模式**（`bili plugin install zcode`，#1145/#1622）的路由范围。每会话 bootstrap 改写 provider store 让模型流量走本地代理；本节控制**哪些**条目被包装：
+
+  ```json
+  {
+    "zcode": {
+      "route": "all",
+      "direct": ["account:work-relay", "internal.example.com"],
+      "fixedPort": 48787,
+      "assumeSigningFixed": false
+    }
+  }
+  ```
+
+- **`route`** — `"all"`（默认）：每个有可用 http(s) `baseURL` 的 provider 条目都吃压缩 —— 与进程内原生（pi/dsh）语义一致。`"plans"`：#1622 之前的行为（只包 bigmodel coding-plan 账号）。`"none"`：整体退出（bootstrap 不碰 store；旧会话留下的包装仍会被剥掉）。
+- **`direct`** — 豁免清单：必须保持直连的 provider ID（精确匹配）或 URL 子串（域名/路径）。http 环回 `baseURL` 无条件豁免（#809 —— 环回目标永不二次代理）。
+- **`fixedPort`** — 钉死拉起代理的端口（1–65535）。写入共享 store 的包装因此跨会话重启存活，即使没有交接 —— 每个会话都会拉起同一端口。默认：临时端口。
+- **`assumeSigningFixed`** — 等你的 ZCode 构建修复 ClientRequestSigningV4 后设为 `true`；#1621 逐条跳过（v3.14+ personal store 上的 coding-plan 账号）关闭，这些账号恢复路由。
+
+  被跳过的条目一定带原因写日志（`[bili-zcode] skipped N entries: …`）—— 不会静默丢弃。环境变量覆盖：`BILI_ZCODE_ROUTE`、`BILI_ZCODE_PORT`、`BILI_ZCODE_SIGNING_FIXED`。#1621 客户端签名墙本身见 [CLIENTS.zh-CN.md](CLIENTS.zh-CN.md)（ZCode → 已知局限）。
+
 ---
 
 ## Providers
@@ -724,6 +749,9 @@
 | `BILI_LAUNCHER_PLUGIN` | 设 `0` 关闭 launcher 为 claude/codex 注入 bili MCP 服务器（退回纯 wire 模式）；设 `1` 强制插件模式。默认注入——但 codex 上游为本地/私网地址时自动退回 wire 模式（sglang/vllm/ollama 不解析 codex 的 namespace 工具类型）。见[启动器参考](#启动器参考)。 |
 | `BILI_LAUNCHER_DIRECT` | 设 `1` 启用 launcher 直连 URL 路由（放弃 MITM/CA 信任）。见[启动器参考](#启动器参考)。 |
 | `BILI_NATIVE_ATTACH_EXTERNAL` | 附着门禁逃生舱（#1335）。原生 hook 只附着于报告了 armed 会话生命周期看门狗（`/__bili/health` 里 `watchdog.armed == true`）的代理——手工 `bili start` 守护进程没有生命周期属主（拒绝 watcher 注册、不随会话退出、常是旧版本），所以默认每会话自拉起临时代理而不附着它。当你刻意运行常驻守护进程给原生 hook 共用时设 `1`/`true`：任何 code/lane 兼容的监听者重新可附着，无论看门狗状态如何（包括根本不报 `watchdog` 字段的 pre-#1330 构建）——此时守护进程的寿命与版本由你自己负责。配置文件里 `"native": { "attachExternal": true }` 等效；环境变量优先（`0`/`false` 即使文件开着也关门禁）。默认关闭。完整机制(复用规则、监听者表、逃生舱)见 [TECHNICAL-NOTES.zh-CN.md](TECHNICAL-NOTES.zh-CN.md#代理复用与附着门禁122513351232)。 |
+| `BILI_ZCODE_ROUTE` | zcode 原生插件路由范围（#1622）：`all`（默认 —— 每个有可用 http(s) baseURL 的 provider 条目都吃压缩，pi/dsh 对齐）、`plans`（#1622 前的 bigmodel coding-plan 白名单）、`none`（整体退出，bootstrap 不碰 store）。文件等效 `"zcode": { "route": … }`。见 [`zcode`](#zcode)。 |
+| `BILI_ZCODE_PORT` | 钉死 zcode 原生通道拉起的代理端口（1–65535）；共享 store 里的包装因此跨会话重启存活，无需交接。文件等效 `"zcode": { "fixedPort": … }`。 |
+| `BILI_ZCODE_SIGNING_FIXED` | `1`/`true` = 假设你的 ZCode 构建已修复 ClientRequestSigningV4（#1621）：v3.14+ personal store 上 coding-plan 账号的逐条跳过关闭，恢复路由。文件等效 `"zcode": { "assumeSigningFixed": true }`。 |
 | `BILI_CLAUDE_UPSTREAM` | claude 直连模式：当 `ANTHROPIC_BASE_URL` 已指向某个 relay 时，用它指定你的 relay 端点（否则会被旁路）。 |
 | `BILI_CODEX_COMPACT` | codex 原生压缩处理。默认 `intercept`：安全门通过时（transform 成功 + 稳态用量 < 窗口 90% + 至少一个活跃压缩块）拦截 codex 的压缩请求，在本地伪造向 ACP 状态的交接——trigger 形态伪造 2 帧 SSE，endpoint 形态伪造 `{output}`——且不接触上游。伪造的 ACP 摘要经历史承载交接消息注入（缺席时 developer 消息兜底），保证 codex 截断历史后压缩内容仍可见。设为 `pass` 可退出，把 codex 的压缩请求转发给上游（原生压缩兜底）。任一安全门失败则原样透传。 |
 
@@ -856,7 +884,7 @@ export ANTHROPIC_BASE_URL="http://localhost:8787/bili/https://api.anthropic.com"
 
 > **Codex 例外：** Codex 暴露顶层 `openai_base_url` 配置字段，所以 ChatGPT 登录版**可以**用 `/bili/` 前缀（见上文）。Codex 不需要 MITM。
 
-> **ZCode 原生模式（#1145）：** ZCode 是这张表里唯一同时拥有**原生插件模式**的客户端 —— `bili plugin install zcode` 经 provider store（`~/.zcode/v2/config.json`，v3.14+ 为 `provider_config.json`；v3.14+ 构建上 ZCode 的客户端签名拒绝 http 回环 origin，原生模式在这些构建上自动退场为直连 —— 请用 GUI 证书 MITM 配置，#1621）路由模型流量，其余情况下完全不需要 GUI 代理/CA 设置。原生模式不碰 MITM 面：若两者并用，请保留 GUI 代理设置（以及 `"mitm://zcode.z.ai": { "passthrough": true }` 路由，#661）供登录流量使用。完整机制：[CLIENTS.zh-CN.md](CLIENTS.zh-CN.md)（ZCode）。
+> **ZCode 原生模式（#1145）：** ZCode 是这张表里唯一同时拥有**原生插件模式**的客户端 —— `bili plugin install zcode` 经 provider store（`~/.zcode/v2/config.json`，v3.14+ 为 `provider_config.json`；v3.14+ 构建上 ZCode 的客户端签名对 coding-plan 账号拒绝 http 回环 origin，这些账号带原因保持直连，其余 provider 照常路由 —— 这些账号上的压缩请用 GUI 证书 MITM 配置，#1621）路由模型流量，其余情况下完全不需要 GUI 代理/CA 设置。原生模式不碰 MITM 面：若两者并用，请保留 GUI 代理设置（以及 `"mitm://zcode.z.ai": { "passthrough": true }` 路由，#661）供登录流量使用。完整机制：[CLIENTS.zh-CN.md](CLIENTS.zh-CN.md)（ZCode）。
 
 MITM 只对一份**白名单**中的模型域名生效（`open.bigmodel.cn`、`api.anthropic.com`、`api.openai.com`、`chatgpt.com`），外加发现机制按 lane 自动播种的自带网关默认域名（如 `opencode.ai` —— opencode `auth login` 的内置 zen 网关，#1405）。其余 HTTPS 主机全部盲转发 —— billion-context 绝不解密非模型流量。
 

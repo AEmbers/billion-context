@@ -196,15 +196,14 @@ two small node scripts that do the work around the client:
   direct process; at startup it attaches to a healthy proxy
   (`BILLION_CONTEXT_PROXY`) or spawns its own on an ephemeral port, then
   rewrites the active provider store with idempotent JSON surgery under a
-  mkdir lockfile: the bigmodel coding-plan provider entries' `baseURL` becomes
-  `http://127.0.0.1:<port>/bili/<upstream>` (the builtin default upstream is
-  `https://open.bigmodel.cn/api/anthropic`; any custom baseURL you set is
+  mkdir lockfile: each routable provider entry's `baseURL` becomes
+  `http://127.0.0.1:<port>/bili/<upstream>` (any custom baseURL you set is
   preserved verbatim behind the wrapper). Both store generations are handled:
   legacy `~/.zcode/v2/config.json` (`provider.<id>.options.baseURL`) and the
   v3.14+ personal store `~/.zcode/v2/provider_config.json`
   (`config.providerConfigRules.providerRules[].config.api.baseUrl`) — when
-  both exist, the new store wins (on those v3.14+ builds native routing
-  degrades to off instead — see Known limitations). The original file is
+  both exist, the new store wins (see Routing scope for which entries on it
+  route and which are skipped). The original file is
   snapshotted to `<file>.bili-bak` once per user edit (the snapshot always
   reflects your last real state, never bili's own writes); every other key is
   byte-for-byte. Legacy-generation clients load provider config at startup —
@@ -217,6 +216,26 @@ two small node scripts that do the work around the client:
   against the live proxy manifest, the routed entries gain
   `headers["x-bili-plugin"] = "zcode"` — until then traffic rides wire mode.
   Tool calls bind via the per-call `conversation_id` argument (#760).
+- **Routing scope (#1622):** native mode wraps **every** provider entry with
+  a usable http(s) `baseURL` — the same "all providers ride compression"
+  semantics as the in-process natives (pi/dsh) — not just the bigmodel
+  coding-plan accounts. Entries that cannot be wrapped are skipped with a
+  logged reason instead of silently dropped:
+  - **client-signing accounts (#1621):** on v3.14+ personal stores the
+    coding-plan accounts stay direct (see Known limitations); every other
+    provider still routes.
+  - **loopback targets (#809):** an http loopback `baseURL` (localhost /
+    127.x.x.x / ::1) is never re-proxied — wrapping it would stack bili onto
+    itself or onto your own local relay.
+  - **`direct` exemptions:** `zcode.direct` in `billion-context.json` lists
+    provider IDs or URL substrings that must stay direct.
+  Scope is configurable: `zcode.route` = `"all"` (default) | `"plans"`
+  (the pre-#1622 whitelist behavior) | `"none"` (opt out entirely), env
+  override `BILI_ZCODE_ROUTE`. `zcode.fixedPort` / `BILI_ZCODE_PORT` pins the
+  spawned proxy's port so wrappers survive session restarts even without
+  handoff. `zcode.assumeSigningFixed` / `BILI_ZCODE_SIGNING_FIXED` flips the
+  #1621 skips off once a ZCode build ships the signing fix. See
+  CONFIGURATION.md (*zcode*) for the full schema.
 - **Watchdog & lifecycle:** the MCP child probes the proxy every 30 s. In
   attach mode it waits forever (it never touches a user-owned proxy); in spawn
   mode a dead proxy is respawned and the routing rewritten to the new origin.
@@ -251,8 +270,13 @@ two small node scripts that do the work around the client:
   handshake requires HTTPS." (#1621). The conflict is hardcoded on the ZCode
   side, so native mode detects the v3.14+ store generation and skips the
   rewrite entirely — it logs the reason and leaves traffic direct; use the GUI
-  cert-MITM setup for compression on these builds until ZCode ships a signing
-  fix. Pre-3.14 legacy-store clients are unaffected. Inert when
+  cert-MITM setup for compression on these accounts until ZCode ships a signing
+  fix; once it does, set `zcode.assumeSigningFixed` (or
+  `BILI_ZCODE_SIGNING_FIXED=1`) and they route again. Under the default
+  `route:"all"` only those accounts are skipped — every other provider on the
+  store keeps routing; the whole-store degrade (routing entirely off) now
+  only applies under `route:"plans"`, where the plan accounts ARE the signing
+  accounts. Pre-3.14 legacy-store clients are unaffected. Inert when
   `BILLION_CONTEXT_PROXY` is set (attach mode owns the proxy) or
   `BILI_PROVIDER_REWRITES` is defined. Opt-out: `BILI_NATIVE_ZCODE=0`.
 
