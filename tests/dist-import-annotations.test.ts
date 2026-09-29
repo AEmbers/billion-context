@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { findRelativeImportRefs, checkDistImportAnnotations } from "../scripts/check-dist-import-annotations.mjs";
-import { mkdtempSync, mkdirSync, writeFileSync }from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { rmrf } from "./tmp-rm.ts";

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync }from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { defaultConfig, ACP_TOOLS_OPENAI, ACP_TOOLS_ANTHROPIC, ACP_TOOLS_RESPONSES } from "acp-kernel";

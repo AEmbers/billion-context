@@ -14,7 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, writeFileSync }from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { rmrf } from "./tmp-rm.ts";
 

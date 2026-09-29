@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync }from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { SessionStore } from "../src/persist.ts";
 import { createStorageCodec, ENCRYPT_MAGIC, parseEncryptionKey } from "../src/encrypt.ts";

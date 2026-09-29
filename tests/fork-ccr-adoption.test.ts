@@ -7,7 +7,7 @@
 // fork unchanged.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync }from "node:fs";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {

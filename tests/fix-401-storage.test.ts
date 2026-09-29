@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import fsShared from "node:fs";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync }from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInitialState } from "acp-kernel";
 import { SessionStore } from "../src/persist.ts";

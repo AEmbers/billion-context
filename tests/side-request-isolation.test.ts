@@ -7,7 +7,7 @@ import { startServer, type ProxyOptions, isSideRequest, outputBudgetField, resto
 import { estimateRawBodyTokens } from "../src/preflight.ts";
 import { inspectContextOverflow } from "../src/util.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
-import { mkdtempSync }from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
