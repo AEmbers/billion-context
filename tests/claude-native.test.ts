@@ -817,6 +817,13 @@ function freePort(exclude: readonly number[] = []): Promise<number> {
     })();
 }
 
+test("freePort(exclude) never hands back an excluded port", async () => {
+    const portA = await freePort();
+    for (let i = 0; i < 25; i++) {
+        assert.notEqual(await freePort([portA]), portA);
+    }
+});
+
 function canConnect(port: number, timeoutMs = 1000): Promise<boolean> {
     return new Promise((resolve) => {
         const sock = net.connect({ port, host: "127.0.0.1" });
