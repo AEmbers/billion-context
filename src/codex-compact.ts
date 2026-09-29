@@ -67,6 +67,11 @@ export function extractBiliSummary(item: unknown): string | undefined {
     return text.length > 0 ? text : undefined;
 }
 
+/** User-role handoff prefix for a client-echoed compaction item (#1106/#1113).
+ *  Exported so the output-side echo guard derives its line head from this same
+ *  constant — guard and carrier share one identifier (#1635). */
+export const COMPACT_ECHO_PREFIX = "[bili] context summary after compaction:";
+
 // An echoed fc_bili_ compaction item is REPLACED (in place) by a plain user
 // message carrying the extracted summary — a history-borne handoff the kernel
 // can fold again and codex's retention keeps. Rare bounded duplication (a
@@ -91,7 +96,7 @@ export function replaceBiliCompactionItems<T>(input: T[]): { items: T[]; replace
         items.push({
             type: "message",
             role: "user",
-            content: [{ type: "input_text", text: `[bili] context summary after compaction:\n${summary}` }],
+            content: [{ type: "input_text", text: `${COMPACT_ECHO_PREFIX}\n${summary}` }],
         } as T);
         replaced++;
     }
@@ -150,7 +155,9 @@ export function buildTriggerForgeBody(
 // The kernel renders block summaries as system messages with this header
 // (acp-kernel SUMMARY_HEADER). Reuse the exact format so the model reads a
 // captured handoff summary the same way it reads a live kernel-rendered one.
-const FORGED_SUMMARY_HEADER = "[Compressed conversation section]";
+// Exported: the output-side echo guard derives its line head from this same
+// constant so guard and carrier share one identifier (#1635).
+export const FORGED_SUMMARY_HEADER = "[Compressed conversation section]";
 
 export function renderForgedSummary(block: Pick<CompressionBlock, "summary" | "topic">): string {
     const body = block.summary.trim();

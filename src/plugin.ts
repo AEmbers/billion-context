@@ -11,7 +11,7 @@ import { absorbEnabled, effectiveAbsorbConfig, isProxyToolFor } from "./absorb.j
 import { effectiveRulesEnabled, rulesEnabled } from "./rules-feature.js";
 import { executeProxyTool } from "./loop/core.js";
 import { normalizeSseLineEndings } from "./sse-util.js";
-import { composeStreamFilters, containsMarkerLineText, containsRenderTagText, containsToolCallXmlFragment, createMarkerLineFilter, createTagEchoFilter, mayStartMarkerLine, mayStartRenderTag, stripAcpTags, stripAnthropicText, stripOpenaiChatText, stripResponsesText, type TagEchoFilter } from "./loop/tag-echo-filter.js";
+import { composeStreamFilters, containsMarkerLineText, containsRenderTagText, containsToolCallXmlFragment, createBiliChainTagFilter, createInternalArtifactLineFilter, createMarkerLineFilter, createTagEchoFilter, mayStartMarkerLine, mayStartRenderTag, stripAcpTags, stripAnthropicText, stripOpenaiChatText, stripResponsesText, type TagEchoFilter } from "./loop/tag-echo-filter.js";
 import { log as loggerLog } from "./logger.js";
 import { ccrEnabled, ccrLoopConfig, contentStoreOf, retrieveToolName } from "./store.js";
 import { imageUsageSuffix } from "./image-compress.js";
@@ -1209,6 +1209,16 @@ export async function pipePluginChatWithStrip(
         loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
         log?.(`[marker-echo] stripped model-emitted ACP confirmation marker from plugin passthrough text`);
     };
+    const onChainDrop = (snippet: string) => {
+        sawStrippedEcho = true;
+        loggerLog("warn", `[bili-chain-echo] stripped model-emitted chain checkpoint tag (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+        log?.(`[bili-chain-echo] stripped model-emitted chain checkpoint tag from plugin passthrough text`);
+    };
+    const onArtifactDrop = (snippet: string) => {
+        sawStrippedEcho = true;
+        loggerLog("warn", `[artifact-echo] stripped model-emitted internal summary artifact line (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+        log?.(`[artifact-echo] stripped model-emitted internal summary artifact line from plugin passthrough text`);
+    };
     // One state machine per (field, block/choice index) — interleaved choices
     // or content blocks must not share partial-tag state. Tool-call arguments
     // never flow through a stream (#1039): they are forwarded verbatim.
@@ -1222,7 +1232,7 @@ export async function pipePluginChatWithStrip(
         const key = `${field}:${index}`;
         let s = streams.get(key);
         if (!s) {
-            s = { filter: composeStreamFilters(createTagEchoFilter(onTagDrop), createMarkerLineFilter(onMarkerDrop)), field, index };
+            s = { filter: composeStreamFilters(createTagEchoFilter(onTagDrop), createMarkerLineFilter(onMarkerDrop), createBiliChainTagFilter(onChainDrop), createInternalArtifactLineFilter(onArtifactDrop)), field, index };
             streams.set(key, s);
         }
         return s;
@@ -1994,12 +2004,22 @@ export async function pipePluginResponsesWithStrip(
         loggerLog("warn", `[tag-echo] stripped model-emitted render tag (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
         log?.(`[tag-echo] stripped model-emitted render tag from plugin passthrough text`);
     };
+    const onChainDrop = (snippet: string) => {
+        loggerLog("warn", `[bili-chain-echo] stripped model-emitted chain checkpoint tag (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+        log?.(`[bili-chain-echo] stripped model-emitted chain checkpoint tag from plugin passthrough text`);
+    };
+    const onArtifactDrop = (snippet: string) => {
+        loggerLog("warn", `[artifact-echo] stripped model-emitted internal summary artifact line (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+        log?.(`[artifact-echo] stripped model-emitted internal summary artifact line from plugin passthrough text`);
+    };
     const tagFilter = composeStreamFilters(
         createTagEchoFilter(onTagDrop),
         createMarkerLineFilter((snippet) => {
             loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
             log?.(`[marker-echo] stripped model-emitted ACP confirmation marker from plugin passthrough text`);
         }),
+        createBiliChainTagFilter(onChainDrop),
+        createInternalArtifactLineFilter(onArtifactDrop),
     );
     // #673: turn-level observability for degenerate terminal turns.
     let sawFunctionCall = false;
@@ -2212,7 +2232,7 @@ export async function pipePluginResponsesWithStrip(
             for (const k of ["item_id", "output_index", "summary_index"]) {
                 if (ev[k] !== undefined) meta[k] = ev[k];
             }
-            s = { filter: createTagEchoFilter(onTagDrop), type, field, meta };
+            s = { filter: composeStreamFilters(createTagEchoFilter(onTagDrop), createMarkerLineFilter((snippet) => { loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker (plugin passthrough): ${snippet.slice(0, 80).replace(/\n/g, " ")}`); }), createBiliChainTagFilter(onChainDrop), createInternalArtifactLineFilter(onArtifactDrop)), type, field, meta };
             argStreams.set(key, s);
         }
         return s;
@@ -2402,7 +2422,7 @@ export async function pipePluginResponsesWithStrip(
                             await write(rawEvent + "\n\n");
                             continue;
                         }
-                        if (!mayStartRenderTag(v) && !argAnyPending() && !tagFilter.pending()) {
+                        if (!mayStartRenderTag(v) && !mayStartMarkerLine(v) && !argAnyPending() && !tagFilter.pending()) {
                             proseAcc += v;
                             await write(rawEvent + "\n\n");
                             continue;

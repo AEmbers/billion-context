@@ -36,6 +36,9 @@
 // cosmetic noise; that fix belongs on the injection side (host renderTags
 // policy, #933), never here. The strippers below apply to model PROSE only
 // (content/reasoning_content/reasoning/thinking/text/summary fields).
+import { CHAIN_TAG } from "../chain-checkpoint.js";
+import { COMPACT_ECHO_PREFIX, FORGED_SUMMARY_HEADER } from "../codex-compact.js";
+
 function buildAcplikeName(): string {
     const cores = ["acp", "apc", "cap", "cpa", "pac", "pca"];
     const names = new Set<string>(cores);
@@ -183,12 +186,54 @@ export const MARKER_LINE = /^\p{So}(?:[ \t])?\[ACP\][^\n]*\n?/gmu;
 // filter pass, under-pushing leaks a forged marker.
 const MARKER_TAIL = /(?:^|\n)[^\x00-\x7F](?:[ \t])?(?:\[ACP|\[AC|\[A|\[)?$/u;
 
+// #1635: internal artifacts that must never reach the client transcript via
+// model echo. The identifiers are SHARED with their producers — CHAIN_TAG from
+// chain-checkpoint.ts (the stampOutbound generator) and the two line heads from
+// codex-compact.ts (compaction handoff prefix / kernel SUMMARY_HEADER) — so a
+// guard can never drift from its carrier again (that drift IS this bug's root
+// cause). A complete self-closing tag with the exact carrier name cannot be
+// accidental prose, so shape-only matching is zero-false-positive; over-long or
+// unclosed openings are prose by the #644 rule and pass through untouched.
+const BILI_CHAIN_TAG_OPEN = "\x3c" + CHAIN_TAG + " ";
+const BILI_CHAIN_SEEDS = [BILI_CHAIN_TAG_OPEN, "\\u003c" + CHAIN_TAG + " "];
+export const INTERNAL_ARTIFACT_LINE_HEADS: readonly string[] = [COMPACT_ECHO_PREFIX, FORGED_SUMMARY_HEADER];
+// Self-closing chain checkpoint tag, any attribute list bounded by the parser's
+// MAX_CHECKPOINT_CHARS (chain-checkpoint.ts), no nested markup.
+const BILI_CHAIN_TAG_RE = new RegExp("\x3c" + CHAIN_TAG + "\\s[^<>]{0,512}?\\/\\x3e", "g");
+// Line-anchored artifact heads — strictly at column 0 (an indented occurrence
+// quotes the format, same rule as MARKER_LINE). Only the head line is stripped:
+// these artifacts have no reliable terminator, so the body that follows reads
+// as unattributed prose (#717 precedent).
+function escapeRegExp(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+const INTERNAL_ARTIFACT_LINES = new RegExp("^(?:" + INTERNAL_ARTIFACT_LINE_HEADS.map(escapeRegExp).join("|") + ")[^\n]*\n?", "gm");
+
 /** Fast-path gate for the streaming pipes (#717): could this chunk contain a
  *  forged marker line, or leave a marker head undecidable across the chunk
  *  boundary? Coarse by design — a false positive costs one no-op filter pass,
- *  but skipping a chunk that carries or starts a forged line forwards it raw. */
+ *  but skipping a chunk that carries or starts a forged line forwards it raw.
+ *  #1635: also covers the internal artifact lines and chain-tag opens — a
+ *  complete head anywhere in the chunk, or a last line that is still a strict
+ *  prefix of a head/tag-open and could be completed by the next chunk. */
 export function mayStartMarkerLine(s: string): boolean {
-    return s.includes("[ACP]") || MARKER_TAIL.test(s);
+    if (s.includes("[ACP]")) return true;
+    if (MARKER_TAIL.test(s)) return true;
+    for (const h of INTERNAL_ARTIFACT_LINE_HEADS) if (s.includes(h)) return true;
+    const nl = s.lastIndexOf("\n");
+    const lastLine = nl >= 0 ? s.slice(nl + 1) : s;
+    if (lastLine.length === 0) return false;
+    // A tag open already present in the last line is undecidable until its
+    // close (or CAP overrun) — including opens starting mid-line, which the
+    // streaming filter itself matches at any position.
+    if (lastLine.includes(BILI_CHAIN_TAG_OPEN)) return true;
+    for (let len = Math.min(BILI_CHAIN_TAG_OPEN.length - 1, lastLine.length); len >= 1; len--) {
+        if (lastLine.endsWith(BILI_CHAIN_TAG_OPEN.slice(0, len))) return true;
+    }
+    for (const h of INTERNAL_ARTIFACT_LINE_HEADS) {
+        if (h.length > lastLine.length && h.startsWith(lastLine)) return true;
+    }
+    return false;
 }
 
 export function stripMarkerLines(text: string): string {
@@ -211,6 +256,8 @@ export function stripAcpTags(text: string): string {
         .replace(new RegExp(LONE_CLOSE.source, "g"), "")
         .replace(new RegExp(TRUNC_OPEN.source), "")
         .replace(new RegExp(TRUNC_CLOSE.source), "")
+        .replace(BILI_CHAIN_TAG_RE, "")
+        .replace(INTERNAL_ARTIFACT_LINES, "")
         .replace(MARKER_LINE, "");
 }
 
@@ -218,9 +265,14 @@ export function stripAcpTags(text: string): string {
 // "[ACP]" survives JSON escaping unscathed (brackets are not escaped), so a
 // plain includes() on the raw SSE/JSON string is sound and cheap. The
 // false-positive cost is one no-op re-serialize; the strict line-anchored
-// match decides what actually gets removed.
+// match decides what actually gets removed. #1635: the same precheck covers
+// the internal artifact heads (plain ASCII, escape-proof) and the chain-tag
+// open in both its literal and JSON-escaped (\u003c) forms.
 export function containsMarkerLineText(s: string): boolean {
-    return s.includes("[ACP]");
+    if (s.includes("[ACP]")) return true;
+    for (const seed of BILI_CHAIN_SEEDS) if (s.includes(seed)) return true;
+    for (const h of INTERNAL_ARTIFACT_LINE_HEADS) if (s.includes(h)) return true;
+    return false;
 }
 
 // Cheap pre-check on a raw wire string (SSE event or JSON body): does it
@@ -645,23 +697,207 @@ export function createMarkerLineFilter(onDrop?: (snippet: string) => void): TagE
     };
 }
 
-/** Run two streaming filters in sequence (input flows a→b), so the
- *  marker-line stripper (#717) layers onto the render-tag echo filter
- *  (#206/#673) without touching call sites. Stats merge: input from a,
- *  output from b, dropped/pending OR'd. */
-export function composeStreamFilters(a: TagEchoFilter, b: TagEchoFilter): TagEchoFilter {
+// #1635 streaming counterpart of the BILI_CHAIN_TAG_RE strip: hold back an
+// apparent tag opening across chunk boundaries until its closing /> decides
+// it (bounded by the parser's MAX_CHECKPOINT_CHARS); an over-long unclosed
+// opening releases as prose mid-stream (#644), and a held tail at flush is a
+// truncated echo — dropped, like TRUNC_OPEN. Shape-only match on the shared
+// carrier name keeps false positives at zero (see the constants block above).
+export function createBiliChainTagFilter(onDrop?: (snippet: string) => void): TagEchoFilter {
+    const CAP = 512 + BILI_CHAIN_TAG_OPEN.length;
+    let held = "";
+    let droppedAny = false;
+    let notified = false;
+    let inputChars = 0;
+    let outputChars = 0;
+    const noteDrop = (snippet: string) => {
+        droppedAny = true;
+        if (!notified) {
+            notified = true;
+            onDrop?.(snippet);
+        }
+    };
+    const process = (chunk: string): string => {
+        let buf = held + chunk;
+        held = "";
+        inputChars += chunk.length;
+        let out = "";
+        for (;;) {
+            const idx = buf.indexOf(BILI_CHAIN_TAG_OPEN);
+            if (idx < 0) break;
+            out += buf.slice(0, idx);
+            const rest = buf.slice(idx);
+            const closeIdx = rest.indexOf("/\x3e");
+            if (closeIdx < 0) {
+                if (rest.length <= CAP) {
+                    held = rest;
+                } else {
+                    out += rest;
+                }
+                buf = "";
+                break;
+            }
+            const span = rest.slice(0, closeIdx + 2);
+            if (span.length <= CAP) noteDrop(span);
+            else out += span;
+            buf = rest.slice(closeIdx + 2);
+        }
+        // Hold a suffix that could still grow into the tag open ("<", "<b", …).
+        for (let len = Math.min(BILI_CHAIN_TAG_OPEN.length - 1, buf.length); len >= 1; len--) {
+            if (buf.endsWith(BILI_CHAIN_TAG_OPEN.slice(0, len))) {
+                out += buf.slice(0, buf.length - len);
+                held = buf.slice(buf.length - len);
+                buf = "";
+                break;
+            }
+        }
+        out += buf;
+        outputChars += out.length;
+        return out;
+    };
     return {
-        push: (delta: string) => b.push(a.push(delta)),
-        flush: () => {
-            const tail = a.flush();
-            return tail === "" ? b.flush() : b.push(tail) + b.flush();
+        push(delta: string): string {
+            return process(delta);
         },
-        dropped: () => a.dropped() || b.dropped(),
-        pending: () => a.pending() || b.pending(),
+        flush(): string {
+            const rest = held;
+            held = "";
+            // A lone "<" at stream end is overwhelmingly likely to be cut-off
+            // prose ("a < b"); a longer held tail is a truncated tag echo.
+            if (rest.length > 1) {
+                noteDrop(rest);
+                return "";
+            }
+            return rest;
+        },
+        dropped: () => droppedAny,
+        pending: () => held.length > 0,
+        stats: () => ({ inputChars, outputChars, dropped: droppedAny }),
+    };
+}
+
+// #1635 streaming counterpart of the INTERNAL_ARTIFACT_LINES strip: the same
+// line-start state machine as createMarkerLineFilter, but the heads are plain
+// ASCII artifact prefixes (no icon ambiguity), so an undecidable prefix is
+// simply "still shorter than every head". Head-only swallow: these artifacts
+// have no reliable terminator (#717 precedent).
+export function createInternalArtifactLineFilter(onDrop?: (snippet: string) => void): TagEchoFilter {
+    const startsWithHead = (s: string): boolean => INTERNAL_ARTIFACT_LINE_HEADS.some((h) => s.startsWith(h));
+    const isStrictPrefixOfHead = (s: string): boolean => INTERNAL_ARTIFACT_LINE_HEADS.some((h) => h.length > s.length && h.startsWith(s));
+    let buf = "";
+    let atLineStart = true;
+    let swallowing = false;
+    let droppedAny = false;
+    let notified = false;
+    let inputChars = 0;
+    let outputChars = 0;
+    const noteDrop = (snippet: string) => {
+        droppedAny = true;
+        if (!notified) {
+            notified = true;
+            onDrop?.(snippet);
+        }
+    };
+    const process = (chunk: string): string => {
+        buf += chunk;
+        inputChars += chunk.length;
+        let out = "";
+        while (buf.length > 0) {
+            if (swallowing) {
+                const nl = buf.indexOf("\n");
+                if (nl < 0) return out;
+                noteDrop(buf.slice(0, nl));
+                buf = buf.slice(nl + 1);
+                swallowing = false;
+                atLineStart = true;
+                continue;
+            }
+            if (atLineStart) {
+                if (startsWithHead(buf)) {
+                    swallowing = true;
+                    continue;
+                }
+                if (isStrictPrefixOfHead(buf)) return out;
+                out += buf[0];
+                buf = buf.slice(1);
+                atLineStart = false;
+                continue;
+            }
+            const nl = buf.indexOf("\n");
+            if (nl >= 0) {
+                out += buf.slice(0, nl + 1);
+                buf = buf.slice(nl + 1);
+                atLineStart = true;
+            } else {
+                out += buf;
+                buf = "";
+            }
+        }
+        outputChars += out.length;
+        return out;
+    };
+    return {
+        push(delta: string): string {
+            return process(delta);
+        },
+        flush(): string {
+            let out = "";
+            if (buf.length > 0) {
+                if (swallowing || startsWithHead(buf)) {
+                    noteDrop(buf);
+                    buf = "";
+                } else {
+                    // Undecidable prefix or plain tail: content preservation.
+                    out = buf;
+                    buf = "";
+                }
+            }
+            swallowing = false;
+            atLineStart = true;
+            outputChars += out.length;
+            return out;
+        },
+        dropped: () => droppedAny,
+        pending: () => buf.length > 0,
+        stats: () => ({ inputChars, outputChars, dropped: droppedAny }),
+    };
+}
+
+/** Run streaming filters in sequence (input flows left-to-right), so the
+ *  marker-line (#717), chain-tag (#1635) and artifact-line (#1635) strippers
+ *  layer onto the render-tag echo filter (#206/#673) without touching call
+ *  sites beyond the list. Stats keep pipeline-end semantics: input from the
+ *  first filter, output from the last, dropped/pending OR'd. */
+export function composeStreamFilters(...filters: TagEchoFilter[]): TagEchoFilter {
+    if (filters.length === 0) {
+        return {
+            push: (delta: string) => delta,
+            flush: () => "",
+            dropped: () => false,
+            pending: () => false,
+            stats: () => ({ inputChars: 0, outputChars: 0, dropped: false }),
+        };
+    }
+    if (filters.length === 1) return filters[0];
+    return {
+        push: (delta: string) => {
+            let d = delta;
+            for (const f of filters) d = f.push(d);
+            return d;
+        },
+        flush: () => {
+            let rest = filters[0].flush();
+            for (let i = 1; i < filters.length; i++) {
+                rest = filters[i].push(rest) + filters[i].flush();
+            }
+            return rest;
+        },
+        dropped: () => filters.some((f) => f.dropped()),
+        pending: () => filters.some((f) => f.pending()),
         stats: () => ({
-            inputChars: a.stats().inputChars,
-            outputChars: b.stats().outputChars,
-            dropped: a.dropped() || b.dropped(),
+            inputChars: filters[0].stats().inputChars,
+            outputChars: filters[filters.length - 1].stats().outputChars,
+            dropped: filters.some((f) => f.dropped()),
         }),
     };
 }

@@ -4,7 +4,7 @@ import { coreToResponsesWithToolImages as coreToResponses, patchResponsesInputWi
 import { buildVisibilityMarker } from "./core.js";
 import { hoistTrappedToolItems } from "../tool-pair-order.js";
 import { hashId } from "../util.js";
-import { composeStreamFilters, createMarkerLineFilter, createTagEchoFilter, stripResponsesText, containsMarkerLineText, containsRenderTagText, ACP_NAME_ALT } from "./tag-echo-filter.js";
+import { composeStreamFilters, createBiliChainTagFilter, createInternalArtifactLineFilter, createMarkerLineFilter, createTagEchoFilter, stripResponsesText, containsMarkerLineText, containsRenderTagText, ACP_NAME_ALT } from "./tag-echo-filter.js";
 import { degenerateTurnWarning } from "../degenerate-turn.js";
 import { log as loggerLog } from "../logger.js";
 import { extractResponsesTextTriggers, PROXY_TOOL_NAMES } from "../compress-tool.js";
@@ -339,6 +339,12 @@ export function createResponsesAdapter(textProtocol?: boolean, projection?: Resp
                 }),
                 createMarkerLineFilter((snippet) => {
                     loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                }),
+                createBiliChainTagFilter((snippet) => {
+                    loggerLog("warn", `[bili-chain-echo] stripped model-emitted chain checkpoint tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                }),
+                createInternalArtifactLineFilter((snippet) => {
+                    loggerLog("warn", `[artifact-echo] stripped model-emitted internal summary artifact line: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
                 }),
             );
             let lastTextRef: { itemId: string; outputIndex: number } | null = null;

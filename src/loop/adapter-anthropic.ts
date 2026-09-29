@@ -2,7 +2,7 @@ import type { CoreMessage } from "acp-kernel";
 import { coreToAnthropic, extractSystem, buildSystem, type AnthropicRequestBody } from "acp-kernel/wire";
 import { stampAnthropicSystemCacheControl } from "./cache-control.js";
 import { buildVisibilityMarker } from "./core.js";
-import { composeStreamFilters, createMarkerLineFilter, createTagEchoFilter } from "./tag-echo-filter.js";
+import { composeStreamFilters, createBiliChainTagFilter, createInternalArtifactLineFilter, createMarkerLineFilter, createTagEchoFilter } from "./tag-echo-filter.js";
 import { degenerateTurnWarning } from "../degenerate-turn.js";
 import { log as loggerLog } from "../logger.js";
 import type {
@@ -269,6 +269,12 @@ export function createAnthropicAdapter(requestBody: Record<string, unknown>, ori
                 }),
                 createMarkerLineFilter((snippet) => {
                     loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                }),
+                createBiliChainTagFilter((snippet) => {
+                    loggerLog("warn", `[bili-chain-echo] stripped model-emitted chain checkpoint tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                }),
+                createInternalArtifactLineFilter((snippet) => {
+                    loggerLog("warn", `[artifact-echo] stripped model-emitted internal summary artifact line: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
                 }),
             );
             let lastTextIndex: number | null = null;

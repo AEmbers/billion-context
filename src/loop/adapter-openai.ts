@@ -1,7 +1,7 @@
 import type { CoreMessage } from "acp-kernel";
 import { coreToOpenai, injectOpenaiSystem } from "acp-kernel/wire";
 import { buildVisibilityMarker } from "./core.js";
-import { composeStreamFilters, createMarkerLineFilter, createTagEchoFilter } from "./tag-echo-filter.js";
+import { composeStreamFilters, createBiliChainTagFilter, createInternalArtifactLineFilter, createMarkerLineFilter, createTagEchoFilter } from "./tag-echo-filter.js";
 import { degenerateTurnWarning } from "../degenerate-turn.js";
 import { log as loggerLog } from "../logger.js";
 import { hardenOpenaiAssistantContent, systemToUser } from "../util.js";
@@ -223,6 +223,12 @@ export function createOpenaiAdapter(requestBody: Record<string, unknown>, client
                 }),
                 createMarkerLineFilter((snippet) => {
                     loggerLog("warn", `[marker-echo] stripped model-emitted ACP confirmation marker: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                }),
+                createBiliChainTagFilter((snippet) => {
+                    loggerLog("warn", `[bili-chain-echo] stripped model-emitted chain checkpoint tag: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
+                }),
+                createInternalArtifactLineFilter((snippet) => {
+                    loggerLog("warn", `[artifact-echo] stripped model-emitted internal summary artifact line: ${snippet.slice(0, 80).replace(/\n/g, " ")}`);
                 }),
             );
             const flushFilter = function* (): Generator<ParsedStreamEvent> {

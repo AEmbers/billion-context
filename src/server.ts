@@ -3867,7 +3867,9 @@ async function prepareResponses(
             // drop-only echo removed a marker blob without inserting one, so the
             // forge-time captured summaries must still be re-injected (#1064).
             if (replaced > 0) echoReplaced = true;
-            log("info", `[${sessionId}] replaced ${replaced} echoed bili compaction item(s) with summary handoff message(s)${dropped > 0 ? `, dropped ${dropped} legacy marker item(s)` : ""}`);
+            // #1635: structured audit — this appends user-role summary message(s)
+            // to the outbound body; same field set as the chain-stamp audit.
+            log("info", `[${sessionId}] [chain] outbound-append kind=compaction-summary-replace wire=responses role=user shape=message replaced=${replaced} dropped=${dropped}`);
             parsed.input = items as typeof parsed.input;
         }
     }
@@ -5104,8 +5106,15 @@ async function forward(
     // empty) claims processing, per the first-processor-wins contract.
     if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainContentDetection !== false) {
         try {
+            const preLen = wireBody.length;
             const stamped = stampOutbound(JSON.parse(wireBody), prepared.protocol, instanceId);
-            if (stamped !== null) wireBody = JSON.stringify(stamped);
+            if (stamped !== null) {
+                wireBody = JSON.stringify(stamped);
+                // #1635: structured audit of what this forward appends to the
+                // outbound body — kind/wire/role/shape/len, carrying the same
+                // session id as the forward line so post-hoc attribution works.
+                log("debug", `[${prepared.session.id}] [chain] outbound-append kind=chain-stamp wire=${prepared.protocol} role=user shape=${prepared.protocol === "anthropic" || prepared.protocol === "google" ? "merged-part" : "message"} len=${wireBody.length - preLen}`);
+            }
         } catch (err) {
             log("debug", `[${prepared.session.id}] [chain] outbound stamping failed (${String(err)}); forwarding unstamped`);
         }
@@ -5126,7 +5135,11 @@ async function forward(
     // primary signal. The provider label is appended only for named routes —
     // zero-config requests have a single routing mode now, so the final
     // proxied URL is the only useful signal in the log.
-    log("info", `forward ${req.method} → ${maskUrlForLog(upstreamUrl)}`);
+    // #1635: carry the session id on the forward line (every other lifecycle
+    // log already does) so forwards can be attributed to sessions after the
+    // fact — previously the only lines carrying a request were in a different
+    // format with no shared key. Non-session forwards log "-".
+    log("info", `forward ${req.method} → ${maskUrlForLog(upstreamUrl)} [${prepared?.session.id ?? "-"}]`);
     if (process.env.ACP_DEBUG && prepared) {
         const sid = prepared.session.id;
         const hdrKeys = Object.keys(req.headers);
