@@ -618,7 +618,25 @@ export const WEB_CLIENT = `(function () {
         mini(parts, t("ov.cached_tokens"), d.cachedTokens ? fmtW(d.cachedTokens) : null);
         const mt = d.ledger && d.ledger.totals;
         const missArgs = mt && mt.input > 0 ? { n: fmtW(mt.newContent || 0), c: fmtW(mt.compRepay || 0), x: fmtW(mt.ttlRepay || 0), pn: (((mt.newContent || 0) / mt.input) * 100).toFixed(1), pc: (((mt.compRepay || 0) / mt.input) * 100).toFixed(1), px: (((mt.ttlRepay || 0) / mt.input) * 100).toFixed(1) } : null;
-        mini(parts, t("det.hit_pct"), d.cacheHitPct == null ? null : d.cacheHitPct.toFixed(1) + "%", false, missArgs ? t("det.miss_sub", { x: missArgs.px, c: missArgs.pc, n: missArgs.pn }) : "", missArgs ? t("det.miss_split_line", missArgs) : "");
+        // #1609/#1606: surface the attribution buckets (seam / provider-side / rewound /
+        // abort-correlated) in the headline hit-rate subline — nonzero-only, same colors
+        // as the 归因·未解释残差 card lower on this page.
+        const lsRaw = d.ledger && typeof d.ledger.seam === "object" ? d.ledger.seam : null;
+        let hitSub = "";
+        if (missArgs) hitSub += t("det.miss_sub", { x: missArgs.px, c: missArgs.pc, n: missArgs.pn });
+        const attrChips = [];
+        if (lsRaw) {
+            const seamSm = Number(lsRaw.missed) || 0, seamSn = Number(lsRaw.suspects) || 0;
+            if (seamSm > 0 || seamSn > 0) attrChips.push('<span style="color:#cf222e" title="' + escapeHtml(t("det.attr_seam_tip")) + '">' + escapeHtml(t("det.attr_seam")) + " " + fmtW(seamSm) + (seamSn > 0 ? " ×" + seamSn : "") + "</span>");
+            const provM = (lsRaw.providerSide && Number(lsRaw.providerSide.missed)) || 0, provN = (lsRaw.providerSide && Number(lsRaw.providerSide.count)) || 0;
+            if (provM > 0 || provN > 0) attrChips.push('<span style="color:#bf8700" title="' + escapeHtml(t("det.attr_provider_tip")) + '">' + escapeHtml(t("det.attr_provider")) + " " + fmtW(provM) + (provN > 0 ? " ×" + provN : "") + "</span>");
+            const rewM = (lsRaw.rewinds && Number(lsRaw.rewinds.missed)) || 0, rewN = (lsRaw.rewinds && Number(lsRaw.rewinds.count)) || 0;
+            if (rewM > 0 || rewN > 0) attrChips.push('<span style="color:#57606a" title="' + escapeHtml(t("det.attr_rewind_tip")) + '">' + escapeHtml(t("det.attr_rewind")) + " " + fmtW(rewM) + (rewN > 0 ? " ×" + rewN : "") + "</span>");
+            const abN = Number(lsRaw.abortCorrelated) || 0;
+            if (abN > 0) attrChips.push('<span style="color:#d4a72c" title="' + escapeHtml(t("det.attr_abort_tip")) + '">' + escapeHtml(t("det.attr_abort")) + " ×" + abN + "</span>");
+        }
+        if (attrChips.length) hitSub += (hitSub ? " · " : "") + attrChips.join(" · ");
+        mini(parts, t("det.hit_pct"), d.cacheHitPct == null ? null : d.cacheHitPct.toFixed(1) + "%", false, hitSub, missArgs ? t("det.miss_split_line", missArgs) : "");
         mini(parts, t("ov.output_tokens"), d.outputTokens ? fmtW(d.outputTokens) : null);
         const dSavedV = d.netSaved != null ? d.netSaved : d.tokensSaved;
         mini(parts, t("ov.tokens_saved"), dSavedV ? fmtW(dSavedV) : null, dSavedV > 0);
@@ -691,7 +709,10 @@ export const WEB_CLIENT = `(function () {
         if (seamActive) {
             parts.push('<div class="section-label" style="margin-top:14px">' + t("det.attr_title") + "</div>"
                 + '<div class="grid cols-4">'
-                + '<div class="mini"><div class="k" style="color:#cf222e" title="' + escapeHtml(t("det.attr_seam_tip")) + '">' + escapeHtml(t("det.attr_seam")) + '</div><div class="v mono" style="color:#cf222e">' + fmtW(seam.missed) + (seam.suspects > 0 ? ' <span class="dim small">×</span>' + seam.suspects : "") + "</div></div>"
+                + '<div class="mini"><div class="k" style="color:#cf222e" title="' + escapeHtml(t("det.attr_seam_tip")) + '">' + escapeHtml(t("det.attr_seam")) + '</div><div class="v mono" style="color:#cf222e">' + fmtW(seam.missed) + (seam.suspects > 0 ? ' <span class="dim small">×</span>' + seam.suspects : "") + "</div>"
+                // Per-event attribution inside the seam mini: which samples the aggregate points at.
+                + (seam.events.length ? '<div class="dim small mono attr-sub" style="margin-top:4px;line-height:1.6">' + seam.events.slice(0, 6).map((ev) => "#" + ev.seq + " " + (ev.at ? fmtDT(ev.at) : "") + (typeof ev.hitPct === "number" ? " " + ev.hitPct.toFixed(1) + "%" : "") + " ≥" + fmtB(ev.lcpBytes || 0) + " @m" + (ev.msgIndex != null ? ev.msgIndex : "?") + (ev.prevMsgs != null && ev.curMsgs != null ? " (" + ev.prevMsgs + "→" + ev.curMsgs + ")" : "") + "<br>").join("") + (seam.events.length > 6 ? "+" + (seam.events.length - 6) + " …<br>" : "") + "</div>" : "")
+                + "</div>"
                 + '<div class="mini"><div class="k" style="color:#bf8700" title="' + escapeHtml(t("det.attr_provider_tip")) + '">' + escapeHtml(t("det.attr_provider")) + '</div><div class="v mono" style="color:#bf8700">' + fmtW(seam.providerSide.missed) + (seam.providerSide.count > 0 ? ' <span class="dim small">×</span>' + seam.providerSide.count : "") + "</div></div>"
                 + '<div class="mini"><div class="k" style="color:#57606a" title="' + escapeHtml(t("det.attr_rewind_tip")) + '">' + escapeHtml(t("det.attr_rewind")) + '</div><div class="v mono" style="color:#57606a">' + fmtW(seam.rewinds.missed) + (seam.rewinds.count > 0 ? ' <span class="dim small">×</span>' + seam.rewinds.count : "") + "</div></div>"
                 + '<div class="mini"><div class="k" style="color:#d4a72c" title="' + escapeHtml(t("det.attr_abort_tip")) + '">' + escapeHtml(t("det.attr_abort")) + '</div><div class="v mono" style="color:#d4a72c">' + String(seam.abortCorrelated) + "</div></div>"
