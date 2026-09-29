@@ -90,7 +90,7 @@ bili 只压缩路径匹配已知 wire 协议(`/chat/completions`、`/llm_raw_cha
 
 这个结果现在不再静默(#1290):
 
-- 客户端侧 fetch 钩子对每个不同的未路由端点每进程记一次日志(`…is not a recognized model endpoint, so bili did not route it through the proxy…`);
+- 客户端侧 fetch 钩子对每个不同的、以 **POST** 发出的未路由端点每进程记一次日志(`…is not a recognized model endpoint, so bili did not route it through the proxy…`);非 POST 流量——npm 注册表、目录 JSON、git refs——按设计保持静默(#1657:GET 不携带 prompt,不可能是模型流量);
 - `curl -s http://localhost:8787/__bili/stats` 输出 `unrecognizedPaths`(按路径计数,仅 loopback);
 - 存在此类请求时,`acp_status` 输出会多一节 `UNRECOGNIZED PATHS (instance-level)`。
 

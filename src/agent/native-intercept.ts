@@ -75,13 +75,16 @@ export interface NativeInterceptState {
     onRoutedOriginObserved?: (origin: string) => void;
     /** Test/observability hook: every dispatched decision. */
     onDispatch?: (url: string, action: "rewrite" | "direct" | "self" | "retry") => void;
-    /** #1290: observability hook — fired for every request the fetch patch lets
-     *  through WITHOUT routing because its URL is not a recognized model endpoint
-     *  (isModelApiUrl miss). Such requests never reach a bili proxy, so without
-     *  this their "went direct (uncompressed)" outcome was completely silent —
-     *  #1158's logging promise only covered the attribution gate below. Called
-     *  per request; hosts dedup once-per-process-per-endpoint like takeoverGate.
-     *  Undefined hosts stay silent. */
+    /** #1290: observability hook — fired for every POST request the fetch patch
+     *  lets through WITHOUT routing because its URL is not a recognized model
+     *  endpoint (isModelApiUrl miss). Such requests never reach a bili proxy,
+     *  so without this their "went direct (uncompressed)" outcome was completely
+     *  silent — #1158's logging promise only covered the attribution gate below.
+     *  #1657: non-POST methods are excluded — a GET/HEAD cannot carry a prompt,
+     *  so it cannot be model inference, and host tooling traffic (npm registries,
+     *  catalog JSONs, git refs — ~18 lines per dsh web boot) used to drown the
+     *  real failure lines. Called per request; hosts dedup once-per-process-
+     *  per-endpoint like takeoverGate. Undefined hosts stay silent. */
     onUnroutedModelUrl?: (url: string) => void;
 }
 
@@ -230,6 +233,23 @@ function fetchUrlOf(input: string | URL | Request): string | undefined {
         // fallthrough
     }
     return undefined;
+}
+
+/** HTTP method of a fetch call, uppercased: init.method wins (spec: init
+ *  overrides a Request-object input), then the Request object's own method,
+ *  then the fetch default GET. */
+function fetchMethodOf(input: string | URL | Request, init?: RequestInit): string {
+    const m = init?.method;
+    if (typeof m === "string") return m.toUpperCase();
+    try {
+        if (input !== null && typeof input === "object" && !(input instanceof URL)) {
+            const rm = (input as Request).method;
+            if (typeof rm === "string") return rm.toUpperCase();
+        }
+    } catch {
+        // fallthrough
+    }
+    return "GET";
 }
 
 /** Merge extra headers into a (input, init) pair, preserving all three
@@ -606,7 +626,10 @@ export function installNativeFetchIntercept(state: NativeInterceptState): boolea
             }
         }
         if (!isModelApiUrl(url)) {
-            if (!isBiliControlUrl(url)) state.onUnroutedModelUrl?.(url);
+            // #1657: only POST can carry model traffic — npm registries,
+            // catalog JSONs, git refs and the rest of the host's tooling are
+            // GET and would otherwise fire the hook once per boot per endpoint.
+            if (!isBiliControlUrl(url) && fetchMethodOf(input, init) === "POST") state.onUnroutedModelUrl?.(url);
             return send(input, init);
         }
         // #1117: URL shape alone cannot claim a request — every model call in
