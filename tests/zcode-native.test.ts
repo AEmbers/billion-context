@@ -120,7 +120,9 @@ test("routeZcodeConfig re-snapshots user edits made while native mode is active"
     try {
         const file = zcodeStoreCandidates(dir, "legacy", {})[0];
         await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: () => {} });
-        const userEdited = JSON.stringify({ provider: { "builtin:bigmodel-coding-plan": { options: {} }, note: "user edit" } }) + "\n";
+        const userEdited = JSON.stringify({ provider: { "builtin:bigmodel-coding-plan": { options: { baseURL: "https://api.user-edit.example/v1" } }, note: "user edit" } }) + "\n";
+        // (route:"all" wraps what exists — a usable baseURL re-routes; an
+        // entry stripped of its baseURL is skipped, not default-filled.)
         writeFileSync(file, userEdited);
         await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, log: () => {} });
         assert.equal(readFileSync(`${file}.bili-bak`, "utf8"), userEdited);
@@ -290,8 +292,11 @@ test("routeZcodeConfig refuses to wrap the v3.14+ store (#1621 client signing)",
     try {
         const logs: string[] = [];
         assert.equal(await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, env: {}, log: (m) => logs.push(m) }), undefined);
-        assert.match(logs[0], /client signing/);
-        assert.match(logs[0], /cert-MITM/);
+        // #1622 route:"all" default: the signing account is skipped
+        // per-entry with a logged reason; with nothing else routable the
+        // store stays byte-identical and no snapshots appear.
+        assert.match(logs.join(" "), /client[- ]signing/);
+        assert.match(logs.join(" "), /cert-MITM/);
         assert.equal(readFileSync(file, "utf8"), original);
         assert.equal(existsSync(`${file}.bili-bak`), false);
         assert.equal(existsSync(`${file}.bili-last`), false);
@@ -307,7 +312,9 @@ test("bootstrapZcodeNative degrades to off on the v3.14+ store without proxy bri
         let proxyTouched = false;
         const logs: string[] = [];
         const out = await bootstrapZcodeNative({
-            env: {},
+            // route:"plans" is the scope where the signing wall still blocks
+            // the whole store (#1622): plan accounts ARE the signing accounts.
+            env: { BILI_ZCODE_ROUTE: "plans" },
             dataDir: dir,
             log: (m) => logs.push(m),
             ensureProxy: async () => {
@@ -338,19 +345,143 @@ test("bootstrap honors ZCODE_PERSONAL_PROVIDER_CONFIG_FILE overrides (#1151)", a
             JSON.stringify({ schemaVersion: 1, config: { providerConfigRules: { providerRules: [{ providerId: "account:bigmodel-individual-coding-plan", config: { api: { baseUrl: UPSTREAM } } }] } } }) + "\n";
         writeFileSync(file, original);
         const env = { ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: file };
-        // #1621: the override points at a v3.14+ personal store, so the
-        // signing gate refuses before any rewrite — honoring the override is
-        // proven by the refusal naming the signing conflict instead of
-        // routing the legacy store at dataDir.
+        // #1622 route:"all" default: the override points at a v3.14+
+        // personal store whose only entry is a signing account, so it is
+        // skipped per-entry — honoring the override is proven by the skip
+        // naming the signing conflict AND the legacy store at dataDir
+        // staying unwrapped instead of being routed.
         const logs: string[] = [];
         assert.equal(await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, env, log: (m) => logs.push(m) }), undefined);
-        assert.match(logs[0], /client signing/);
+        assert.match(logs.join(" "), /client[- ]signing/);
         assert.equal(readFileSync(file, "utf8"), original);
         assert.doesNotMatch(readFileSync(zcodeStoreCandidates(dir, "legacy", {})[0], "utf8"), /\/bili\//);
     } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(alt, { recursive: true, force: true });
     }
+});
+
+// #1622: route scope + exemptions. Default "all" mirrors the in-process
+// natives (pi/dsh): every provider rides compression, loopback targets are
+// never re-proxied (#809), `direct` opts specific providers/URLs out, and
+// the #1621 signing wall degrades to a per-entry skip instead of blocking
+// the whole store.
+
+test('route:"all" wraps every non-exempt provider and reports skips (#1622)', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "zcode-native-all-"));
+    mkdirSync(path.join(dir, "v2"), { recursive: true });
+    const file = zcodeStoreCandidates(dir, "new", {})[0];
+    writeFileSync(
+        file,
+        JSON.stringify({
+            schemaVersion: 1,
+            config: {
+                providerConfigRules: {
+                    providerRules: [
+                        { providerId: "account:deepseek", config: { api: { baseUrl: "https://api.deepseek.com/v1" } } },
+                        { providerId: "account:bigmodel-individual-coding-plan", config: { api: { baseUrl: "https://open.bigmodel.cn/api/paas/v4" } } },
+                        { providerId: "account:local-relay", config: { api: { baseUrl: "http://localhost:8080/v1" } } },
+                        { providerId: "account:kimi", config: { api: { baseUrl: "https://api.moonshot.cn/v1" } } },
+                        { providerId: "account:no-base-url", config: { name: "configured elsewhere" } },
+                    ],
+                },
+            },
+        }) + "\n",
+    );
+    try {
+        const logs: string[] = [];
+        const applied = await routeZcodeConfig({
+            origin: "http://127.0.0.1:18787",
+            dataDir: dir,
+            env: {},
+            log: (m) => logs.push(m),
+            policy: { route: "all", direct: ["account:kimi", "moonshot.cn"], assumeSigningFixed: false },
+        });
+        assert.ok(applied);
+        assert.deepEqual(applied.wrapped, [{ id: "account:deepseek", upstream: "https://api.deepseek.com/v1" }]);
+        const doc = JSON.parse(readFileSync(file, "utf8")) as { config: { providerConfigRules: { providerRules: Array<{ providerId: string; config?: { api?: { baseUrl?: string } } }> } } };
+        const byId = new Map(doc.config.providerConfigRules.providerRules.map((r) => [r.providerId, r.config?.api?.baseUrl]));
+        assert.equal(byId.get("account:deepseek"), "http://127.0.0.1:18787/bili/https://api.deepseek.com/v1");
+        assert.equal(byId.get("account:bigmodel-individual-coding-plan"), "https://open.bigmodel.cn/api/paas/v4");
+        assert.equal(byId.get("account:local-relay"), "http://localhost:8080/v1");
+        assert.equal(byId.get("account:kimi"), "https://api.moonshot.cn/v1");
+        const joined = logs.join(" ");
+        assert.match(joined, /client[- ]signing/);
+        assert.match(joined, /loopback target/);
+        assert.match(joined, /direct exemption/);
+        assert.match(joined, /no usable http/);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('route:"all" on the legacy store wraps non-plan providers and unroute strips them (#1622)', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "zcode-native-legacy-all-"));
+    mkdirSync(path.join(dir, "v2"), { recursive: true });
+    const file = zcodeStoreCandidates(dir, "legacy", {})[0];
+    writeFileSync(
+        file,
+        JSON.stringify({
+            provider: {
+                "builtin:bigmodel-coding-plan": { options: { baseURL: UPSTREAM } },
+                "custom:other-vendor": { options: { baseURL: "https://api.other.example/v1" } },
+                "custom:local": { options: { baseURL: "http://127.0.0.1:9997/v1" } },
+            },
+        }) + "\n",
+    );
+    try {
+        const applied = await routeZcodeConfig({ origin: "http://127.0.0.1:18787", dataDir: dir, env: {}, log: () => {} });
+        assert.ok(applied);
+        assert.equal(applied.kind, "legacy");
+        assert.deepEqual(applied.wrapped, [
+            { id: "builtin:bigmodel-coding-plan", upstream: UPSTREAM },
+            { id: "custom:other-vendor", upstream: "https://api.other.example/v1" },
+        ]);
+        const doc = JSON.parse(readFileSync(file, "utf8")) as { provider: Record<string, { options?: { baseURL?: string } }> };
+        assert.equal(doc.provider["builtin:bigmodel-coding-plan"].options?.baseURL, `http://127.0.0.1:18787/bili/${UPSTREAM}`);
+        assert.equal(doc.provider["custom:other-vendor"].options?.baseURL, "http://127.0.0.1:18787/bili/https://api.other.example/v1");
+        assert.equal(doc.provider["custom:local"].options?.baseURL, "http://127.0.0.1:9997/v1");
+        // Non-plan wrappers must be stripped too — unroute can't know which
+        // policy wrote them.
+        unrouteZcode({ dataDir: dir, env: {}, log: () => {} });
+        assert.doesNotMatch(readFileSync(file, "utf8"), /\/bili\//);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('bootstrapZcodeNative respects zcode route:"none" without proxy bring-up (#1622)', async () => {
+    const dir = dataDir();
+    try {
+        let proxyTouched = false;
+        const logs: string[] = [];
+        const out = await bootstrapZcodeNative({
+            env: { BILI_ZCODE_ROUTE: "none" },
+            dataDir: dir,
+            log: (m) => logs.push(m),
+            ensureProxy: async () => {
+                proxyTouched = true;
+                return { origin: "http://127.0.0.1:1", attached: false };
+            },
+        });
+        assert.deepEqual(out, { mode: "off" });
+        assert.equal(proxyTouched, false);
+        assert.match(logs[0], /none/);
+        assert.doesNotMatch(readFileSync(zcodeStoreCandidates(dir, "legacy", {})[0], "utf8"), /\/bili\//);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("resolveZcodeLane maps env and file into the lane config (#1622)", async () => {
+    const { resolveZcodeLane } = await import("../src/config.ts");
+    const lane = resolveZcodeLane({ BILI_ZCODE_ROUTE: "none", BILI_ZCODE_PORT: "41234", BILI_ZCODE_SIGNING_FIXED: "true" });
+    assert.equal(lane.route, "none");
+    assert.equal(lane.fixedPort, 41234);
+    assert.equal(lane.assumeSigningFixed, true);
+    assert.equal(resolveZcodeLane({ BILI_ZCODE_ROUTE: "garbage" }).route, "all");
+    assert.equal(resolveZcodeLane({ BILI_ZCODE_PORT: "not-a-port" }).fixedPort, undefined);
+    assert.equal(resolveZcodeLane({ BILI_ZCODE_PORT: "70000" }).fixedPort, undefined);
 });
 
 // #1623: the shared provider store is a last-writer-wins pointer across all

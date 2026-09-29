@@ -1030,6 +1030,24 @@ type FileConfig = {
      *  brings a proxy up on. Default CLAUDE_NATIVE_DEFAULT_PORT; env
      *  BILI_CLAUDE_NATIVE_PORT wins over both. */
     claude?: { nativePort?: number };
+    /** ZCode native lane (#1622): scope of provider-store routing, explicit
+     *  exemptions, and an optional fixed loopback port. Defaults mirror the
+     *  in-process natives (pi/dsh): route EVERY provider, never re-proxy a
+     *  loopback target. Env BILI_ZCODE_ROUTE / BILI_ZCODE_PORT win. */
+    zcode?: {
+        /** "all" (default) wraps every provider entry; "plans" restores the
+         *  pre-#1622 coding-plan whitelist; "none" disables routing. */
+        route?: "all" | "plans" | "none";
+        /** Provider IDs or URL substrings exempted from wrapping. */
+        direct?: string[];
+        /** Pin the spawned proxy to a fixed loopback port (default: ephemeral).
+         *  Mitigates ZCode's per-session baseURL caching (#1623): a respawned
+         *  proxy re-opens the same port, so even stale cached URLs recover. */
+        fixedPort?: number;
+        /** Set `true` once ZCode ships the client-signing fix (#1621) to let
+         *  coding-plan accounts route again. */
+        assumeSigningFixed?: boolean;
+    };
     /** Native-hook attach policy (#1335): set `true` to let native hooks
      *  attach to lifecycle-less listeners (a manually started `bili start`
      *  daemon — no session-lifecycle watchdog, outlives every session, often
@@ -1086,6 +1104,36 @@ export function resolveClaudeNativePort(env: NodeJS.ProcessEnv = process.env): n
     const fromFile = loadConfigFile().claude?.nativePort;
     if (typeof fromFile === "number" && Number.isInteger(fromFile) && fromFile > 0 && fromFile < 65536) return fromFile;
     return CLAUDE_NATIVE_DEFAULT_PORT;
+}
+
+/** Resolved ZCode native-lane settings (env > config file > defaults).
+ *  Kept free of client-module imports: native.ts maps this onto json-edit's
+ *  ZcodeRoutePolicy (structural) and the spawn port. */
+export interface ZcodeLaneConfig {
+    readonly route: "all" | "plans" | "none";
+    readonly direct: readonly string[];
+    readonly fixedPort: number | undefined;
+    readonly assumeSigningFixed: boolean;
+}
+
+function normalizeZcodeRoute(value: unknown): "all" | "plans" | "none" | undefined {
+    return value === "all" || value === "plans" || value === "none" ? value : undefined;
+}
+
+export function resolveZcodeLane(env: NodeJS.ProcessEnv = process.env): ZcodeLaneConfig {
+    const file = loadConfigFile().zcode;
+    const route = normalizeZcodeRoute(env.BILI_ZCODE_ROUTE?.trim().toLowerCase())
+        ?? normalizeZcodeRoute(file?.route)
+        ?? "all";
+    const direct = Array.isArray(file?.direct) ? file!.direct!.filter((d): d is string => typeof d === "string" && d.length > 0) : [];
+    const portEnv = Number.parseInt(env.BILI_ZCODE_PORT ?? "", 10);
+    const portFile = file?.fixedPort;
+    const fixedPort = Number.isInteger(portEnv) && portEnv > 0 && portEnv < 65536 ? portEnv
+        : typeof portFile === "number" && Number.isInteger(portFile) && portFile > 0 && portFile < 65536 ? portFile
+        : undefined;
+    const signEnv = (env.BILI_ZCODE_SIGNING_FIXED ?? "").trim().toLowerCase();
+    const assumeSigningFixed = signEnv === "1" || signEnv === "true" || file?.assumeSigningFixed === true;
+    return { route, direct, fixedPort, assumeSigningFixed };
 }
 
 /** #1335: the native-hook attach-gate escape hatch. True when the user

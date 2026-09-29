@@ -81,15 +81,72 @@ export function detectZcodeStore(dataDir: string, env: NodeJS.ProcessEnv = proce
     return { kind: "legacy", file: zcodeStoreCandidates(dataDir, "legacy", env)[0] };
 }
 
+/** Routing scope + exemptions for the zcode provider store (#1622).
+ *  Default "all" mirrors the in-process natives (pi/dsh): every provider
+ *  rides compression, a loopback target is never re-proxied (#809), and
+ *  explicit exemptions are opt-in. */
+export interface ZcodeRoutePolicy {
+    readonly route: "all" | "plans" | "none";
+    readonly direct: readonly string[];
+    /** #1621 escape hatch for ZCode builds that fixed ClientRequestSigningV4. */
+    readonly assumeSigningFixed: boolean;
+}
+
+export function defaultZcodeRoutePolicy(): ZcodeRoutePolicy {
+    return { route: "all", direct: [], assumeSigningFixed: false };
+}
+
 /** #1621: the v3.14+ personal-store generation ships ClientRequestSigningV4
  *  for coding-plan accounts. Its handshake builder rejects non-https origins
  *  (allowInsecureHttp is never passed anywhere in zcode) and derives the
  *  handshake path from origin alone, dropping any /bili/ prefix — so a
  *  /bili/-wrapped baseUrl fails at model creation ("Client signing handshake
- *  requires HTTPS."). Native routing must be skipped on these builds, not
- *  applied. Return false here once zcode ships the signing fix. */
-export function zcodeSigningBlocksRouting(kind: ZcodeStoreKind): boolean {
-    return kind === "new";
+ *  requires HTTPS."). Under route:"all" those accounts are skipped per-entry
+ *  (every other provider still routes); under route:"plans" the plan targets
+ *  ARE the signing accounts, so nothing is routable and the whole store is
+ *  left untouched. assumeSigningFixed flips both off once zcode ships the fix. */
+export function zcodeSigningBlocksRouting(kind: ZcodeStoreKind, policy: ZcodeRoutePolicy = defaultZcodeRoutePolicy()): boolean {
+    return kind === "new" && !policy.assumeSigningFixed && policy.route === "plans";
+}
+
+/** #809 parity with the in-process natives: a loopback proxy target is never
+ *  re-proxied — wrapping it would stack bili onto itself or onto the user's
+ *  own local relay. */
+function isLoopbackHttpUrl(url: string): boolean {
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return false;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === "localhost" || host === "::1" || host === "[::1]" || host === "0.0.0.0"
+        || host === "127.0.0.1" || /^127\.\d+\.\d+\.\d+$/.test(host);
+}
+
+/** An exemption hits when the item names the provider ID verbatim or appears
+ *  as a substring of the upstream URL (domain or path pattern). */
+function directExemptionHit(id: string, upstream: string | undefined, direct: readonly string[]): boolean {
+    for (const item of direct) {
+        if (item.length === 0) continue;
+        if (item === id) return true;
+        if (upstream !== undefined && upstream.includes(item)) return true;
+    }
+    return false;
+}
+
+/** Why this entry must NOT be wrapped under the policy — undefined = route it.
+ *  `upstream` is the unwrapped target (undefined when there is no usable
+ *  http(s) baseUrl). */
+function zcodeEntrySkipReason(id: string, upstream: string | undefined, hasBaseUrl: boolean, kind: ZcodeStoreKind, policy: ZcodeRoutePolicy): string | undefined {
+    if (kind === "new" && !policy.assumeSigningFixed && policy.route === "all" && ZCODE_NEW_PLAN_IDS.includes(id)) {
+        return "client-signing account (#1621) — stays direct; use cert-MITM for compression on this account";
+    }
+    if (!hasBaseUrl) return "no usable http(s) baseUrl — left untouched";
+    if (upstream !== undefined && isLoopbackHttpUrl(upstream)) return `loopback target (${upstream}) never re-proxied (#809)`;
+    if (directExemptionHit(id, upstream, policy.direct)) return "direct exemption";
+    return undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -159,15 +216,47 @@ function legacyPlanEntries(root: Record<string, unknown>, createWhenEmpty: boole
     return found;
 }
 
-function applyLegacy(text: string, origin: string): { text: string; wrapped: ZcodeWrappedEntry[] } {
+/** #1622 route:"all" selection for the legacy store — mirrors
+ *  newStoreRulesForAll over provider[id].options. */
+function legacyPlanEntriesForAll(root: Record<string, unknown>, policy: ZcodeRoutePolicy): { routed: LegacyEntry[]; skipped: { id: string; reason: string }[] } {
+    const routed: LegacyEntry[] = [];
+    const skipped: { id: string; reason: string }[] = [];
+    const provider = asRecord(root.provider);
+    if (!provider) return { routed, skipped };
+    for (const id of Object.keys(provider)) {
+        const options = asRecord(asRecord(provider[id])?.options);
+        const upstream = options === undefined ? undefined : unwrapBaseUrl(options.baseURL);
+        const reason = zcodeEntrySkipReason(id, upstream, upstream !== undefined, "legacy", policy);
+        if (reason !== undefined || options === undefined || upstream === undefined) {
+            skipped.push({ id, reason: reason ?? "no usable http(s) baseURL — left untouched" });
+            continue;
+        }
+        routed.push({ id, options });
+    }
+    return { routed, skipped };
+}
+
+function applyLegacy(text: string, origin: string, policy: ZcodeRoutePolicy): ZcodeApplyOutcome {
     const root = parseRoot(text, "zcode v2/config.json");
     const wrapped: ZcodeWrappedEntry[] = [];
+    const skipped: { id: string; reason: string }[] = [];
+    if (policy.route === "all") {
+        const selection = legacyPlanEntriesForAll(root, policy);
+        for (const { id, options } of selection.routed) {
+            const upstream = unwrapBaseUrl(options.baseURL);
+            if (upstream === undefined) continue; // filtered above; keeps TS honest
+            options.baseURL = `${origin}/bili/${upstream}`;
+            wrapped.push({ id, upstream });
+        }
+        skipped.push(...selection.skipped);
+        return { text: serialize(root), wrapped, skipped };
+    }
     for (const { id, options } of legacyPlanEntries(root, true)) {
         const upstream = unwrapBaseUrl(options.baseURL) ?? ZCODE_BIGMODEL_ANTHROPIC_UPSTREAM;
         options.baseURL = `${origin}/bili/${upstream}`;
         wrapped.push({ id, upstream });
     }
-    return { text: serialize(root), wrapped };
+    return { text: serialize(root), wrapped, skipped };
 }
 
 function assertNewStoreShape(doc: unknown): void {
@@ -185,6 +274,12 @@ function assertNewStoreShape(doc: unknown): void {
 interface NewRule {
     readonly id: string;
     readonly api: Record<string, unknown>;
+}
+
+/** The providerRules array of a new store, read-only (empty when absent). */
+function newRuleArray(root: Record<string, unknown>): unknown[] {
+    const rulesField = asRecord(asRecord(root.config)?.providerConfigRules);
+    return rulesField && Array.isArray(rulesField.providerRules) ? (rulesField.providerRules as unknown[]) : [];
 }
 
 function newPlanRules(root: Record<string, unknown>, createWhenEmpty: boolean): NewRule[] {
@@ -221,20 +316,59 @@ function newPlanRules(root: Record<string, unknown>, createWhenEmpty: boolean): 
     return found;
 }
 
-function applyNew(text: string, origin: string): { text: string; wrapped: ZcodeWrappedEntry[] } {
+/** #1622 route:"all" selection — every provider entry in the store is a
+ *  candidate; entries the policy cannot safely wrap are reported, not
+ *  silently dropped. Nothing is synthesized and nothing is default-filled:
+ *  "all" wraps what exists, exactly like the in-process natives. */
+function newStoreRulesForAll(root: Record<string, unknown>, policy: ZcodeRoutePolicy): { routed: NewRule[]; skipped: { id: string; reason: string }[] } {
+    const routed: NewRule[] = [];
+    const skipped: { id: string; reason: string }[] = [];
+    for (const raw of newRuleArray(root)) {
+        const rule = asRecord(raw);
+        if (!rule || typeof rule.providerId !== "string" || rule.providerId.length === 0) continue;
+        const api = asRecord(asRecord(rule.config)?.api);
+        const upstream = api === undefined ? undefined : unwrapBaseUrl(api.baseUrl);
+        const reason = zcodeEntrySkipReason(rule.providerId, upstream, upstream !== undefined, "new", policy);
+        if (reason !== undefined || api === undefined || upstream === undefined) {
+            skipped.push({ id: rule.providerId, reason: reason ?? "no usable http(s) baseUrl — left untouched" });
+            continue;
+        }
+        routed.push({ id: rule.providerId, api });
+    }
+    return { routed, skipped };
+}
+
+export interface ZcodeApplyOutcome {
+    readonly text: string;
+    readonly wrapped: ZcodeWrappedEntry[];
+    readonly skipped: readonly { id: string; reason: string }[];
+}
+
+function applyNew(text: string, origin: string, policy: ZcodeRoutePolicy): ZcodeApplyOutcome {
     const root = parseRoot(text, "zcode v2/provider_config.json");
     assertNewStoreShape(root);
     const wrapped: ZcodeWrappedEntry[] = [];
+    const skipped: { id: string; reason: string }[] = [];
+    if (policy.route === "all") {
+        for (const { id, api } of newStoreRulesForAll(root, policy).routed) {
+            const upstream = unwrapBaseUrl(api.baseUrl);
+            if (upstream === undefined) continue; // filtered above; keeps TS honest
+            api.baseUrl = `${origin}/bili/${upstream}`;
+            wrapped.push({ id, upstream });
+        }
+        skipped.push(...newStoreRulesForAll(root, policy).skipped);
+        return { text: serialize(root), wrapped, skipped };
+    }
     for (const { id, api } of newPlanRules(root, true)) {
         const upstream = unwrapBaseUrl(api.baseUrl) ?? ZCODE_BIGMODEL_ANTHROPIC_UPSTREAM;
         api.baseUrl = `${origin}/bili/${upstream}`;
         wrapped.push({ id, upstream });
     }
-    return { text: serialize(root), wrapped };
+    return { text: serialize(root), wrapped, skipped };
 }
 
-export function applyZcodeRouting(text: string, kind: ZcodeStoreKind, origin: string): { text: string; wrapped: ZcodeWrappedEntry[] } {
-    return kind === "new" ? applyNew(text, origin) : applyLegacy(text, origin);
+export function applyZcodeRouting(text: string, kind: ZcodeStoreKind, origin: string, policy: ZcodeRoutePolicy = defaultZcodeRoutePolicy()): ZcodeApplyOutcome {
+    return kind === "new" ? applyNew(text, origin, policy) : applyLegacy(text, origin, policy);
 }
 
 function stampHeaders(headers: unknown): Record<string, unknown> | undefined {
@@ -249,7 +383,8 @@ function stampLegacy(text: string): string {
     let changed = false;
     const provider = asRecord(root.provider);
     if (provider) {
-        for (const id of ZCODE_LEGACY_PLAN_IDS) {
+        // route:"all" may wrap any provider entry, so stamp whatever carries a wrapper.
+        for (const id of Object.keys(provider)) {
             const options = asRecord(asRecord(provider[id])?.options);
             if (!options || !WRAPPED_URL_RE.test(String(options.baseURL))) continue;
             const stamped = stampHeaders(options.headers);
@@ -294,7 +429,8 @@ function unrouteLegacy(text: string): { text: string; changed: boolean } {
     let changed = false;
     const provider = asRecord(root.provider);
     if (provider) {
-        for (const id of ZCODE_LEGACY_PLAN_IDS) {
+        // route:"all" may wrap any provider entry, so strip every wrapper present.
+        for (const id of Object.keys(provider)) {
             const options = asRecord(asRecord(provider[id])?.options);
             if (!options || typeof options.baseURL !== "string") continue;
             const match = WRAPPED_URL_RE.exec(options.baseURL);
@@ -353,12 +489,10 @@ export function inspectZcodeRouting(dataDir: string, env: NodeJS.ProcessEnv = pr
         } catch {
             return undefined;
         }
-        const rulesField = asRecord(asRecord(root.config)?.providerConfigRules);
-        const rules = rulesField && Array.isArray(rulesField.providerRules) ? (rulesField.providerRules as unknown[]) : [];
         const wrapped: ZcodeWrappedEntry[] = [];
-        for (const raw of rules) {
+        for (const raw of newRuleArray(root)) {
             const rule = asRecord(raw);
-            if (!rule || typeof rule.providerId !== "string" || !ZCODE_NEW_PLAN_IDS.includes(rule.providerId)) continue;
+            if (!rule || typeof rule.providerId !== "string" || rule.providerId.length === 0) continue;
             const baseUrl = asRecord(asRecord(rule.config)?.api)?.baseUrl;
             const match = typeof baseUrl === "string" ? WRAPPED_URL_RE.exec(baseUrl) : undefined;
             if (match) wrapped.push({ id: rule.providerId, upstream: match[1] });
@@ -369,7 +503,7 @@ export function inspectZcodeRouting(dataDir: string, env: NodeJS.ProcessEnv = pr
     const provider = root ? asRecord(root.provider) : undefined;
     if (!provider) return undefined;
     const wrapped: ZcodeWrappedEntry[] = [];
-    for (const id of ZCODE_LEGACY_PLAN_IDS) {
+    for (const id of Object.keys(provider)) {
         const baseUrl = asRecord(asRecord(provider[id])?.options)?.baseURL;
         const match = typeof baseUrl === "string" ? WRAPPED_URL_RE.exec(baseUrl) : undefined;
         if (match) wrapped.push({ id, upstream: match[1] });

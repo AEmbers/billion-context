@@ -11,8 +11,10 @@ import { LAUNCHER_DEFAULT_HOST, ensureProxyRunning, findLiveAttachableInstance }
 import { isPidAlive } from "../instance.js";
 import { nativeAttachOrigin, nativeProxyScriptPath, proxyEnvOrigin } from "../agent/native-bootstrap.js";
 import { reportRuntimeInfo, type RuntimeInfoReport } from "../agent/shared.js";
+import { resolveZcodeLane } from "../config.js";
 import {
     applyZcodeRouting,
+    defaultZcodeRoutePolicy,
     detectCurrentZcodeOrigin,
     detectZcodeStore,
     resolveZcodeDataDir,
@@ -20,6 +22,7 @@ import {
     unrouteZcodeText,
     zcodeSigningBlocksRouting,
     zcodeStoreCandidates,
+    ZcodeRoutePolicy,
     ZcodeStoreKind,
     ZcodeWrappedEntry,
 } from "./json-edit.js";
@@ -126,6 +129,10 @@ export interface RouteZcodeOptions {
     readonly env?: NodeJS.ProcessEnv;
     readonly dataDir?: string;
     readonly log?: (msg: string) => void;
+    /** Routing scope/exemptions (#1622). Default: route:"all" with no
+     *  exemptions — call sites that resolve config themselves (bootstrap,
+     *  watchdog, handoff) pass their resolved policy through. */
+    readonly policy?: ZcodeRoutePolicy;
 }
 
 // #1002 snapshot discipline: .bili-bak holds the state before bili's LATEST
@@ -166,6 +173,13 @@ function removeSnapshots(file: string): void {
     } catch {}
 }
 
+/** Policy for entry points that don't thread a resolved lane through
+ *  options (drift repair, exit handoff): read env + config file now. */
+function zcodePolicyFromEnv(env: NodeJS.ProcessEnv): ZcodeRoutePolicy {
+    const lane = resolveZcodeLane(env);
+    return { route: lane.route, direct: lane.direct, assumeSigningFixed: lane.assumeSigningFixed };
+}
+
 /** Rewrite the detected provider store so the coding-plan traffic flows
  *  through `origin` (idempotent, re-wraps across sessions with different
  *  ports), snapshotting per #1002 before each mutation. Returns what was
@@ -181,7 +195,8 @@ export async function routeZcodeConfig(opts: RouteZcodeOptions): Promise<ZcodeRo
         return undefined;
     }
     const { kind, file } = detectZcodeStore(dataDir, env);
-    if (zcodeSigningBlocksRouting(kind)) {
+    const policy = opts.policy ?? defaultZcodeRoutePolicy();
+    if (zcodeSigningBlocksRouting(kind, policy)) {
         log(SIGNING_BLOCK_MESSAGE);
         return undefined;
     }
@@ -194,9 +209,12 @@ export async function routeZcodeConfig(opts: RouteZcodeOptions): Promise<ZcodeRo
     }
     const port = Number.parseInt(new URL(opts.origin).port, 10);
     if (!Number.isInteger(port) || port <= 0) throw new Error(`cannot derive a port from proxy origin ${opts.origin}`);
-    const applied = applyZcodeRouting(text, kind, opts.origin);
+    const applied = applyZcodeRouting(text, kind, opts.origin, policy);
     if (applied.wrapped.length === 0) {
         log("no routable provider entry found — leaving the config untouched");
+        if (applied.skipped.length > 0) {
+            log(`skipped ${applied.skipped.length} entr${applied.skipped.length === 1 ? "y" : "ies"}: ${applied.skipped.map((s) => `${s.id} (${s.reason})`).join("; ")}`);
+        }
         return undefined;
     }
     await withConfigLock(dataDir, () => {
@@ -204,9 +222,12 @@ export async function routeZcodeConfig(opts: RouteZcodeOptions): Promise<ZcodeRo
     });
     // Re-apply against the written text to catch self-apply corruption early
     // (must be a fixed point: same wrapped set, byte-stable output).
-    const check = applyZcodeRouting(fs.readFileSync(file, "utf8"), kind, opts.origin);
+    const check = applyZcodeRouting(fs.readFileSync(file, "utf8"), kind, opts.origin, policy);
     if (check.wrapped.length !== applied.wrapped.length || check.text !== applied.text) {
         throw new Error(`zcode config rewrite verification failed for ${file}`);
+    }
+    if (applied.skipped.length > 0) {
+        log(`skipped ${applied.skipped.length} entr${applied.skipped.length === 1 ? "y" : "ies"}: ${applied.skipped.map((s) => `${s.id} (${s.reason})`).join("; ")}`);
     }
     return {
         origin: opts.origin,
@@ -319,10 +340,19 @@ export async function bootstrapZcodeNative(opts: BootstrapZcodeOptions = {}): Pr
     const plan = planNativeZcode(env);
     if (plan.mode === "off") return { mode: "off" };
 
+    // #1622: route scope comes from env + billion-context.json (zcode.route).
+    // "none" is an explicit opt-out — behave like plan "off".
+    const lane = resolveZcodeLane(env);
+    const policy: ZcodeRoutePolicy = { route: lane.route, direct: lane.direct, assumeSigningFixed: lane.assumeSigningFixed };
+    if (policy.route === "none") {
+        log('zcode route is "none" (BILI_ZCODE_ROUTE / billion-context.json zcode.route) — leaving the provider store direct');
+        return { mode: "off" };
+    }
+
     // #1621: degrade BEFORE any proxy bring-up; the caller's off-path runs
     // unrouteZcode, which also strips wrappers left by older bili versions.
     const dataDir = opts.dataDir ?? resolveZcodeDataDir(env);
-    if (zcodeSigningBlocksRouting(detectZcodeStore(dataDir, env).kind)) {
+    if (zcodeSigningBlocksRouting(detectZcodeStore(dataDir, env).kind, policy)) {
         log(SIGNING_BLOCK_MESSAGE);
         return { mode: "off" };
     }
@@ -342,7 +372,7 @@ export async function bootstrapZcodeNative(opts: BootstrapZcodeOptions = {}): Pr
         attached = !!handle.attached;
     }
 
-    const routed = await routeZcodeConfig({ origin, env, dataDir, log });
+    const routed = await routeZcodeConfig({ origin, env, dataDir, log, policy });
     if (routed) log(`routed ${routed.wrapped.map((w) => w.id).join(", ")} via ${origin} → ${routed.upstream}`);
     return { mode: "active", attached, routed };
 }
@@ -350,9 +380,11 @@ export async function bootstrapZcodeNative(opts: BootstrapZcodeOptions = {}): Pr
 async function defaultEnsureProxy(): Promise<{ origin: string; attached: boolean }> {
     // The spawned proxy's parent-gone watchdog (#server.ts BILI_PARENT_PID)
     // keys off OUR pid: zcode kills this MCP child when its session ends, so
-    // the per-session proxy tears itself down with it.
+    // the per-session proxy tears itself down with it. fixedPort (#1622)
+    // pins the lane so wrappers written by one session stay valid for the
+    // next one even when nothing else hands the port off.
     const handle = await ensureProxyRunning(
-        { host: LAUNCHER_DEFAULT_HOST, port: 0, passthrough: false, debug: false, lane: "zcode" },
+        { host: LAUNCHER_DEFAULT_HOST, port: resolveZcodeLane().fixedPort ?? 0, passthrough: false, debug: false, lane: "zcode" },
         { scriptPath: nativeProxyScriptPath() },
     );
     return { origin: handle.origin, attached: !!handle.attached };
@@ -406,8 +438,9 @@ export async function repairSharedStoreDrift(opts: StoreDriftOptions): Promise<S
     if (current === opts.selfOrigin) return "self";
     if (await probe(current)) return "foreign-live";
     log(`shared store points at dead instance ${current} — repairing`);
+    const policy = zcodePolicyFromEnv(env);
     if (await probe(opts.selfOrigin)) {
-        const routed = await routeZcodeConfig({ origin: opts.selfOrigin, env, dataDir: opts.dataDir, log });
+        const routed = await routeZcodeConfig({ origin: opts.selfOrigin, env, dataDir: opts.dataDir, log, policy });
         if (routed) {
             await activateZcodePluginMode(routed, { env, dataDir: opts.dataDir, log });
             log(`store repaired → ${opts.selfOrigin}`);
@@ -416,7 +449,7 @@ export async function repairSharedStoreDrift(opts: StoreDriftOptions): Promise<S
     } else {
         const replacement = await (opts.findReplacement ?? defaultFindReplacement)();
         if (replacement) {
-            const routed = await routeZcodeConfig({ origin: replacement.origin, env, dataDir: opts.dataDir, log });
+            const routed = await routeZcodeConfig({ origin: replacement.origin, env, dataDir: opts.dataDir, log, policy });
             if (routed) {
                 await activateZcodePluginMode(routed, { env, dataDir: opts.dataDir, log });
                 log(`store repaired → ${replacement.origin}`);
@@ -448,7 +481,7 @@ export async function handoffZcodeRoutingOnExit(opts: ExitHandoffOptions): Promi
     if (!current || current !== opts.ownOrigin) return "not-ours";
     const replacement = await (opts.findReplacement ?? defaultFindReplacement)();
     if (replacement) {
-        const routed = await routeZcodeConfig({ origin: replacement.origin, env, dataDir: opts.dataDir, log });
+        const routed = await routeZcodeConfig({ origin: replacement.origin, env, dataDir: opts.dataDir, log, policy: zcodePolicyFromEnv(env) });
         if (routed) {
             await activateZcodePluginMode(routed, { env, dataDir: opts.dataDir, log });
             log(`exit handoff: store → ${replacement.origin}`);
