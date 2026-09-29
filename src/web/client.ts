@@ -108,6 +108,8 @@ export const WEB_CLIENT = `(function () {
     const PAGES = ["overview", "sessions", "config", "connect", "logs"];
     let current = "overview";
     let sessionsCache = [];
+    // #1682: last overview alert payload — lets a dismiss re-render without refetching.
+    let latestAlerts = [];
 
     function sessionTitleCell(s) {
         // #1426: title falls back to an "untitled" placeholder and the FULL session id is always
@@ -175,7 +177,7 @@ export const WEB_CLIENT = `(function () {
         return tr;
     }
 
-    async function loadOverview() {
+    async function loadOverview(silent) {
         try {
             const d = await json("/__bili/overview");
             const o = d.overview || {};
@@ -223,7 +225,7 @@ export const WEB_CLIENT = `(function () {
             recent.forEach((s) => rb.appendChild(sessionRow(s, false)));
             renderBanners(d);
         } catch (e) {
-            toast(t("toast.failed", { msg: e.message }), "err");
+            if (!silent) toast(t("toast.failed", { msg: e.message }), "err");
         }
     }
     function renderBanners(d) {
@@ -274,6 +276,72 @@ export const WEB_CLIENT = `(function () {
                 ab.innerHTML = "";
             }
         }
+        // #1682: global upstream-connection alert banner — visible on every view,
+        // one row per active alert (no stacking), dismiss per alert instance.
+        latestAlerts = Array.isArray(d.alerts) ? d.alerts : [];
+        renderAlertBanner();
+    }
+    function readDismissedAlerts() {
+        try {
+            const v = JSON.parse(localStorage.getItem("bili-alert-dismissed") || "[]");
+            return new Set(Array.isArray(v) ? v : []);
+        } catch (e) { return new Set(); }
+    }
+    // Static per-kind references: the #1024 i18n lint requires every catalog
+    // key to be referenced literally in this file, with no dead keys.
+    function alertHint(kind) {
+        switch (kind) {
+            case "connect-timeout": return t("alert.hint.connect_timeout");
+            case "connect-refused": return t("alert.hint.connect_refused");
+            case "proxy-reset": return t("alert.hint.proxy_reset");
+            case "upstream-reset": return t("alert.hint.upstream_reset");
+            case "dns": return t("alert.hint.dns");
+            case "tls": return t("alert.hint.tls");
+            default: return t("alert.hint.unknown");
+        }
+    }
+    function alertKey(a) { return a.kind + "|" + a.host + "|" + a.firstSeen; }
+    function dismissAlert(key) {
+        const s = readDismissedAlerts();
+        s.add(key);
+        const arr = [...s];
+        while (arr.length > 64) arr.shift();
+        try { localStorage.setItem("bili-alert-dismissed", JSON.stringify(arr)); } catch (e) {}
+    }
+    function renderAlertBanner() {
+        const el = $("alerts-banner");
+        if (!el) return;
+        const dismissed = readDismissedAlerts();
+        const vis = latestAlerts.filter((a) => a && a.kind && a.host && !dismissed.has(alertKey(a)));
+        if (!vis.length) {
+            el.hidden = true;
+            el.classList.remove("show");
+            el.innerHTML = "";
+            return;
+        }
+        el.hidden = false;
+        el.classList.add("show");
+        el.innerHTML = "";
+        const head = document.createElement("div");
+        head.className = "banner-title";
+        head.textContent = "⚠️ " + t("alert.title");
+        el.appendChild(head);
+        vis.forEach((a) => {
+            const row = document.createElement("div");
+            row.className = "alert-row";
+            const msg = document.createElement("span");
+            msg.textContent = t("alert.item", { host: a.host, kind: a.kind, count: a.count, first: fmtDT(a.firstSeen), hint: alertHint(a.kind) });
+            const btn = document.createElement("button");
+            btn.className = "btn sm alert-dismiss";
+            btn.textContent = t("alert.dismiss");
+            btn.addEventListener("click", () => {
+                dismissAlert(alertKey(a));
+                renderAlertBanner();
+            });
+            row.appendChild(msg);
+            row.appendChild(btn);
+            el.appendChild(row);
+        });
     }
 
     async function loadSessions(detailId) {
@@ -1262,8 +1330,11 @@ export const WEB_CLIENT = `(function () {
     route();
     setInterval(() => {
         if (document.hidden) return;
+        // #1682: keep the global alert banner fresh on every view — silent, so a
+        // restarting server cannot spam toasts from background views.
         if (current === "overview") loadOverview();
-        else if (current === "sessions" && $("session-detail-view").hidden) refreshSessions(false);
+        else loadOverview(true);
+        if (current === "sessions" && $("session-detail-view").hidden) refreshSessions(false);
         else if (current === "logs") loadLogs();
     }, 5000);
 })();`;
