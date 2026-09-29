@@ -382,6 +382,6 @@ test("integration: unresolvable /bili/ destination answers 502 transport-class, 
         process.env.BILI_CONFIG_FILE = prevConfig;
         proxy.closeAllConnections?.();
         await close(proxy);
-        try { rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
+        try { rmrf(root); } catch { /* best-effort */ }
     }
 });
