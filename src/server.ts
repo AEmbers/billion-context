@@ -3984,7 +3984,42 @@ async function prepareResponses(
     const renderTags: "text-only" | "none" = process.env.ACP_RENDER_NONE || isCompactionTrigger ? "none" : "text-only";
 
     try {
+        // [#1638] Plugin mode: position-preserve mid-history system/developer
+        // items. Clients like OMP append custom_message-derived developer
+        // notifications mid-history and re-send them every turn; the kernel
+        // hoists system/developer content from ANY position into
+        // projection.systemParts, so the merged developer block injected at
+        // the front of the rebuilt input churns every turn and breaks the
+        // upstream prefix cache (sawtooth down to the instructions-only
+        // residual). Marking the non-head items with an unknown type just for
+        // the duration of responsesToCore keeps them out of systemParts and
+        // puts them in the projection layout as coreId-less slots, which
+        // patchResponsesInput re-emits verbatim in their original position —
+        // the position-preserved semantics the openai-chat wire already has
+        // (head-only hoist, kernel src/wire/openai.ts). Proxy mode (native
+        // codex) keeps the hoist-and-anchor behavior (#1085).
+        const inplaceSysDev: { item: { type?: string; role?: unknown }; type: string | undefined }[] = [];
+        if (pluginMode && Array.isArray(parsed.input)) {
+            let head = true;
+            for (const rawItem of parsed.input) {
+                const item = rawItem as { type?: string; role?: unknown };
+                const isSysDevMsg = (item.type === undefined || item.type === "message") &&
+                    (item.role === "system" || item.role === "developer");
+                if (isSysDevMsg) {
+                    if (head) continue;
+                    inplaceSysDev.push({ item, type: item.type });
+                    item.type = "__bili_inplace_sysdev";
+                    continue;
+                }
+                if (item.type === "additional_tools" || item.type === "mcp_list_tools") continue;
+                head = false;
+            }
+        }
         const projection = responsesToCore(parsed);
+        for (const { item, type } of inplaceSysDev) {
+            if (type === undefined) delete item.type;
+            else item.type = type;
+        }
         responsesProjection = projection;
         // Compaction-trigger requests are the compression mechanism itself —
         // their payload shape must not gain anchor state or note items.
