@@ -5290,15 +5290,19 @@ async function forward(
             }
         }
     }
-    // #1421: outbound chain checkpoint — every request THIS instance actually
+    // #1421/#1683: outbound chain checkpoint — when egress stamping is enabled
+    // (chainEgressStamp, DEFAULT OFF), every request THIS instance actually
     // processed leaves with a request-level stamp, so a downstream bili applies
-    // first-processor-wins even when x-bili-hop was stripped in transit. Lands
+    // first-processor-wins even when x-bili-hop was stripped in transit. The
+    // carrier is model-visible (insertCheckpointCarrier), which is why this is
+    // opt-in: models read it as phantom user input and burn tokens on it. Lands
     // AFTER compat roles + output steering: the digest must cover the exact
     // bytes forwarded. Best-effort — a stamp failure never breaks the forward.
     // Passthrough/side/forge/classifier forwards carry no stamp: only a real
     // kernel pass (processedMessages non-empty — side/classifier Prepareds are
-    // empty) claims processing, per the first-processor-wins contract.
-    if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainContentDetection !== false) {
+    // empty) claims processing, per the first-processor-wins contract. Inbound
+    // recognition + hop passthrough are unaffected by this switch.
+    if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainEgressStamp === true) {
         try {
             const stamped = stampOutbound(JSON.parse(wireBody), prepared.protocol, instanceId);
             if (stamped !== null) {

@@ -710,19 +710,38 @@ test("#1101 T8: warn-set FIFO evicts the oldest session once past the cap", asyn
     }
 });
 
-test("#1101 T9: BILI_CHAIN_CONTENT env parse — default ON, 0 disables, env wins over file", async () => {
+test("#1101 T9: BILI_CHAIN_CONTENT env parse — default OFF, 1 enables, env wins over file", async () => {
     const root = path.join(tmpdir(), `bili-chain-env-${process.pid}-${Date.now()}`);
     mkdirSync(root, { recursive: true });
     const cfgFile = path.join(root, "billion-context.json");
     const prevFile = process.env.BILI_CONFIG_FILE;
     try {
         process.env.BILI_CONFIG_FILE = cfgFile;
-        assert.equal(loadOptions({}).chainContentDetection, true, "default ON when nothing is configured");
-        assert.equal(loadOptions({ BILI_CHAIN_CONTENT: "0" }).chainContentDetection, false, "BILI_CHAIN_CONTENT=0 disables the fallback");
-        assert.equal(loadOptions({ BILI_CHAIN_CONTENT: "1" }).chainContentDetection, true, "BILI_CHAIN_CONTENT=1 enables it");
-        writeFileSync(cfgFile, JSON.stringify({ chainContentDetection: false }), "utf8");
-        assert.equal(loadOptions({}).chainContentDetection, false, "file chainContentDetection=false disables the fallback");
-        assert.equal(loadOptions({ BILI_CHAIN_CONTENT: "1" }).chainContentDetection, true, "env =1 wins over file false");
+        assert.equal(loadOptions({}).chainContentDetection, false, "default OFF when nothing is configured (#1683: header-only recognition)");
+        assert.equal(loadOptions({ BILI_CHAIN_CONTENT: "1" }).chainContentDetection, true, "BILI_CHAIN_CONTENT=1 enables body-content detection");
+        assert.equal(loadOptions({ BILI_CHAIN_CONTENT: "0" }).chainContentDetection, false, "BILI_CHAIN_CONTENT=0 keeps it off");
+        writeFileSync(cfgFile, JSON.stringify({ chainContentDetection: true }), "utf8");
+        assert.equal(loadOptions({}).chainContentDetection, true, "file chainContentDetection=true enables it");
+        assert.equal(loadOptions({ BILI_CHAIN_CONTENT: "0" }).chainContentDetection, false, "env =0 wins over file true");
+    } finally {
+        if (prevFile === undefined) delete process.env.BILI_CONFIG_FILE; else process.env.BILI_CONFIG_FILE = prevFile;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("#1683 T9b: BILI_CHAIN_STAMP env parse — default OFF, 1 enables, env wins over file", async () => {
+    const root = path.join(tmpdir(), `bili-chain-stamp-${process.pid}-${Date.now()}`);
+    mkdirSync(root, { recursive: true });
+    const cfgFile = path.join(root, "billion-context.json");
+    const prevFile = process.env.BILI_CONFIG_FILE;
+    try {
+        process.env.BILI_CONFIG_FILE = cfgFile;
+        assert.equal(loadOptions({}).chainEgressStamp, false, "default OFF when nothing is configured");
+        assert.equal(loadOptions({ BILI_CHAIN_STAMP: "1" }).chainEgressStamp, true, "BILI_CHAIN_STAMP=1 enables egress stamping");
+        assert.equal(loadOptions({ BILI_CHAIN_STAMP: "0" }).chainEgressStamp, false, "BILI_CHAIN_STAMP=0 keeps it off");
+        writeFileSync(cfgFile, JSON.stringify({ chainEgressStamp: true }), "utf8");
+        assert.equal(loadOptions({}).chainEgressStamp, true, "file chainEgressStamp=true enables it");
+        assert.equal(loadOptions({ BILI_CHAIN_STAMP: "0" }).chainEgressStamp, false, "env =0 wins over file true");
     } finally {
         if (prevFile === undefined) delete process.env.BILI_CONFIG_FILE; else process.env.BILI_CONFIG_FILE = prevFile;
         rmrf(root);
