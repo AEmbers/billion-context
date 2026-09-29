@@ -64,7 +64,7 @@ import {
     type GoogleSystemInstruction,
     type GoogleTool,
 } from "acp-kernel/wire";
-import { ABSORB_TOOL_NAME, COMPRESS_TOOL, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_GOOGLE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, BILI_ACP_READONLY_TOOLS_RESPONSES, COMPRESS_TOOL_NAME, IMAGE_FULL_TOOL, IMAGE_FULL_TOOL_GOOGLE, IMAGE_FULL_TOOL_OPENAI, IMAGE_FULL_TOOL_RESPONSES, RULE_TOOL, RULE_TOOL_GOOGLE, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, absorbToolsFor, retrieveToolsFor, buildAbsorbSystemPrompt, buildCompressSystemPrompt, buildCompressHybridSystemPrompt, withConversationIdNote, withMarkerIntegrityNote, withStagedCompressGuidance, withSummaryBudgetNote } from "./compress-tool.js";
+import { ABSORB_TOOL_NAME, COMPRESS_TOOL, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE, BILI_ACP_TOOLS_GOOGLE, BILI_ACP_TOOLS_GOOGLE_NO_RANGE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_OPENAI_NO_RANGE, BILI_ACP_TOOLS_RESPONSES, BILI_ACP_TOOLS_RESPONSES_NO_RANGE, BILI_ACP_READONLY_TOOLS_RESPONSES, BILI_ACP_READONLY_TOOLS_RESPONSES_NO_RANGE, COMPRESS_TOOL_NAME, IMAGE_FULL_TOOL, IMAGE_FULL_TOOL_GOOGLE, IMAGE_FULL_TOOL_OPENAI, IMAGE_FULL_TOOL_RESPONSES, RULE_TOOL, RULE_TOOL_GOOGLE, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, absorbToolsFor, retrieveToolsFor, buildAbsorbSystemPrompt, buildCompressSystemPrompt, buildCompressHybridSystemPrompt, withConversationIdNote, withMarkerIntegrityNote, withStagedCompressGuidance, withSummaryBudgetNote } from "./compress-tool.js";
 import { applyAbsorbView, absorbEnabled, absorbToolName, storeEffectiveAbsorb } from "./absorb.js";
 import { adoptContentStore, ccrEnabled, ccrLoopConfig, ccrPluginWireOk, commitRetrievals, commitRetrievalNotes, contentStoreOf, dropRetrievals, executeRetrieve, pruneExpiredRetrievals, reconcileReloadedRetrievals, renderRetrievalNotes, retrieveToolName, snapshotPendingRetrievals, snapshotRetrievalNotes, storeEffectiveCcr, type CcrSettings } from "./store.js";
 import { applyImageCompressionPass, imageCompressionEnabled, imageFullTrailingNote, imageUsageSuffix, storeEffectiveImageCompression, type ImageCompressionSettings } from "./image-compress.js";
@@ -3365,7 +3365,7 @@ async function prepareAnthropic(
         // the compress prompt on round-2, the exact F2 seam the matrix pins).
         systemOut = stampAnthropicSystemCacheControl(systemOut, anthropicCacheMarks !== undefined);
         if (injectTools) {
-            toolsOut = injectTool(parsed.tools, [...(absorbActive ? [absorbTools.anthropic] : []), ...(rulesActive ? [RULE_TOOL] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).anthropic] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL] : [])], surface?.toolPrompts);
+            toolsOut = injectTool(parsed.tools, [...(absorbActive ? [absorbTools.anthropic] : []), ...(rulesActive ? [RULE_TOOL] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).anthropic] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL] : [])], surface?.toolPrompts, ccrEnabled(session));
         }
         // Nudge as a separate trailing user message (cache-friendly): the
         // system block stays byte-stable so the prefix cache survives.
@@ -3596,7 +3596,7 @@ async function prepareOpenai(
         // avoids double-counting it.
         openaiOutboundSystem = sysParts.join("\n\n");
         if (injectTools) {
-            toolsOut = injectOpenaiTool(parsed.tools, [...(absorbActive ? [absorbTools.openai] : []), ...(rulesActive ? [RULE_TOOL_OPENAI] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).openai] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_OPENAI] : [])], surface?.toolPrompts);
+            toolsOut = injectOpenaiTool(parsed.tools, [...(absorbActive ? [absorbTools.openai] : []), ...(rulesActive ? [RULE_TOOL_OPENAI] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).openai] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_OPENAI] : [])], surface?.toolPrompts, ccrEnabled(session));
         }
         // Nudge as a separate trailing user message (cache-friendly). Injected
         // in BOTH modes (#451): plugin agents supply the ACP tools but have no
@@ -3822,7 +3822,7 @@ async function prepareGoogle(
         const extraSystemParts = sysParts.slice(googleClientSystem ? 1 : 0);
         systemInstruction = extraSystemParts.length > 0 ? { parts: sysParts.map((text) => ({ text })) } : parsed.systemInstruction;
         if (injectTools) {
-            toolsOut = injectGoogleTool(parsed.tools, [...(absorbActive ? [absorbTools.google] : []), ...(rulesActive ? [RULE_TOOL_GOOGLE] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).google] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_GOOGLE] : [])], surface?.toolPrompts);
+            toolsOut = injectGoogleTool(parsed.tools, [...(absorbActive ? [absorbTools.google] : []), ...(rulesActive ? [RULE_TOOL_GOOGLE] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).google] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_GOOGLE] : [])], surface?.toolPrompts, ccrEnabled(session));
         }
         if (sysNotes.length > 0) {
             rebuiltContents = appendGoogleNudge(rebuiltContents, sysNotes.join("\n\n---\n\n"));
@@ -4110,10 +4110,13 @@ async function prepareResponses(
             if (forgedSummaries.length > 0) log("debug", `[${sessionId}] [inject] ${forgedSummaries.length} captured summary block(s) re-injected into developer message`);
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
             if (!process.env.ACP_NO_INJECT_TOOL && injectTools) {
-                const respExtra = [...(absorbActive ? [absorbTools.responses] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
+                // #1712: decompress's startId/endId execute only on CCR-armed
+                // sessions (#1179) — serve the no-range schema otherwise.
+                const ccrOn = ccrEnabled(session);
+                const respExtra = [...(absorbActive ? [absorbTools.responses] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrOn ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
                 toolsOut = responsesTextProtocol
-                    ? injectResponsesTool(parsed.tools, BILI_ACP_READONLY_TOOLS_RESPONSES, surface?.toolPrompts)
-                    : injectResponsesTool(parsed.tools, respExtra.length > 0 ? [...BILI_ACP_TOOLS_RESPONSES, ...respExtra] : BILI_ACP_TOOLS_RESPONSES, surface?.toolPrompts);
+                    ? injectResponsesTool(parsed.tools, ccrOn ? BILI_ACP_READONLY_TOOLS_RESPONSES : BILI_ACP_READONLY_TOOLS_RESPONSES_NO_RANGE, surface?.toolPrompts)
+                    : injectResponsesTool(parsed.tools, respExtra.length > 0 ? [...(ccrOn ? BILI_ACP_TOOLS_RESPONSES : BILI_ACP_TOOLS_RESPONSES_NO_RANGE), ...respExtra] : (ccrOn ? BILI_ACP_TOOLS_RESPONSES : BILI_ACP_TOOLS_RESPONSES_NO_RANGE), surface?.toolPrompts);
             }
         } else if (projection.systemParts.length > 0 || forgedSummaries.length > 0) {
             const devContent = [...projection.systemParts, ...forgedSummaries].join("\n\n---\n\n");
@@ -4513,8 +4516,10 @@ function injectSystem(
 // cannot be filtered per request) are dropped here so the upstream sees
 // exactly one definition per name, and it is bili's (its arg schemas are what
 // the compress loop dispatches on). Plugin mode never calls these helpers.
-function injectTool(tools: unknown[] | undefined, extras?: readonly { name: string }[], toolPrompts?: ToolPrompts): unknown[] {
-    const acp = applyAcpToolOverrides(BILI_ACP_TOOLS_ANTHROPIC, toolPrompts);
+function injectTool(tools: unknown[] | undefined, extras?: readonly { name: string }[], toolPrompts?: ToolPrompts, ccrOn = false): unknown[] {
+    // #1712: decompress's startId/endId execute only on CCR-armed sessions
+    // (#1179), so serve the no-range schema when CCR is off.
+    const acp = applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_ANTHROPIC : BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE, toolPrompts);
     const list = extras ?? [];
     if (!Array.isArray(tools)) return [...acp, ...list];
     const owned = new Set<string>(acp.map((t) => t.name));
@@ -4526,8 +4531,8 @@ function injectTool(tools: unknown[] | undefined, extras?: readonly { name: stri
     return [...kept, ...acp, ...list];
 }
 
-function injectOpenaiTool(tools: OpenAITool[] | undefined, extras?: readonly OpenAITool[], toolPrompts?: ToolPrompts): OpenAITool[] {
-    const acp = applyAcpToolOverrides(BILI_ACP_TOOLS_OPENAI, toolPrompts) as OpenAITool[];
+function injectOpenaiTool(tools: OpenAITool[] | undefined, extras?: readonly OpenAITool[], toolPrompts?: ToolPrompts, ccrOn = false): OpenAITool[] {
+    const acp = applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_OPENAI : BILI_ACP_TOOLS_OPENAI_NO_RANGE, toolPrompts) as OpenAITool[];
     const list = extras ?? [];
     if (!Array.isArray(tools)) return [...acp, ...list] as OpenAITool[];
     const owned = new Set<string>(acp.map((t) => t.function.name));
@@ -4543,8 +4548,8 @@ function injectOpenaiTool(tools: OpenAITool[] | undefined, extras?: readonly Ope
  *  nests declarations one level deeper than the OpenAI shape
  *  (`tools[].functionDeclarations[]`), so presence is collected across every
  *  entry and the missing declarations are appended as one new entry. */
-function injectGoogleTool(tools: GoogleTool[] | undefined, extra?: { name: string }[], toolPrompts?: ToolPrompts): GoogleTool[] {
-    const acp = applyAcpToolOverrides(BILI_ACP_TOOLS_GOOGLE, toolPrompts) as GoogleFunctionDeclaration[];
+function injectGoogleTool(tools: GoogleTool[] | undefined, extra?: { name: string }[], toolPrompts?: ToolPrompts, ccrOn = false): GoogleTool[] {
+    const acp = applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_GOOGLE : BILI_ACP_TOOLS_GOOGLE_NO_RANGE, toolPrompts) as GoogleFunctionDeclaration[];
     const wanted: { name: string }[] = extra ? [...acp, ...extra] : [...acp];
     if (!Array.isArray(tools)) return [{ functionDeclarations: wanted as GoogleFunctionDeclaration[] }];
     const present = new Set<string>();

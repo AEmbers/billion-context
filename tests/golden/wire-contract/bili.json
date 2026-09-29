@@ -139,11 +139,11 @@
             },
             "startId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
             },
             "endId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
             }
           },
           "required": [
@@ -345,11 +345,11 @@
               },
               "startId": {
                 "type": "string",
-                "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+                "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
               },
               "endId": {
                 "type": "string",
-                "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+                "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
               }
             },
             "required": [
@@ -558,11 +558,11 @@
             },
             "startId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
             },
             "endId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
             }
           },
           "required": [
@@ -689,11 +689,11 @@
             },
             "startId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
             },
             "endId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
             }
           },
           "required": [
@@ -756,11 +756,11 @@
             },
             "startId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
             },
             "endId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
             }
           },
           "required": [
@@ -943,11 +943,11 @@
           },
           "startId": {
             "type": "string",
-            "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+            "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
           },
           "endId": {
             "type": "string",
-            "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+            "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
           }
         },
         "required": [
@@ -977,11 +977,11 @@
             },
             "startId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
             },
             "endId": {
               "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
             }
           },
           "required": [
@@ -1011,11 +1011,11 @@
           },
           "startId": {
             "type": "string",
-            "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+            "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
           },
           "endId": {
             "type": "string",
-            "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+            "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
           }
         },
         "required": [
@@ -1043,11 +1043,11 @@
           },
           "startId": {
             "type": "string",
-            "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
+            "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted."
           },
           "endId": {
             "type": "string",
-            "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
+            "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block."
           }
         },
         "required": [

@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { acquireInFlight, diagnoseSuccessWithoutUsage, effectiveConfig, findSessionByCanonicalId, listSessions, markCompactionBoundary, markDirty, peekSession, releaseInFlight, withSessionLock, type Session } from "./session.js";
 import { clientConversationHeader } from "./session-id.js";
-import { ABSORB_TOOL_NAME, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, PROXY_TOOL_NAMES, RETRIEVE_TOOL_NAME, RULE_TOOL, RULE_TOOL_NAME, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, SEARCH_CONTEXT_CONVERSATION_ID_PARAM, SEARCH_CONTEXT_TOOL_NAME, absorbToolsFor, retrieveToolsFor } from "./compress-tool.js";
+import { ABSORB_TOOL_NAME, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_OPENAI_NO_RANGE, BILI_ACP_TOOLS_RESPONSES_NO_RANGE, PROXY_TOOL_NAMES, RETRIEVE_TOOL_NAME, RULE_TOOL, RULE_TOOL_NAME, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, SEARCH_CONTEXT_CONVERSATION_ID_PARAM, SEARCH_CONTEXT_TOOL_NAME, absorbToolsFor, retrieveToolsFor } from "./compress-tool.js";
 import { absorbEnabled, effectiveAbsorbConfig, isProxyToolFor } from "./absorb.js";
 import { effectiveRulesEnabled, rulesEnabled } from "./rules-feature.js";
 import { executeProxyTool } from "./loop/core.js";
@@ -627,6 +627,18 @@ export function handlePluginManifest(res: import("node:http").ServerResponse, co
     const ccrOn = config.ccr?.enabled === true;
     const ccrName = config.ccr?.toolName ?? RETRIEVE_TOOL_NAME;
     const ccrTools = ccrOn ? retrieveToolsFor(ccrName) : undefined;
+    // #1712: decompress's startId/endId (range restore) executes only on CCR-armed
+    // sessions, so the manifest advertises them only when the base config enables
+    // CCR (#1345 plugin policy = base block verbatim) — same conservative #1192
+    // rule as acp_retrieve above. CCR-off manifests serve the no-range variants so
+    // a registered agent never sees range fields execution would refuse.
+    const acpAnthropic = ccrOn ? BILI_ACP_TOOLS_ANTHROPIC : BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE;
+    const acpOpenai = ccrOn ? BILI_ACP_TOOLS_OPENAI : BILI_ACP_TOOLS_OPENAI_NO_RANGE;
+    // Responses wire: plugin mode structurally disarms CCR there (#1271 —
+    // PLUGIN_CCR_WIRES excludes it), so range restore can never execute for a
+    // registered agent on that wire — always the no-range variant, mirroring
+    // how ccrTools above is never spread into the responses array.
+    const acpResponses = BILI_ACP_TOOLS_RESPONSES_NO_RANGE;
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
         ok: true,
@@ -635,9 +647,9 @@ export function handlePluginManifest(res: import("node:http").ServerResponse, co
         version: VERSION,
         toolNames: [...PROXY_TOOL_NAMES, ...(absorbTools ? [absorbName] : []), ...(rulesOn ? [RULE_TOOL_NAME] : []), ...(ccrOn ? [ccrName] : [])],
         tools: {
-            anthropic: withSearchContextConversationDescription([...BILI_ACP_TOOLS_ANTHROPIC, ...(absorbTools ? [absorbTools.anthropic] : []), ...(rulesOn ? [RULE_TOOL] : []), ...(ccrTools ? [ccrTools.anthropic] : [])].map(withConversationIdParam)),
-            openai: withSearchContextConversationDescription([...BILI_ACP_TOOLS_OPENAI, ...(absorbTools ? [absorbTools.openai] : []), ...(rulesOn ? [RULE_TOOL_OPENAI] : []), ...(ccrTools ? [ccrTools.openai] : [])].map(withConversationIdParam)),
-            responses: withSearchContextConversationDescription([...BILI_ACP_TOOLS_RESPONSES, ...(absorbTools ? [absorbTools.responses] : []), ...(rulesOn ? [RULE_TOOL_RESPONSES] : [])].map(withConversationIdParam)),
+            anthropic: withSearchContextConversationDescription([...acpAnthropic, ...(absorbTools ? [absorbTools.anthropic] : []), ...(rulesOn ? [RULE_TOOL] : []), ...(ccrTools ? [ccrTools.anthropic] : [])].map(withConversationIdParam)),
+            openai: withSearchContextConversationDescription([...acpOpenai, ...(absorbTools ? [absorbTools.openai] : []), ...(rulesOn ? [RULE_TOOL_OPENAI] : []), ...(ccrTools ? [ccrTools.openai] : [])].map(withConversationIdParam)),
+            responses: withSearchContextConversationDescription([...acpResponses, ...(absorbTools ? [absorbTools.responses] : []), ...(rulesOn ? [RULE_TOOL_RESPONSES] : [])].map(withConversationIdParam)),
         },
         headers: { agent: PLUGIN_AGENT_HEADER, conversation: PLUGIN_CONVERSATION_HEADER, contextWindow: PLUGIN_CONTEXT_WINDOW_HEADER, maxOutput: PLUGIN_MAX_OUTPUT_HEADER, model: PLUGIN_MODEL_HEADER, instructionsMutable: PLUGIN_INSTRUCTIONS_MUTABLE_HEADER },
         toolEndpoint: "/__bili/plugin/tool",

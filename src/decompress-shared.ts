@@ -108,6 +108,14 @@ function toFilePointer(args: Record<string, unknown>, ctx: ProxyToolCtx, header:
  *  - Otherwise fall back to collectBlockContent against the unfolded view
  *    (ctx.compressMessages ?? ctx.messages); if that yields nothing, return
  *    the block summary. */
+/** A decompress call asks for a range restore only when at least one range
+ *  field carries a non-blank value (#1712). */
+function hasRangeArgs(args: Record<string, unknown>): boolean {
+    const start = typeof args.startId === "string" ? args.startId.trim() : "";
+    const end = typeof args.endId === "string" ? args.endId.trim() : "";
+    return start !== "" || end !== "";
+}
+
 export function resolveDecompress(
     args: Record<string, unknown>,
     ctx: ProxyToolCtx,
@@ -123,7 +131,10 @@ export function resolveDecompress(
     if (archived[blockId] !== undefined) {
         return `[decompress FAILED: block ${blockId} is a pre-compaction archive — its content was in the history BEFORE the client's native compaction and is no longer reachable (replaced by the client's compaction summary). decompress is unavailable for archived blocks.]`;
     }
-    if (typeof args.startId === "string" || typeof args.endId === "string") {
+    // #1712: blank/whitespace range fields mean "unspecified" — hosts and models
+    // emit "" for optional fields, and treating that as a range request produced
+    // an unsatisfiable retry loop (fill in a real range → refused in plugin mode).
+    if (hasRangeArgs(args)) {
         return resolveDecompressRange(args, ctx, block);
     }
 
@@ -253,14 +264,16 @@ export function coveredRefSpan(state: CompressionState, block: CompressionBlock)
 function resolveDecompressRange(args: Record<string, unknown>, ctx: ProxyToolCtx, block: CompressionBlock): string {
     const startRaw = typeof args.startId === "string" ? args.startId.trim() : "";
     const endRaw = typeof args.endId === "string" ? args.endId.trim() : "";
-    if (!startRaw || !endRaw) return "[decompress FAILED: startId and endId must be given together]";
+    if (!startRaw || !endRaw) return "[decompress FAILED: startId and endId must be given together — pass both mNNNNN refs, or omit both to restore the whole block]";
     if (!ccrEnabled(ctx.session)) {
-        // [#1207 review F3] Plugin mode structurally never arms CCR (the agent
-        // owns its folds; bili never executes them) — the generic "enable
-        // compress.ccr.enabled" advice is unsatisfiable there and would send
-        // the model chasing a config that cannot help.
+        // Range restore needs the CCR content store; a CCR-off session has none.
+        // In plugin mode the model cannot enable CCR itself (it lives in the
+        // proxy's base config — plugin policy is the base block verbatim,
+        // #1345), so pointing it at the setting sends it chasing a config it
+        // cannot change (#1207 review F3). Give it the working call instead:
+        // whole-block restore with just blockId (#1712).
         if (typeof ctx.session.metadata.pluginAgent === "string") {
-            return "[decompress FAILED: range restore (startId/endId) is proxy-mode only — plugin mode owns its folds natively]";
+            return `[decompress FAILED: range restore (startId/endId) requires CCR, which this plugin-mode session does not have — omit startId/endId and restore the whole block: {"blockId":"${block.blockId}"}]`;
         }
         return "[decompress FAILED: range restore (startId/endId) requires CCR — enable compress.ccr.enabled]";
     }
@@ -444,7 +457,7 @@ function resolveDerivedDecompress(
         if (preCompactionArchiveOf(anc)[blockId] !== undefined) {
             return `[decompress FAILED: block ${blockId} is a pre-compaction archive in derived session ${anc.id} — its content was replaced by the client's compaction summary and is no longer reachable.]`;
         }
-        if (typeof args.startId === "string" || typeof args.endId === "string") {
+        if (hasRangeArgs(args)) {
             return `[decompress FAILED: range restore (startId/endId) of derived-parent blocks is not supported — decompress "${blockId}" without range args (#1333)]`;
         }
         const full = args.full === true;
