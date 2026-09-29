@@ -220,7 +220,7 @@ function formatDshError(err: unknown, args: readonly string[]): Error {
     }
     const stderr = typeof e.stderr === "string" ? e.stderr.trim() : e.stderr instanceof Buffer ? e.stderr.toString("utf8").trim() : "";
     const detail = stderr || (typeof e.message === "string" && e.message.length > 0 ? e.message : `exit ${e.status ?? "?"}`);
-    return new Error(`dsh plugin ${args.join(" ")} failed: ${detail}`);
+    return new Error(`dsh ${args.join(" ")} failed: ${detail}`);
 }
 
 // spawnSync (not execFileSync): its options accept windowsVerbatimArguments,

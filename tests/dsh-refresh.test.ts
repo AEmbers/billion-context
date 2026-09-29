@@ -119,7 +119,9 @@ test("refreshDshProfileBundles: one profile's failure does not stop the rest and
         _setDshRunnersForTest({ async: recordingAsyncRunner(calls, new Set(["a"])) });
         await assert.doesNotReject(refreshDshProfileBundles("0.1.121", (l, m) => logs.push(`${l}: ${m}`), { ...process.env, DSH_HOME: home }));
         assert.deepEqual(calls, ["plugin --profile b add billion-context@0.1.121"]);
-        assert.ok(logs.some((l) => l.startsWith("warn") && l.includes("dsh profile a") && l.includes("failed")));
+        const failLog = logs.find((l) => l.startsWith("warn") && l.includes("dsh profile a"));
+        assert.ok(failLog?.includes("dsh plugin --profile a add billion-context@0.1.121 failed"), `failure log must carry the executed command rendered once: ${failLog}`);
+        assert.ok(!failLog?.includes("plugin plugin"), `error text duplicates the plugin token: ${failLog}`);
         assert.ok(logs.some((l) => l.includes("refreshed 1 dsh profile bundle(s) to 0.1.121")));
     } finally {
         _setDshRunnersForTest(undefined);
