@@ -145,6 +145,14 @@ export const WEB_CLIENT = `(function () {
         });
         return '<td class="num"><span class="hitc" title="' + escapeHtml(t("ses.drop_ph")) + '">(' + parts.join("/") + ")</span></td>";
     }
+    // MODEL SWITCHES column (#1535): mid-session model changes re-bill the stable prefix;
+    // shows count · dropped tokens, honest dash when none.
+    function switchTd(s) {
+        if (!s.modelSwitches) return '<td class="num dim">' + t("common.none") + "</td>";
+        const tip = escapeHtml(t("ses.th_switches_tip"));
+        if (!s.switchMissedTokens) return '<td class="num" title="' + tip + '">' + s.modelSwitches + "</td>";
+        return '<td class="num" title="' + tip + '">' + s.modelSwitches + " · " + fmtW(s.switchMissedTokens) + "</td>";
+    }
 
     function sessionRow(s, compact) {
         const tr = document.createElement("tr");
@@ -152,7 +160,7 @@ export const WEB_CLIENT = `(function () {
         if (compact) {
             tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + protoBadge(s.protocol) + '</span></td><td class="num">' + fmtW(s.contextTokens) + '</td>' + savedTd(s) + '<td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         } else {
-            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td><span class="mono dim small clip w-up">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + hitTd(s) + '<td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
+            tr.innerHTML = "<td>" + sessionTitleCell(s) + '</td><td>' + (s.clientHint ? '<span class="mono small">' + escapeHtml(s.clientHint) + "</span>" : '<span class="dim">' + t("common.none") + "</span>") + '</td><td>' + protoBadge(s.protocol) + '</td><td><span class="mono dim small clip w-up">' + escapeHtml(hostOf(s.upstreamOrigin)) + '</td><td class="num">' + (s.requests ? s.requests : t("common.none")) + '</td><td class="num">' + fmtW(s.contextTokens) + '</td><td class="num">' + (s.inputTokens ? fmtW(s.inputTokens) : '<span class="dim">' + t("common.none") + "</span>") + "</td>" + savedTd(s) + hitTd(s) + switchTd(s) + '<td class="num">' + (s.foldCount || 0) + '</td><td class="num">' + (s.blocks || 0) + '</td><td class="dim">' + timeAgo(s.lastSeen) + "</td>";
         }
         let navTimer = null;
         tr.addEventListener("click", (ev) => {
@@ -211,7 +219,7 @@ export const WEB_CLIENT = `(function () {
             const rb = $("recent-body");
             rb.innerHTML = "";
             const recent = (o.recent || []).slice(0, 8);
-            if (!recent.length) rb.innerHTML = '<tr><td colspan="12" class="dim">' + t("common.empty") + "</td></tr>";
+            if (!recent.length) rb.innerHTML = '<tr><td colspan="13" class="dim">' + t("common.empty") + "</td></tr>";
             recent.forEach((s) => rb.appendChild(sessionRow(s, false)));
             renderBanners(d);
         } catch (e) {
@@ -308,7 +316,7 @@ export const WEB_CLIENT = `(function () {
         const tb = $("sessions-body");
         tb.innerHTML = "";
         if (!rows.length) {
-            tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">🗂</div>' + t("ses.empty") + "<br>" + t("ses.empty_hint") + "</div></td></tr>";
+            tb.innerHTML = '<tr><td colspan="13"><div class="empty"><div class="big">🗂</div>' + t("ses.empty") + "<br>" + t("ses.empty_hint") + "</div></td></tr>";
             return;
         }
         rows.forEach((s) => tb.appendChild(sessionRow(s, false)));
@@ -591,6 +599,7 @@ export const WEB_CLIENT = `(function () {
         kv(parts, t("common.protocol"), d.protocol || null, true);
         kv(parts, t("det.client_hint"), d.clientHint || null, true);
         kv(parts, t("common.upstream"), hostOf(d.upstreamOrigin) || null, true);
+        kv(parts, t("det.version"), d.biliVersion || null, true);
         kv(parts, t("det.active_pack"), d.activePack || null, true);
         parts.push('<div class="k">' + t("det.log") + '</div><div class="v"><a href="#/logs?q=' + encodeURIComponent(d.id) + '">' + t("det.log_view") + "</a></div>");
         parts.push("</dl></div></div>");
@@ -971,16 +980,36 @@ export const WEB_CLIENT = `(function () {
         const el = $("log-search");
         if (el && el.value !== q) el.value = q;
     }
+    function logViewExtras() {
+        // Context expansion vs time window (window wins — it implies context).
+        const winChk = $("log-win");
+        const ctxChk = $("log-ctx");
+        if (winChk && winChk.checked) return "&win=120";
+        if (ctxChk && ctxChk.checked) return "&ctx=3";
+        return "";
+    }
     async function loadLogs() {
         const qEl = $("log-search");
         if (!qEl || !$("log-body")) return;
         const q = (qEl.value || "").trim();
         try {
-            const d = await json("/__bili/logs?q=" + encodeURIComponent(q) + "&lines=" + ((($("log-lines")) ? $("log-lines").value : "500")));
+            const linesSel = $("log-lines");
+            const d = await json("/__bili/logs?q=" + encodeURIComponent(q) + "&lines=" + (linesSel ? linesSel.value : "500") + logViewExtras());
             $("log-path").textContent = d.path || t("logs.empty");
             $("copy-log-path").dataset.copy = d.path || "";
-            $("log-count").textContent = d.total > 0 ? t("logs.count", { n: (d.lines || []).length, total: d.total }) : "";
-            $("log-body").textContent = d.lines && d.lines.length ? d.lines.join("\\n") : t("logs.empty");
+            $("log-count").textContent = d.total > 0
+                ? t("logs.count", { n: (d.lines || []).length, total: d.total }) + ((typeof d.omitted === "number" && d.omitted > 0) ? t("logs.omitted", { o: d.omitted }) : "")
+                : "";
+            const bodyEl = $("log-body");
+            const rows = d.lines || [];
+            if (!rows.length) {
+                bodyEl.textContent = t("logs.empty");
+            } else if (Array.isArray(d.isMatch)) {
+                // Filtered view: highlight hits, dim context/time-window rows.
+                bodyEl.innerHTML = rows.map(function (l, i) { return '<div class="' + (d.isMatch[i] ? "lm-hit" : "lm-ctx") + '">' + escapeHtml(l) + "</div>"; }).join("");
+            } else {
+                bodyEl.textContent = rows.join("\\n");
+            }
         } catch (e) { /* the log endpoint is best-effort; stay quiet */ }
     }
 
@@ -1041,7 +1070,7 @@ export const WEB_CLIENT = `(function () {
             busy(ldl, true);
             try {
                 const q = ($("log-search").value || "").trim();
-                const r = await fetch("/__bili/logs?raw=1&q=" + encodeURIComponent(q) + "&lines=2000");
+                const r = await fetch("/__bili/logs?raw=1&q=" + encodeURIComponent(q) + "&lines=2000" + logViewExtras());
                 const blob = await r.blob();
                 const a = document.createElement("a");
                 a.href = URL.createObjectURL(blob);
@@ -1054,6 +1083,27 @@ export const WEB_CLIENT = `(function () {
                 toast(t("toast.failed", { msg: e.message }), "err");
             } finally {
                 busy(ldl, false);
+            }
+        });
+        const ldlAll = $("log-dl-all");
+        if (ldlAll) ldlAll.addEventListener("click", async () => {
+            busy(ldlAll, true);
+            try {
+                // Full unfiltered log (rotated .old + current) regardless of the
+                // search box — the honest "download everything" path.
+                const r = await fetch("/__bili/logs?raw=1&all=1");
+                const blob = await r.blob();
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = "billion-context-full-log.txt";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+            } catch (e) {
+                toast(t("toast.failed", { msg: e.message }), "err");
+            } finally {
+                busy(ldlAll, false);
             }
         });
         const testBtn = $("test-upstream");

@@ -81,7 +81,8 @@ import { reapOrphanBlocks } from "./orphan-gc.js";
 import { conflictScanEnabled, isDesignAbsorbed, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
 import { recordConflict, summarizeConflicts } from "./conflict-watch.js";
 import { getStore } from "./persist.js";
-import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError } from "./logger.js";
+import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError, enterSessionContext } from "./logger.js";
+import { queryLogLines } from "./web/logs-query.js";
 import { configFile, defaultLogFile, dumpsDir, stateDir } from "./paths.js";
 import { atomicWriteInstanceFile, clearProxyInstanceFile, entryScriptFingerprint, isPidAlive, registerInstanceAndWarn, unregisterInstance, type ProxyInstanceFile } from "./instance.js";
 import { compressLoopResponsesJson } from "./compress-loop-responses.js";
@@ -692,7 +693,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
         const nOverrides = Object.keys(opts.routes).length;
         log(
             "info",
-            `acp-proxy listening on http://${displayHost}:${actualPort}` +
+            `acp-proxy v${VERSION} listening on http://${displayHost}:${actualPort}` +
                 ` — web UI: http://${displayHost}:${actualPort}/__bili/` +
                 ` — zero-config: prefix any baseURL with http://${displayHost}:${actualPort}/bili/` +
                 (nOverrides ? ` — context overrides for ${nOverrides} upstream URL(s)` : "")
@@ -1942,6 +1943,13 @@ async function handle(
             }
         }
         const sessionId = anonAffinity ? anonAffinity.sessionId : conversation;
+        // Tag every downstream log line of THIS request with the session id
+        // ([sess=<id>] via AsyncLocalStorage — zero call-site changes across the
+        // codebase): the web log view and plain grep can now pull process-level
+        // context around a session instead of only the few call sites that
+        // embed the id manually. One statement, runs in this request's own
+        // async context, so concurrent requests never cross-contaminate.
+        enterSessionContext(sessionId);
         // #1086/#1357: content-fallback chain observation, now that identity is known.
         // Artifacts + processed local state ⇒ self-produced: process normally.
         // Artifacts + NO local state ⇒ ADVISORY observation (#1357 Phase 1): the
@@ -6289,12 +6297,26 @@ async function sendWebSessions(res: http.ServerResponse): Promise<void> {
  *  ?lines= caps the tail at 2000; ?raw=1 streams the same tail as a .txt download. */
 async function sendWebLogs(res: http.ServerResponse, req: http.IncomingMessage): Promise<void> {
     const u = new URL(req.url ?? "/__bili/logs", "http://localhost");
-    const q = (u.searchParams.get("q") ?? "").trim().toLowerCase();
+    const q = (u.searchParams.get("q") ?? "").trim();
+    const fullDownload = u.searchParams.get("raw") === "1" && u.searchParams.get("all") === "1";
     let n = Number(u.searchParams.get("lines") ?? "500");
     if (!Number.isFinite(n) || n <= 0) n = 500;
-    n = Math.min(Math.floor(n), 2000);
+    // Full download is the forensic escape hatch: ignore `lines`, capped only
+    // by the memory guard below so users can export the whole .old + cur pair.
+    n = fullDownload ? 100_000 : Math.min(Math.floor(n), 2000);
+    // Context expansion (ctx=N rows around each hit) and time window (win=Ss
+    // around [firstHit, lastHit]) — selection logic lives in web/logs-query.ts
+    // (unit-tested pure function); win wins over ctx when both are given.
+    let ctx = Number(u.searchParams.get("ctx") ?? "0");
+    if (!Number.isFinite(ctx) || ctx < 0) ctx = 0;
+    ctx = Math.min(Math.floor(ctx), 50);
+    let win = Number(u.searchParams.get("win") ?? "0");
+    if (!Number.isFinite(win) || win < 0) win = 0;
+    win = Math.min(Math.floor(win), 3600);
     const logFile = getLogPath() ?? defaultLogFile();
-    const dir = logFile && logFile.includes("/") ? logFile.slice(0, logFile.lastIndexOf("/") + 1) : "";
+    // Cross-platform dir extraction: a naive "/" split yields "" on Windows
+    // paths and the candidates would silently resolve against cwd.
+    const dir = logFile ? path.dirname(logFile) + path.sep : "";
     const candidates = [dir + "bili.log.old", dir + "bili.log"];
     const existing = candidates.filter((f) => {
         try { return fs.statSync(f).isFile(); } catch { return false; }
@@ -6303,21 +6325,26 @@ async function sendWebLogs(res: http.ServerResponse, req: http.IncomingMessage):
     for (const f of existing) {
         let text: string;
         try { text = fs.readFileSync(f, "utf8"); } catch { continue; }
-        const ls = text.split("\n").filter((l) => l.length > 0);
-        all = all.concat(q ? ls.filter((l) => l.toLowerCase().includes(q)) : ls);
+        all = all.concat(text.split("\n").filter((l) => l.length > 0));
     }
-    const total = all.length;
-    const tail = all.slice(-n);
+    const r = queryLogLines(all, q, { ctx, winSec: win, n });
     if (u.searchParams.get("raw") === "1") {
         res.writeHead(200, {
             "content-type": "text/plain; charset=utf-8",
-            "content-disposition": 'attachment; filename="billion-context-log.txt"',
+            "content-disposition": `attachment; filename="${fullDownload ? "billion-context-full-log.txt" : "billion-context-log.txt"}"`,
         });
-        res.end(tail.join("\n"));
+        res.end(r.lines.join("\n"));
         return;
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ path: logFile, total, lines: tail }, null, 2));
+    res.end(JSON.stringify({
+        path: logFile,
+        total: r.total,
+        shown: r.shown,
+        omitted: r.omitted,
+        lines: r.lines,
+        ...(r.isMatch ? { isMatch: r.isMatch } : {}),
+    }, null, 2));
 }
 
 async function sendWebSessionDetail(res: http.ServerResponse, url: string): Promise<void> {

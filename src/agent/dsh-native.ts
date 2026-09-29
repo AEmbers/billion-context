@@ -35,6 +35,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { defaultLogFile } from "../paths.js";
+import { VERSION } from "../version.js";
 import { ensureProxyRunning, LAUNCHER_DEFAULT_HOST } from "../launcher.js";
 import { markNativeHost, nativeAttachOrigin, nativeBootstrapGate, nativeProxyScriptPath, proxyEnvOrigin, singleFlight } from "./native-bootstrap.js";
 import { installNativeFetchIntercept, noteRoutedOrigin, observeRoutedOrigin, type NativeInterceptState } from "./native-intercept.js";
@@ -187,7 +188,9 @@ export function persistClientEvent(msg: string): void {
     try {
         const file = defaultLogFile();
         mkdirSync(path.dirname(file), { recursive: true });
-        appendFileSync(file, `${new Date().toISOString()} [warn] [dsh-client] ${msg}\n`);
+        // Same line grammar as logger.ts: [v=<build>] so a shared log written
+        // by mixed-version hosts self-identifies every physical line.
+        appendFileSync(file, `${new Date().toISOString()} [warn] [v=${VERSION}] [dsh-client] ${msg}\n`);
     } catch {
         // best-effort: logging must never break the host
     }
