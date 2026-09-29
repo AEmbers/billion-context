@@ -1,12 +1,12 @@
 import assert from "node:assert";
 import http from "node:http";
-import { once } from "node:events";
+import { once, EventEmitter } from "node:events";
 import test from "node:test";
 
 process.env.NODE_ENV = "test";
 
 import { defaultConfig } from "acp-kernel";
-import { startServer, type ProxyOptions } from "../src/server.ts";
+import { startServer, beginStreamKeepalive, type ProxyOptions } from "../src/server.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 
@@ -169,5 +169,76 @@ test("#1647 BILI_STREAM_KEEPALIVE_MS=0 disables the hold", async () => {
         up.server.close();
         await once(up.server, "close");
         await h.close();
+    }
+});
+
+// Unit-drive beginStreamKeepalive against a stub res. The processed pipes in
+// server.ts are all event-aligned (they re-emit whole `data: ...\n\n` events),
+// but raw forwarders exist on armed lanes (reasoning-guard.ts pipeThroughRaw
+// passthrough) and upstream can flush a partial SSE line then stall mid-line.
+// A keep-alive comment spliced there would corrupt the client's JSON; the
+// guard must hold fire until the stream returns to a line boundary.
+function makeStubRes(): { res: Record<string, unknown>; chunks: string[] } {
+    const chunks: string[] = [];
+    let written = 0;
+    const res = new EventEmitter() as unknown as Record<string, unknown>;
+    res.destroyed = false;
+    res.writableEnded = false;
+    res.socket = {
+        get bytesWritten(): number { return written; },
+    };
+    res.write = (chunk: string | Buffer | Uint8Array): boolean => {
+        const s = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+        chunks.push(s);
+        written += Buffer.byteLength(s);
+        return true;
+    };
+    return { res, chunks };
+}
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+
+test("#1647 line-boundary guard: keep-alive never splices into a partial SSE line", async () => {
+    process.env.BILI_STREAM_KEEPALIVE_MS = "60";
+    const { res, chunks } = makeStubRes();
+    beginStreamKeepalive(res as unknown as import("node:http").ServerResponse, "unit-boundary", () => {});
+    try {
+        // Partial `data:` line lands on the wire (no trailing \n\n), then the
+        // upstream stalls — several keep-alive intervals must pass silently.
+        (res.write as (c: string) => boolean)(`data: {"choices":[{"delta":{"content":"hel`);
+        await sleep(250);
+        const midLine = chunks.join("");
+        assert.equal(
+            countOccurrences(midLine, KEEPALIVE_LINE), 0,
+            "keep-alive comment spliced into a partial SSE line:\n" + midLine,
+        );
+
+        // Line completes — stream is back at a boundary. The very next idle
+        // interval may fire the keep-alive; it must never appear mid-line.
+        (res.write as (c: string) => boolean)(`lo"}}]}\n\n`);
+        await sleep(250);
+        const after = chunks.join("");
+        assert.ok(
+            countOccurrences(after, KEEPALIVE_LINE) >= 1,
+            "keep-alive never fired once the stream returned to a line boundary:\n" + after,
+        );
+        assert.ok(
+            after.includes(`data: {"choices":[{"delta":{"content":"hello"}}]}\n\n`),
+            "data line was not forwarded byte-intact:\n" + after,
+        );
+        // Every keep-alive comment must sit at a line start: the chunk before
+        // it always ends with \n\n or the comment opens the body.
+        for (let i = 0; i < chunks.length; i++) {
+            if (chunks[i].startsWith(KEEPALIVE_LINE)) {
+                const prev = chunks[i - 1];
+                assert.ok(
+                    prev === undefined || prev.endsWith("\n\n"),
+                    `keep-alive chunk #${i} not preceded by a line boundary:\n` + JSON.stringify(chunks),
+                );
+            }
+        }
+    } finally {
+        delete process.env.BILI_STREAM_KEEPALIVE_MS;
+        (res as unknown as { emit(e: string): boolean }).emit("close");
     }
 });

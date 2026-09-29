@@ -4699,7 +4699,7 @@ function streamKeepaliveMs(): number {
     return Number.isFinite(v) && v >= 0 ? Math.floor(v) : STREAM_KEEPALIVE_DEFAULT_MS;
 }
 
-function beginStreamKeepalive(res: http.ServerResponse, sid: string, log: (level: string, msg: string) => void): void {
+export function beginStreamKeepalive(res: http.ServerResponse, sid: string, log: (level: string, msg: string) => void): void {
     const idleMs = streamKeepaliveMs();
     if (idleMs <= 0 || res.destroyed || res.writableEnded) return;
     const sock = res.socket;
@@ -4707,6 +4707,33 @@ function beginStreamKeepalive(res: http.ServerResponse, sid: string, log: (level
     let baseline = sock.bytesWritten;
     let warned = false;
     let stopped = false;
+    // Line-boundary guard: an SSE comment is a no-op ONLY when it starts at a
+    // line boundary. Every processed pipe in this file re-emits whole events,
+    // but the raw pipeThrough lanes (title-gen, classifier bypass,
+    // ACP_NO_INJECT_TOOL — server.ts !useRewriter branch) forward upstream
+    // chunks verbatim, so a partial `data:` line can sit un-terminated on the
+    // wire when the interval fires. Injecting a comment there splices it into
+    // the client's JSON. Track the last byte written and skip the beat while
+    // mid-line; the 300s budget tolerates skips, corruption does not.
+    // `__biliKeepaliveBoundary` (on the res) is the live boundary state so a
+    // second arming on the same res shares one truth; undefined = not yet patched.
+    const anyRes = res as unknown as { __biliKeepaliveBoundary?: boolean };
+    let origWrite: typeof res.write;
+    if (anyRes.__biliKeepaliveBoundary === undefined) {
+        origWrite = res.write.bind(res);
+        anyRes.__biliKeepaliveBoundary = true; // headers just committed — at a boundary
+        res.write = ((...args: Parameters<typeof origWrite>) => {
+            const chunk = args[0];
+            try {
+                if (typeof chunk === "string") {
+                    if (chunk.length > 0) anyRes.__biliKeepaliveBoundary = chunk.endsWith("\n");
+                } else if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) {
+                    if (chunk.length > 0) anyRes.__biliKeepaliveBoundary = chunk[chunk.length - 1] === 0x0a;
+                }
+            } catch { /* observation must never break the write */ }
+            return origWrite(...args);
+        }) as typeof res.write;
+    }
     const stop = (): void => {
         if (stopped) return;
         stopped = true;
@@ -4728,6 +4755,13 @@ function beginStreamKeepalive(res: http.ServerResponse, sid: string, log: (level
                 baseline = written;
                 return;
             }
+            // Mid-line: skip this beat. No baseline mutation, so the next tick
+            // re-checks; when the pending line completes, its own write flips
+            // the flag and keep-alives resume. (Note: a keep-alive write itself
+            // bumps bytesWritten, so the following tick sees "progress" and
+            // skips — effective cadence ≈ 2×interval. Harmless vs the 300s
+            // budget; noted here so the 2× isn't mistaken for a bug.)
+            if (anyRes.__biliKeepaliveBoundary === false) return;
             res.write(": bili-keepalive\n\n");
             if (!warned) {
                 warned = true;
