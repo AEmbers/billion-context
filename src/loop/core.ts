@@ -5,7 +5,7 @@ import {
     type CoreMessage,
 } from "acp-kernel";
 import { handleAcpStatus } from "../acp-status.js";
-import { handleAcpCache, settleUsageReport } from "../cache-ledger.js";
+import { handleAcpCache, noteForwardedBody, settleUsageReport } from "../cache-ledger.js";
 import { diagnoseSuccessWithoutUsage, lastCompressSuffix, withSessionLock, type Session } from "../session.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import {
@@ -30,6 +30,7 @@ import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoBody } from "../st
 import { log as loggerLog } from "../logger.js";
 import { promptInputTotal, type WireProtocol } from "../util.js";
 import { DEGENERATE_RETRY_NUDGE } from "../degenerate-retry.js";
+import { safePrefix, safeSuffix } from "../text-safe.js";
 
 export const MAX_LOOP_ROUNDS = 10;
 
@@ -319,8 +320,11 @@ export async function* runCompressLoop(
     // but one copy per request is enough signal for humans).
     const seenMarkers = new Set<string>();
 
-    const fetchUpstream = (body: Record<string, unknown>) =>
-        fetchWithRetry(
+    const fetchUpstream = (body: Record<string, unknown>) => {
+        // #1592-family seam forensics: remember the body actually sent so the
+        // next usage settle can pair it with the previous one (LCP on miss).
+        noteForwardedBody(ctx.session, JSON.stringify(requestOptions.wireTransform ? requestOptions.wireTransform(body) : body));
+        return fetchWithRetry(
             requestOptions.url,
             {
                 method: "POST",
@@ -338,6 +342,7 @@ export async function* runCompressLoop(
                 loggerLog("warn", `[acp-loop] upstream rejected replay (HTTP ${info.status}); retrying in ${info.delayMs}ms (attempt ${info.attempt}/${info.maxAttempts})${lc}`);
             },
         );
+    };
 
     // #1455: single adoption point for every loop-originated upstream body so
     // the ACP_DUMP_SSE tee covers re-requests and retries, not just the first
@@ -712,7 +717,7 @@ export async function* runCompressLoop(
                     } catch {
                         // #1306: an empty/truncated arguments string is wire-loss-shaped, bad JSON is model-shaped — log the shape so the two are separable in logs.
                         // #1502: tail= alongside head= separates mid-string corruption from truncation; the raw string survives for the lenient parser.
-                        ctx.log(`[acp-loop] proxy tool ${call.name}: arguments not parseable JSON (len=${call.arguments.length}${call.arguments.length > 0 ? `, head=${call.arguments.slice(0, 200)}, tail=${call.arguments.slice(-200)}` : ""}) — ${call.name === COMPRESS_TOOL_NAME ? "routing the raw string to the lenient parser" : "executing with {}"}`);
+                        ctx.log(`[acp-loop] proxy tool ${call.name}: arguments not parseable JSON (len=${call.arguments.length}${call.arguments.length > 0 ? `, head=${safePrefix(call.arguments, 200)}, tail=${safeSuffix(call.arguments, 200)}` : ""}) — ${call.name === COMPRESS_TOOL_NAME ? "routing the raw string to the lenient parser" : "executing with {}"}`);
                         rawArgs = call.arguments;
                         parsedArgs = {};
                     }
