@@ -1,10 +1,13 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { lanePreferredPort, portZoneFilePath, readZonePort, writeZonePort } from "../src/instance.ts";
+import type { ProxyInstanceFile } from "../src/instance.ts";
 import { ZONE_PORT_BASE, resolveZonePortBase } from "../src/config.ts";
+import { ensureProxyRunning, type SpawnChild, type SpawnFn } from "../src/launcher.ts";
 
 // #1660: the self-managed port zone. Every lane'd launch tries the lane's
 // sticky port first (a past +1-ladder drift it still points at), else the
@@ -98,4 +101,215 @@ test("resolveZonePortBase: BILI_ZONE_PORT validated 1..65535, junk falls back to
 
 test("portZoneFilePath: lives in the state dir", () => {
     assert.equal(path.basename(portZoneFilePath()), "port-zone.json");
+});
+
+// ---------------------------------------------------------------------------
+// #1660 launch sequences: the sticky-zone lifecycle driven through
+// ensureProxyRunning with mocked process edges. The single-shot tests in
+// launcher.test.ts pin one decision each; these pin the REPEATED loop —
+// spawn → settle → attach → drift → re-settle → attach-follows — the exact
+// regression surface where a pre-resolved port silently skips the settle
+// (fixed in 90cc7e8; only a repeated launch exposes the missing record).
+// ---------------------------------------------------------------------------
+
+// ensureProxyRunning coordinates across processes via <state>/proxy-starting
+// (#707) and probes <state>/instances — point the state dir at a throwaway so
+// these tests never touch the real one (same posture as launcher.test.ts).
+const prevZoneTestXdgState = process.env.XDG_STATE_HOME;
+process.env.XDG_STATE_HOME = mkdtempSync(path.join(tmpdir(), "bili-zone-test-state-"));
+after(() => {
+    if (prevZoneTestXdgState === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = prevZoneTestXdgState;
+});
+
+// A script fixture whose content hash matches the instances the sim records —
+// instanceCompatible demands the spawn script's fingerprint to match.
+const ZONE_FP_SCRIPT = path.join(tmpdir(), `bili-zone-fp-${process.pid}.js`);
+writeFileSync(ZONE_FP_SCRIPT, "// zone sequence fingerprint fixture\n");
+const ZONE_FP_HASH = createHash("sha256").update(readFileSync(ZONE_FP_SCRIPT)).digest("hex");
+
+function recordedZoneInstance(over: Partial<ProxyInstanceFile> = {}): ProxyInstanceFile {
+    return {
+        origin: `http://127.0.0.1:${ZONE_PORT_BASE}`,
+        instanceId: "zone-inst-1",
+        pid: process.pid,
+        startedAt: Date.now(),
+        host: "127.0.0.1",
+        port: ZONE_PORT_BASE,
+        passthrough: false,
+        mitmDomains: [],
+        modelWindows: {},
+        codeFingerprint: ZONE_FP_HASH,
+        ...over,
+    };
+}
+
+function fakeZoneChild(pid: number): SpawnChild {
+    return {
+        pid,
+        unref() {},
+        kill() {
+            return true;
+        },
+        on() {},
+    };
+}
+
+/** A one-daemon world: `live` is the currently recorded instance, `squatted`
+ *  holds ports dumb listeners occupy (the daemon's own port also blocks), and
+ *  a spawn binds the requested port or ladders +1 past busy ones — the same
+ *  EADDRINUSE walk the real server does (#1335). The zone file is REAL: the
+ *  sim's zonePreferredPort/writeZonePort delegate to it, so the full
+ *  write→read sticky loop runs on disk. */
+function makeZoneSim(zoneFile: string, lane: string) {
+    const sim = {
+        live: undefined as ProxyInstanceFile | undefined,
+        squatted: new Set<number>(),
+        spawns: [] as Array<{ args: string[]; env: NodeJS.ProcessEnv }>,
+        settles: [] as Array<[string, number]>,
+        pidSeq: 42100,
+    };
+    const spawnImpl: SpawnFn = (_cmd, args, options) => {
+        sim.spawns.push({ args: [...args], env: options.env ?? {} });
+        const want = Number(args[args.indexOf("--port") + 1]);
+        let bind = want;
+        while (sim.squatted.has(bind) || (sim.live !== undefined && bind === sim.live.port)) bind++;
+        const childPid = ++sim.pidSeq;
+        const token = options.env?.BILI_LAUNCH_TOKEN ?? `sim-token-${childPid}`;
+        // inst.pid must be a LIVE pid — probeLiveInstances drops records whose
+        // owner process is gone; the test process stands in for the daemon's.
+        sim.live = recordedZoneInstance({
+            pid: process.pid,
+            port: bind,
+            origin: `http://127.0.0.1:${bind}`,
+            lane,
+            launchToken: token,
+            instanceId: `zone-sim-${childPid}`,
+        });
+        return fakeZoneChild(childPid);
+    };
+    const deps = {
+        fetchImpl: async (url: string) =>
+            sim.live !== undefined && url.startsWith(sim.live.origin) ? { ok: true } : { ok: false },
+        fetchHealthInfo: async (origin: string) =>
+            sim.live !== undefined && sim.live.origin === origin
+                ? { ok: true, instanceId: sim.live.instanceId, watchdog: { armed: true } }
+                : undefined,
+        readInstanceFile: () => sim.live,
+        spawnImpl,
+        registerWatcher: async () => "ok" as const,
+        sleep: () => Promise.resolve(),
+        scriptPath: ZONE_FP_SCRIPT,
+        zonePreferredPort: (l: string) => lanePreferredPort(l, {}, zoneFile),
+        writeZonePort: (l: string, port: number) => {
+            sim.settles.push([l, port]);
+            writeZonePort(l, port, zoneFile);
+        },
+    };
+    return { sim, deps };
+}
+
+const spawnPortArg = (spawn: { args: string[] }): string => spawn.args[spawn.args.indexOf("--port") + 1];
+
+function zoneDir(): { dir: string; zoneFile: string } {
+    const dir = mkdtempSync(path.join(tmpdir(), "bili-zone-seq-"));
+    return { dir, zoneFile: path.join(dir, "port-zone.json") };
+}
+
+test("zone sequence: settle → attach → drift → re-settle → attach follows the drift (#1660)", async () => {
+    const { dir, zoneFile } = zoneDir();
+    const { sim, deps } = makeZoneSim(zoneFile, "zcode");
+    const launch = () =>
+        ensureProxyRunning({ host: "127.0.0.1", port: 0, passthrough: false, debug: false, lane: "zcode" }, deps);
+    try {
+        const h1 = await launch();
+        assert.equal(sim.spawns.length, 1, "first launch spawns the lane daemon");
+        assert.equal(h1.port, ZONE_PORT_BASE, "fresh lane'd launch binds the zone base");
+        assert.equal(spawnPortArg(sim.spawns[0]), String(ZONE_PORT_BASE), "base is the spawn port, not an OS ephemeral");
+        assert.deepEqual(sim.settles, [["zcode", ZONE_PORT_BASE]], "the bound port settles sticky");
+        assert.equal(readZonePort("zcode", zoneFile), ZONE_PORT_BASE);
+
+        const h2 = await launch();
+        assert.equal(sim.spawns.length, 1, "repeat launch attaches instead of doubling");
+        assert.equal(h2.attached, true);
+        assert.equal(h2.port, ZONE_PORT_BASE, "attachment rides the settled port");
+        assert.deepEqual(sim.settles, [["zcode", ZONE_PORT_BASE]], "attach never re-settles");
+
+        sim.live = undefined; // daemon dies
+        sim.squatted.add(ZONE_PORT_BASE); // a squatter takes the sticky port
+        const h3 = await launch();
+        assert.equal(sim.spawns.length, 2, "dead daemon + squatter forces a respawn");
+        assert.equal(spawnPortArg(sim.spawns[1]), String(ZONE_PORT_BASE), "sticky port is still the preferred first try");
+        assert.equal(h3.port, ZONE_PORT_BASE + 1, "the bind ladders +1 past the squatter");
+        assert.deepEqual(
+            sim.settles,
+            [["zcode", ZONE_PORT_BASE], ["zcode", ZONE_PORT_BASE + 1]],
+            "the drifted port settles sticky",
+        );
+        assert.equal(readZonePort("zcode", zoneFile), ZONE_PORT_BASE + 1);
+
+        const h4 = await launch();
+        assert.equal(sim.spawns.length, 2, "post-drift repeat attaches");
+        assert.equal(h4.attached, true);
+        assert.equal(h4.port, ZONE_PORT_BASE + 1, "later launches follow the drift");
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("zone sequence: a second lane never attaches cross-lane and settles its own sticky key (#1225/#1660)", async () => {
+    const { dir, zoneFile } = zoneDir();
+    const { sim, deps } = makeZoneSim(zoneFile, "kimi");
+    writeZonePort("zcode", ZONE_PORT_BASE, zoneFile); // lane one already settled…
+    sim.squatted.add(ZONE_PORT_BASE); // …and its daemon holds the base port
+    sim.live = recordedZoneInstance({ lane: "zcode", launchToken: "zcode-token" });
+    try {
+        const h = await ensureProxyRunning(
+            { host: "127.0.0.1", port: 0, passthrough: false, debug: false, lane: "kimi" },
+            deps,
+        );
+        assert.equal(sim.spawns.length, 1, "a lane-mismatch instance is never an attach target");
+        assert.equal(h.attached, undefined);
+        assert.equal(h.port, ZONE_PORT_BASE + 1, "the second lane ladders past the first lane's daemon");
+        assert.deepEqual(sim.settles, [["kimi", ZONE_PORT_BASE + 1]], "the lane settles its own key");
+        assert.equal(readZonePort("zcode", zoneFile), ZONE_PORT_BASE, "lane one's sticky record is untouched");
+        assert.equal(readZonePort("kimi", zoneFile), ZONE_PORT_BASE + 1);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("zone sequence: an explicit strictPort pin is exact and stays out of the sticky file (#964/#1660)", async () => {
+    const { dir, zoneFile } = zoneDir();
+    const { sim, deps } = makeZoneSim(zoneFile, "zcode");
+    const pin = ZONE_PORT_BASE + 400;
+    try {
+        const h = await ensureProxyRunning(
+            { host: "127.0.0.1", port: pin, strictPort: true, passthrough: false, debug: false, lane: "zcode" },
+            deps,
+        );
+        assert.equal(sim.spawns.length, 1);
+        assert.equal(spawnPortArg(sim.spawns[0]), String(pin), "the exact pin is the spawn port");
+        assert.equal(sim.spawns[0].env.BILI_STRICT_PORT, "1", "strictness crosses the process boundary");
+        assert.equal(h.port, pin);
+        assert.deepEqual(sim.settles, [], "explicit pins never settle a zone record");
+        assert.equal(readZonePort("zcode", zoneFile), undefined);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("zone sequence: an unlane'd launch is ephemeral and never touches the zone file (#1660)", async () => {
+    const { dir, zoneFile } = zoneDir();
+    const { sim, deps } = makeZoneSim(zoneFile, "zcode");
+    try {
+        const h = await ensureProxyRunning({ host: "127.0.0.1", port: 0, passthrough: false, debug: false }, deps);
+        assert.equal(sim.spawns.length, 1);
+        assert.ok(Number(spawnPortArg(sim.spawns[0])) > 0, "an OS-assigned ephemeral port");
+        assert.equal(h.port, Number(spawnPortArg(sim.spawns[0])));
+        assert.deepEqual(sim.settles, [], "no lane → no sticky write");
+        assert.equal(readZonePort("zcode", zoneFile), undefined, "the zone file stays empty");
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
 });
