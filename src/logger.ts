@@ -20,9 +20,15 @@
  *     without it the event rethrows as uncaughtException, the top-level handler
  *     logs it through this very writer, and the feedback loop spams the log
  *     file until rotation wipes the forensic window (#1233).
+ *
+ * Line format: `<iso-ts> [level] [v=<version>] <msg>` — every line is stamped
+ * with the running build's version, so a single line from a multi-instance
+ * shared log file self-identifies its writer even when different versions
+ * coexist (no backfill: lines written by older builds stay bare).
  */
 import { createWriteStream, fstatSync, mkdirSync, statSync, renameSync, unlinkSync, type WriteStream } from "node:fs";
 import path from "node:path";
+import { VERSION } from "./version.js";
 
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB → rotate
 
@@ -187,7 +193,7 @@ export const log: Logger = (level, msg) => {
         }
     }
     const ts = new Date().toISOString();
-    const line = `${ts} [${level}] ${msg}\n`;
+    const line = `${ts} [${level}] [v=${VERSION}] ${msg}\n`;
     // stderr (foreground terminal / shell redirect). MUST NOT throw and must
     // never re-enter its own error path: a sync failure (Windows) or the async
     // 'error' event (Linux, module-init listener above) both flip us to

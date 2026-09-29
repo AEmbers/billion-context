@@ -599,6 +599,7 @@ export const WEB_CLIENT = `(function () {
         kv(parts, t("common.protocol"), d.protocol || null, true);
         kv(parts, t("det.client_hint"), d.clientHint || null, true);
         kv(parts, t("common.upstream"), hostOf(d.upstreamOrigin) || null, true);
+        kv(parts, t("det.version"), d.biliVersion || null, true);
         kv(parts, t("det.active_pack"), d.activePack || null, true);
         parts.push('<div class="k">' + t("det.log") + '</div><div class="v"><a href="#/logs?q=' + encodeURIComponent(d.id) + '">' + t("det.log_view") + "</a></div>");
         parts.push("</dl></div></div>");

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { StateStore, flatFileNameFor, type PersistedEnvelope, type StateStoreCodec } from "acp-kernel/persist";
 import { sessionsDir } from "./paths.js";
 import { log as loggerLog } from "./logger.js";
+import { VERSION } from "./version.js";
 import { createStorageCodec, parseEncryptionKey } from "./encrypt.js";
 import { PersistEpermAlert } from "./persist-eperm.js";
 import { createInitialState, defaultCountTokens, prune, type CompressionState, type CoreMessage, type MessageContentStore } from "acp-kernel";
@@ -674,7 +675,10 @@ function buildRecord(session: Session): PersistedSession {
         stats: { ...session.stats },
         messages: snapshot,
         messagesFolded: snapshot ? true : undefined,
-        metadata: { ...session.metadata },
+        // Per-session provenance: record the bili build that wrote this file so the
+        // web UI can show which version last touched the session; pre-stamp files
+        // load without the key and render an honest dash.
+        metadata: { ...session.metadata, biliVersion: VERSION },
         state: session.state,
         blockContents: Object.fromEntries(session.blockContents),
         createdAt: session.createdAt,

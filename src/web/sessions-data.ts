@@ -115,6 +115,8 @@ export interface WebSessionDetail extends WebSessionSummary {
     activePack?: string;
     /** Which client produced this session (plugin agent name or header/UA hint). */
     clientHint?: string;
+    /** bili build that last persisted this session file (absent on pre-stamp files). */
+    biliVersion?: string;
     /** Measured system-prompt size in tokens — the not-compressible baseline drawn
      *  under the trajectory chart. */
     systemPromptTokens?: number;
@@ -426,6 +428,7 @@ export async function buildSessionDetail(id: string): Promise<WebSessionDetail |
         storeBytesSaved: session.stats.storeBytesSaved,
         ...(session.meta.activePack ? { activePack: session.meta.activePack } : {}),
         ...(clientHint ? { clientHint } : {}),
+        ...(typeof session.metadata["biliVersion"] === "string" ? { biliVersion: session.metadata["biliVersion"] as string } : {}),
         ...(sysPrompt > 0 ? { systemPromptTokens: sysPrompt } : {}),
         ledger: buildSessionCacheReport(session),
         handoffMd,

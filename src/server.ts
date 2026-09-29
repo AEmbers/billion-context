@@ -692,7 +692,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
         const nOverrides = Object.keys(opts.routes).length;
         log(
             "info",
-            `acp-proxy listening on http://${displayHost}:${actualPort}` +
+            `acp-proxy v${VERSION} listening on http://${displayHost}:${actualPort}` +
                 ` — web UI: http://${displayHost}:${actualPort}/__bili/` +
                 ` — zero-config: prefix any baseURL with http://${displayHost}:${actualPort}/bili/` +
                 (nOverrides ? ` — context overrides for ${nOverrides} upstream URL(s)` : "")
