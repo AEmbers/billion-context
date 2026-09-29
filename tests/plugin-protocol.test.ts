@@ -417,6 +417,17 @@ test("plugin tool API executes compress under the session lock; next request fol
         assert.ok(folded.includes("toolu_c_1"), `newest orphaned compress tool_use stays visible (KEEP_LAST_ORPHANED=2): ${folded.slice(0, 400)}`);
         assert.ok(foldedRaw.messages.length < 12, `history must shrink after folding: got ${foldedRaw.messages.length}`);
         assert.ok(!folded.includes("turn-1-marker answer"), "compressed range content must be folded away");
+        // #1567: in plugin mode the client's own re-sent compress pair
+        // (toolu_c_1 above) IS the summary carrier — the kernel's in-place
+        // acp_summary anchor must be stripped, not coexist with it. Pre-fix,
+        // stripKernelSummaries keyed on toolCallId === block.compressCallId,
+        // which is unsatisfiable for plugin folds (synthetic plugin_<ts> id
+        // the client can never echo), so the anchor rode every post-fold body
+        // and the summary appeared twice per turn.
+        assert.ok(
+            !folded.includes("[Compressed conversation section] \u2014 plugin-e2e-topic"),
+            "in-place acp_summary carrier must be stripped in plugin mode (#1567)",
+        );
 
         // The summary text deliberately does NOT ride in the wire body
         // (stripKernelSummaries drops acp_summary_* messages — same as wire

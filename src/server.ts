@@ -108,7 +108,7 @@ import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConver
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
-import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
+import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, isPluginFoldCallId, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
 import { evaluateChain, extractChainCarriers, stampOutbound, stripEmbeddedChainCarriers } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
@@ -2767,7 +2767,9 @@ const ACP_TAG_MARK = "\x3cacp ";
 //
 // Per mode (see TECHNICAL-NOTES.md "Two compression modes"): in plugin/launcher mode the
 // tool call is ALWAYS in the re-sent history (the agent owns compression), so
-// this strips every acp_summary and the carrier is the tool call; in proxy mode
+// this strips every acp_summary and the carrier is the tool call — recognized
+// by the plugin_<ts> callId minted at the tool API (#1567: an id-match alone
+// was unsatisfiable there); in proxy mode
 // the tool call is usually absent (ephemeral server-side execution) or
 // nonexistent (preflight), so acp_summary survives as the carrier and
 // systemToUser later re-voices the survivors as USER messages (leaving them at
@@ -2916,11 +2918,54 @@ export function warnResponsesReasoningPairs(
     }
 }
 
+/** #1567 hardening: a plugin-fold block's in-place anchor is redundant ONLY
+ *  while the client's own compress pair for that exact fold actually rides
+ *  the (post-prepare) history. The pair is recognized by tool name plus the
+ *  folded range quoted in its call args — flat {startId,endId} or
+ *  {content:[{startId,endId}]}, both accepted by the plugin tool API. This
+ *  restores the self-verifying carrier handoff a raw prefix strip lost: a
+ *  pruned or contract-violating client (pair absent) keeps the anchor, so an
+ *  active fold never ends up with zero carriers. It also covers kernel-side
+ *  pruning: hideConsumedCompressCalls (KEEP_LAST_ORPHANED) runs in the
+ *  pipeline BEFORE this strip, so an older pair already hidden from the wire
+ *  is absent here and its anchor correctly survives. Unparseable args count
+ *  as no match (anchor kept — fail-safe direction). Blocks predating range
+ *  recording (no startRef/endRef) degrade to "any compress call present",
+ *  the pre-hardening prefix-strip behavior. */
+function inboundCompressPairPresent(messages: BiliMessage[], b: { startRef?: string; endRef?: string }): boolean {
+    const loose = !b.startRef || !b.endRef;
+    for (const m of messages) {
+        if (m.contentType !== "tool-call" || m.toolName !== COMPRESS_TOOL_NAME) continue;
+        if (loose) return true;
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(m.text ?? "");
+        } catch {
+            continue;
+        }
+        const obj = parsed as { startId?: string; endId?: string; content?: unknown };
+        const ranges: Array<{ startId?: string; endId?: string }> = Array.isArray(obj?.content) ? (obj.content as Array<{ startId?: string; endId?: string }>) : [obj];
+        for (const r of ranges) {
+            if (r?.startId === b.startRef && r?.endId === b.endRef) return true;
+        }
+    }
+    return false;
+}
+
 export function stripKernelSummaries(messages: BiliMessage[], state: CompressionState): BiliMessage[] {
     const carried = new Set<string>();
     for (const b of state.blocks) {
         if (!b.active || !b.compressCallId) continue;
-        if (messages.some((m) => m.contentType === "tool-call" && m.toolCallId === b.compressCallId)) {
+        // #1567: plugin tool API folds are minted a synthetic plugin_<ts> callId
+        // the client can never echo, so the plain id match is unsatisfiable for
+        // them — yet the client's own re-sent compress pair IS their carrier by
+        // contract, making the in-place anchor redundant. Strip it, but only
+        // while that pair actually rides the (post-prepare) history
+        // (inboundCompressPairPresent): a pruned or contract-violating client
+        // must never lose the summary outright (zero carriers).
+        // Preflight blocks (no compressCallId) keep skipping above: no tool
+        // call exists for them, so their anchor is the only carrier.
+        if (isPluginFoldCallId(b.compressCallId) ? inboundCompressPairPresent(messages, b) : messages.some((m) => m.contentType === "tool-call" && m.toolCallId === b.compressCallId)) {
             carried.add(`acp_summary_${b.blockId}`);
         }
     }
