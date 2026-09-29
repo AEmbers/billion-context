@@ -164,8 +164,16 @@ export function executeRetrieve(args: Record<string, unknown>, session: Session)
     // but the full text only reaches the model on a later upstream request.
     // The ledger tracks it until delivered or dropped (never silently lost).
     queueRetrieval(session, { ref, tokens: result.entry.tokens, chars: result.entry.chars, injection: result.injection });
-    recordRetrieveHit(session, ref);
+    const count = recordRetrieveHit(session, ref);
     loggerLog("info", `[ccr] retrieve ${ref} (${result.entry.tokens} tok, ${result.entry.chars} chars)`);
+    // [#1430] Surface the accumulating cost at the decision point: on a repeat
+    // fetch of the same ref, append how many times it has come back this session
+    // plus the per-call size, so the model sees the bloat instead of silently
+    // re-pulling the full original every turn. Count + current entry size only —
+    // no new state; rides inside the existing tool-result field on every wire.
+    if (count >= REPEAT_RETRIEVE_ACK_THRESHOLD) {
+        return `${result.ackText}\n[${retrieveToolName(session)}: ${ref} fetched ${count}x this session — each call re-sends the full original (~${result.entry.tokens} tok); re-fetch only if you need detail you do not already have.]`;
+    }
     return result.ackText;
 }
 
@@ -360,14 +368,19 @@ export function drainPendingRetrievals(session: Session): CoreMessage[] {
 // hint). In-memory only, bounded — an unbounded map would grow with every
 // distinct ref across a long session. Map insertion order gives FIFO trim.
 const RETRIEVE_COUNT_CAP = 512;
+// [#1430] Ack-side repeat-cost note fires from the 2nd fetch onward — the first
+// duplicate is where the cross-turn re-fetch loop becomes visible to the model.
+const REPEAT_RETRIEVE_ACK_THRESHOLD = 2;
 
-export function recordRetrieveHit(session: Session, ref: string): void {
+export function recordRetrieveHit(session: Session, ref: string): number {
     const counts = session.retrieveCountsByRef ?? new Map<string, number>();
-    counts.set(ref, (counts.get(ref) ?? 0) + 1);
+    const next = (counts.get(ref) ?? 0) + 1;
+    counts.set(ref, next);
     while (counts.size > RETRIEVE_COUNT_CAP) {
         const oldest = counts.keys().next().value;
         if (oldest === undefined) break;
         counts.delete(oldest);
     }
     session.retrieveCountsByRef = counts;
+    return next;
 }

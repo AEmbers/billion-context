@@ -184,6 +184,32 @@ test("executeRetrieve: hit queues injection + ack, miss self-corrects, tool name
     assert.equal(session.stats.retrieveMisses, 2);
 });
 
+test("#1430: repeat acp_retrieve surfaces a cumulative-cost note in the ack; first fetch stays clean", () => {
+    const session = getSession(`t-ccr-cost-${Math.random().toString(36).slice(2)}`);
+    storeEffectiveCcr(session, { enabled: true, minToolTokens: 50 });
+    adoptContentStore(session, turnTwoResults(ccrConfig()).contentStore);
+    const [refA, refB] = Object.keys(session.contentStore!.byRef)!;
+    assert.ok(refA && refB && refA !== refB, "two distinct stored refs");
+
+    // First fetch: bare kernel ack, no cost note — no noise on a legitimate single fetch.
+    const first = executeRetrieve({ ref: refA }, session);
+    assert.match(first, new RegExp(`retrieved ${refA}: [\\d,]+ tok`));
+    assert.ok(!first.includes("this session"), "first fetch must not carry the repeat-cost note");
+
+    // Second fetch of the same ref: the note appears, citing the running count.
+    const second = executeRetrieve({ ref: refA }, session);
+    assert.match(second, /fetched 2x this session/);
+    assert.ok(second.includes(refA), "note names the ref");
+
+    // Third fetch: the count keeps climbing.
+    const third = executeRetrieve({ ref: refA }, session);
+    assert.match(third, /fetched 3x this session/);
+
+    // Per-ref isolation: a different ref's first fetch is still clean.
+    const other = executeRetrieve({ ref: refB }, session);
+    assert.ok(!other.includes("this session"), "a fresh ref's first fetch is unaffected by refA's repeats");
+});
+
 test("buildStoredPlaceholder renders the kernel wire format the gates assert on", () => {
     const text = buildStoredPlaceholder({ ref: "m00423", kind: "shell output", tokens: 4213, head: "npm run build", command: "npm run build", retrieveToolName: RETRIEVE_TOOL_NAME });
     assert.ok(text.includes("[acp-stored #m00423"));
