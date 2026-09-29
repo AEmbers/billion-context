@@ -88,6 +88,7 @@ import { atomicWriteInstanceFile, clearProxyInstanceFile, entryScriptFingerprint
 import { compressLoopResponsesJson } from "./compress-loop-responses.js";
 import { hoistTrappedToolItems } from "./tool-pair-order.js";
 import { runCompressLoop, pickAdapter } from "./loop/index.js";
+import { computeAnthropicMessageMarks, stampAnthropicSystemCacheControl } from "./loop/cache-control.js";
 import { reconcileSystemAnchor } from "./system-anchor.js";
 import { containsToolCallXmlFragment } from "./loop/tag-echo-filter.js";
 import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoReasoning, normalizeStrictEchoResponsesInput } from "./strict-echo.js";
@@ -889,6 +890,7 @@ type Prepared = {
     resetAfterSuccess?: boolean;
     responsesProjection?: ResponsesProjection;
     anthropicSystem?: AnthropicRequestBody["system"];
+    anthropicCacheMarks?: Map<string, { type: "ephemeral" }>;
     /** Original leading system/developer prefix text captured by the kernel's
      *  openai hoist (0.0.37). The fold space no longer carries it, so every
      *  rebuilt payload and compress-loop round must re-inject it. */
@@ -3127,6 +3129,7 @@ async function prepareAnthropic(
     let originalMessages: CoreMessage[] = [];
     let nudge: NudgeDecision | undefined;
     let rebuiltMessages = parsed.messages;
+    let anthropicCacheMarks: Map<string, { type: "ephemeral" }> | undefined;
     let systemOut = parsed.system;
     let toolsOut = parsed.tools;
 
@@ -3271,12 +3274,23 @@ async function prepareAnthropic(
             attachedRetrievals = snapshotPendingRetrievals(session);
             if (attachedRetrievals.length > 0) processedMessages = [...processedMessages, ...attachedRetrievals.map((i) => i.injection)];
         }
-        rebuiltMessages = coreToAnthropic(processedMessages as BiliMessage[], cacheControls);
+        // #1637: cumulative cache_control marks applied through the kernel's own
+        // applier (same machine the round-2 adapter uses); marks ride the last
+        // STABLE message — ephemeral tails (retrievals/sysNotes/nudge/id note)
+        // never carry a breakpoint. Client-managed controls pass through untouched.
+        anthropicCacheMarks = cacheControls.size > 0 ? undefined : computeAnthropicMessageMarks(processedMessages as { id?: string }[], attachedRetrievals.length, session);
+        rebuiltMessages = coreToAnthropic(processedMessages as BiliMessage[], anthropicCacheMarks ?? cacheControls);
         if (sysNotes.length > 0) {
             rebuiltMessages = [...rebuiltMessages, ...sysNotes.map((text) => ({ role: "user" as const, content: text }))];
         }
 
         systemOut = injectSystem(parsed, opts, prompts, loopConfig, ensureCanonicalId(session), surface, visibilityMarkers);
+        // #1637: stamp the steady body's system. NOTE: parsed.system stays the
+        // #1085 frozen CLIENT head (injectSystem's in-place view) — the round-2
+        // adapter consumes that frozen head and stamps its own rebuild, so NO
+        // write-back here (writing the full systemOut back would double-append
+        // the compress prompt on round-2, the exact F2 seam the matrix pins).
+        systemOut = stampAnthropicSystemCacheControl(systemOut, anthropicCacheMarks !== undefined);
         if (injectTools) {
             toolsOut = injectTool(parsed.tools, [...(absorbActive ? [absorbTools.anthropic] : []), ...(rulesActive ? [RULE_TOOL] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).anthropic] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL] : [])], surface?.toolPrompts);
         }
@@ -3338,7 +3352,7 @@ async function prepareAnthropic(
     session.stats.localInputEstimate = estimateCoreMessagesUpper(processedMessages.length > 0 ? processedMessages : originalMessages)
         + countSystemAndToolsTokens(extractSystem(systemOut), toolsOut)
         + imageTokensInParsedBody("anthropic", rebuilt, imageBillingFor(opts, upstreamOrigin));
-    return { body: JSON.stringify(rebuilt), session, attachedRetrievals, attachedRetrievalNoteIds, processedMessages, originalMessages, anthropicSystem: parsed.system, systemNotes: sysNotes, protocol: "anthropic", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", dropReasoning: stripReasoning } as Prepared;
+    return { body: JSON.stringify(rebuilt), session, attachedRetrievals, attachedRetrievalNoteIds, processedMessages, originalMessages, anthropicSystem: parsed.system, anthropicCacheMarks, systemNotes: sysNotes, protocol: "anthropic", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", dropReasoning: stripReasoning } as Prepared;
 }
 
 async function prepareOpenai(
@@ -5896,7 +5910,7 @@ async function forward(
                 : "";
             const visibilityMarkers = resolveCompress(opts.routes, route?.rewrittenUrl, (parsedReq as { model?: string }).model, opts.compress).visibilityMarkers ?? true;
             const systemPrompt = withConversationIdNote(withMarkerIntegrityNote(withSummaryBudgetNote(textProtocol ? buildCompressHybridSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections) : buildCompressSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections)), visibilityMarkers), ensureCanonicalId(prepared.session)) + absorbSection;
-            const adapter = pickAdapter(prepared.protocol, parsedReq, textProtocol, prepared.responsesProjection, prepared.anthropicSystem, prepared.openaiSystemText, absorbActive ? absorbToolName(loopConfig) : undefined, prepared.google, prepared.systemNotes, opts.streamErrorShape);
+            const adapter = pickAdapter(prepared.protocol, parsedReq, textProtocol, prepared.responsesProjection, prepared.anthropicSystem, prepared.openaiSystemText, absorbActive ? absorbToolName(loopConfig) : undefined, prepared.google, prepared.systemNotes, opts.streamErrorShape, prepared.anthropicCacheMarks);
             const refreshFolded = async (current: CoreMessage[]): Promise<CoreMessage[]> => {
                 return withSessionLock(prepared.session, async () => {
                     // #422: mirror the prepare's fold with the post-compress state so
