@@ -16,6 +16,7 @@ import { contextFromRegistry, loadRegistry, peekRegistryContext, peekRegistryOut
 import { codexAlignedWindow } from "./codex-models.js";
 import { fetchWithTimeout, MAX_REQUEST_BYTES, upstreamTimeoutMs } from "./fetch-util.js";
 import { formatUpstreamError, getUpstreamConnectionStatus, recordUpstreamConnection, resolveProxy, resolveProxyDecision, proxyDispatcher, type UpstreamProxyDecision } from "./upstream-proxy.js";
+import { clearUpstreamAlertsForHost, getUpstreamAlerts, recordUpstreamAlert } from "./upstream-alerts.js";
 import { maskHeaderForLog, maskHeadersForLog, maskHostPortForLog, setMaskHostsEnabled, maskUrlForLog, maskUrlsInText } from "./log-mask.js";
 // Protocol codecs + the historical-image strip primitive live in the kernel now
 // (single source of truth shared with the omp/pi adapters): import from
@@ -1178,9 +1179,14 @@ async function handle(
             }, 15_000);
             result.clearTimer();
             recordUpstreamConnection(targetUrl, proxyUrl);
+            // #1682: a successful probe clears active alerts for this host so
+            // the banner reflects the fix immediately, without waiting for traffic.
+            clearUpstreamAlertsForHost(targetUrl);
             res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: true, status: result.response.status, target: targetUrl, proxy: proxyUrl ?? null }));
         } catch (error) {
+            // #1682: probe failures deliberately do NOT feed the alert table —
+            // they are user-initiated diagnostics, not live-traffic evidence.
             recordUpstreamConnection(targetUrl, proxyUrl, error);
             res.writeHead(502, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: formatUpstreamError(error, targetUrl, proxyUrl) }));
@@ -5335,8 +5341,11 @@ async function forward(
     try {
         upstreamResult = await fetchWithTimeout(upstreamUrl, init, undefined, clientAbort.signal);
         recordUpstreamConnection(upstreamUrl, proxyUrl);
+        // #1682: any resolved response proves the host is reachable again.
+        clearUpstreamAlertsForHost(upstreamUrl);
     } catch (error) {
         recordUpstreamConnection(upstreamUrl, proxyUrl, error);
+        recordUpstreamAlert(upstreamUrl, error, proxyUrl !== undefined);
         // #604: a network-level failure (socket reset, timeout abort) also never
         // reports usage — arm the emergency shrink like the 5xx branch below.
         if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure", outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").armEstimate);
@@ -6402,6 +6411,7 @@ async function sendOverview(res: http.ServerResponse, opts: ProxyOptions): Promi
         blindTunnels: getBlindTunnelStats(),
         conflicts: summarizeConflicts(listSessions()),
         passthrough: { enabled: !!opts.passthrough, source: opts.passthroughSource },
+        alerts: getUpstreamAlerts(),
     }, null, 2));
 }
 
