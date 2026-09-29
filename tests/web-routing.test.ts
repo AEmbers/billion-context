@@ -22,15 +22,6 @@ test("embedded Web client is valid JavaScript", () => {
     assert.doesNotThrow(() => new Function(WEB_CLIENT));
 });
 
-async function freePort(): Promise<number> {
-    const server = http.createServer();
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const port = (server.address() as { port: number }).port;
-    await close(server);
-    return port;
-}
-
 test("Web UI exposes upstream controls without inline handlers", async () => {
     _setStoreForTest(new SessionStore({ enabled: false }));
     setRegistryForTest({});
@@ -43,9 +34,8 @@ test("Web UI exposes upstream controls without inline handlers", async () => {
         config: process.env.BILI_CONFIG_FILE,
     };
     process.env.BILI_CONFIG_FILE = biliConfig;
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1:1",
         routes: {},
@@ -65,6 +55,7 @@ test("Web UI exposes upstream controls without inline handlers", async () => {
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
     try {
         const ui = await (await fetch(`${base}/__bili/`)).text();
@@ -115,9 +106,8 @@ test("PUT /__bili/config with providers takes effect without a separate reload c
     writeFileSync(biliConfig, '{"providers":{}}\n', "utf8");
     const prevConfig = process.env.BILI_CONFIG_FILE;
     process.env.BILI_CONFIG_FILE = biliConfig;
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1:1",
         routes: {},
@@ -137,6 +127,7 @@ test("PUT /__bili/config with providers takes effect without a separate reload c
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
     try {
         const providers = { "https://api.example.com/v1": { models: { "gpt-test": { context: 123456 } } } };
@@ -234,9 +225,8 @@ test("#154: PUT /__bili/config with compress hot-applies the global compress blo
     writeFileSync(biliConfig, '{"providers":{}}\n', "utf8");
     const prevConfig = process.env.BILI_CONFIG_FILE;
     process.env.BILI_CONFIG_FILE = biliConfig;
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1:1",
         routes: {},
@@ -256,6 +246,7 @@ test("#154: PUT /__bili/config with compress hot-applies the global compress blo
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
     try {
         const ui = await (await fetch(`${base}/__bili/`)).text();
@@ -316,9 +307,8 @@ test("compress round-trip preserves injectTool/injectNudge injection toggles", a
     writeFileSync(biliConfig, JSON.stringify({ providers: {}, compress: toggles }) + "\n", "utf8");
     const prevConfig = process.env.BILI_CONFIG_FILE;
     process.env.BILI_CONFIG_FILE = biliConfig;
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1:1",
         routes: {},
@@ -338,6 +328,7 @@ test("compress round-trip preserves injectTool/injectNudge injection toggles", a
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
     try {
         // UI flow: GET shows the file block (incl. the toggles); echoing the
@@ -373,9 +364,8 @@ test("PUT /__bili/config refuses to overwrite a config file that does not parse"
     writeFileSync(biliConfig, '{"providers":{},"modelContextLimit":333000,}\n', "utf8");
     const prevConfig = process.env.BILI_CONFIG_FILE;
     process.env.BILI_CONFIG_FILE = biliConfig;
-    const port = await freePort();
     const opts: ProxyOptions = {
-        port,
+        port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1:1",
         routes: {},
@@ -395,6 +385,7 @@ test("PUT /__bili/config refuses to overwrite a config file that does not parse"
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
+    const port = (proxy.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
     try {
         const get1 = await (await fetch(`${base}/__bili/config`)).json() as { parseError?: string };
