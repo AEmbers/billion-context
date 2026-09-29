@@ -12,9 +12,11 @@
 import { runMcpStdio } from "../mcp.js";
 import { fetchManifest } from "../agent/shared.js";
 import { nativeProxyScriptPath } from "../agent/native-bootstrap.js";
+import { resolveZcodeLane } from "../config.js";
 import { configureLogger, log as teeLog } from "../logger.js";
 import { defaultLogFile } from "../paths.js";
 import { LAUNCHER_DEFAULT_HOST, ensureProxyRunning } from "../launcher.js";
+import type { ZcodeRoutePolicy } from "./json-edit.js";
 import {
     activateZcodePluginMode,
     bootstrapZcodeNative,
@@ -29,7 +31,11 @@ const WATCHDOG_INTERVAL_MS = 30000;
 const WATCHDOG_FAILURE_LIMIT = 3;
 const HANDOFF_TIMEOUT_MS = 5000;
 
-function startWatchdog(state: { origin: string }, attached: boolean, log: (msg: string) => void): void {
+function startWatchdog(
+    state: { origin: string; policy: ZcodeRoutePolicy; fixedPort?: number },
+    attached: boolean,
+    log: (msg: string) => void,
+): void {
     let failures = 0;
     let busy = false;
     const timer = setInterval(() => {
@@ -48,12 +54,12 @@ function startWatchdog(state: { origin: string }, attached: boolean, log: (msg: 
                         log(`attached proxy ${state.origin} unhealthy — waiting for it to recover`);
                     } else {
                         const handle = await ensureProxyRunning(
-                            { host: LAUNCHER_DEFAULT_HOST, port: 0, passthrough: false, debug: false, lane: "zcode" },
+                            { host: LAUNCHER_DEFAULT_HOST, port: state.fixedPort ?? 0, passthrough: false, debug: false, lane: "zcode" },
                             { scriptPath: nativeProxyScriptPath() },
                         );
                         if (handle.origin !== state.origin) {
                             process.env.BILI_MCP_PROXY = handle.origin;
-                            const routed = await routeZcodeConfig({ origin: handle.origin, log });
+                            const routed = await routeZcodeConfig({ origin: handle.origin, log, policy: state.policy });
                             if (!routed) throw new Error("proxy respawned but the zcode config rewrite failed");
                             await activateZcodePluginMode(routed, { log });
                             state.origin = handle.origin;
@@ -115,7 +121,12 @@ export async function main(): Promise<void> {
         process.exit(0);
     }
     await activateZcodePluginMode(applied, { log });
-    const state = { origin: applied.origin };
+    const lane = resolveZcodeLane();
+    const state = {
+        origin: applied.origin,
+        policy: { route: lane.route, direct: lane.direct, assumeSigningFixed: lane.assumeSigningFixed },
+        fixedPort: lane.fixedPort,
+    };
     startWatchdog(state, bootstrap.attached, log);
     installExitHandoff(state, log);
     runMcpStdio();

@@ -4,6 +4,7 @@
 // it) so sessions started while `bili start` is running get compression
 // without waiting for the per-session spawn path. Fails open: always exits 0.
 
+import { resolveZcodeLane } from "../config.js";
 import { resolveProxyOrigin } from "../mcp.js";
 import { reportRuntimeInfo } from "../agent/shared.js";
 import { planNativeZcode, routeZcodeConfig, waitForProxyHealthy } from "./native.js";
@@ -38,9 +39,15 @@ export async function main(): Promise<void> {
         const payload = await readStdinPayload();
         const plan = planNativeZcode(process.env);
         if (plan.mode === "off") return;
+        // #1622: pass the resolved lane — routeZcodeConfig's default policy ignores zcode.route/direct.
+        const lane = resolveZcodeLane(process.env);
+        if (lane.route === "none") return;
         const origin = plan.mode === "attach" ? plan.attachOrigin : resolveProxyOrigin();
         if (!(await waitForProxyHealthy(origin, HOOK_HEALTH_DEADLINE_MS))) return;
-        const applied = await routeZcodeConfig({ origin });
+        const applied = await routeZcodeConfig({
+            origin,
+            policy: { route: lane.route, direct: lane.direct, assumeSigningFixed: lane.assumeSigningFixed },
+        });
         if (!applied) return;
         const model = typeof payload.model === "string" && payload.model.length > 0 ? payload.model : "zcode";
         await reportRuntimeInfo(origin, { agent: "zcode", model, baseURL: applied.upstream, source: "session-start-hook" });

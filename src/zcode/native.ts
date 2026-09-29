@@ -419,8 +419,9 @@ export interface StoreDriftOptions {
 }
 
 async function defaultFindReplacement(): Promise<{ origin: string } | undefined> {
-    // Built lazily: launcher.ts and this module are cycle-adjacent (via the
-    // plugin-install lane), so no module-level reference to its exports.
+    // Called lazily: launcher.ts and this module are cycle-adjacent (via the
+    // plugin-install lane), so the call must wait until both modules have
+    // finished evaluating.
     const inst = await findLiveAttachableInstance(
         { host: LAUNCHER_DEFAULT_HOST, port: 0, passthrough: false, debug: false, lane: "zcode" },
         { scriptPath: nativeProxyScriptPath() },
