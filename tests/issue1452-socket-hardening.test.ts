@@ -395,12 +395,15 @@ test("stall guard: silent mid-stream upstream ends in in-band error + FIN, not a
 });
 
 test("stall guard: healthy stream longer than the budget survives — re-arm per byte (#1452)", async () => {
-    // 8 chunks at 250ms = ~2000ms total > 750ms budget. A total-time deadline
-    // would cut this stream; per-byte re-arm must not. Interval/budget margin
-    // is 3x so a loaded CI runner's timer jitter (windows runners spike)
-    // cannot masquerade as a stall.
+    // 12 chunks at 250ms = ~3000ms total > 2000ms budget: a total-time deadline
+    // would cut this stream at 2000ms, per-byte re-arm must not. The budget is
+    // set 8x the 250ms cadence so a single inter-byte gap would have to slip by
+    // ~1.75s beyond its nominal fire time to masquerade as a stall — far past
+    // the timer jitter a loaded CI runner (parallel suite + concurrent build)
+    // actually produces. The old 750ms budget (3x) tripped under exactly that
+    // load (#1697): one starved setInterval tick stretched a single gap past it.
     const intervalMs = 250;
-    const totalChunks = 8;
+    const totalChunks = 12;
     const upstream = http.createServer((_req, res) => {
         res.writeHead(200, { "content-type": "text/event-stream", "connection": "close" });
         res.flushHeaders();
@@ -417,7 +420,7 @@ test("stall guard: healthy stream longer than the budget survives — re-arm per
         _req.on("close", () => clearInterval(t));
     });
     await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
-    const restoreStall = withEnv("BILI_STREAM_STALL_MS", "750");
+    const restoreStall = withEnv("BILI_STREAM_STALL_MS", "2000");
     const restoreIdle = withEnv("BILI_UPSTREAM_TIMEOUT_MS", "60000");
     let harness: Harness | null = null;
     try {
@@ -434,7 +437,7 @@ test("stall guard: healthy stream longer than the budget survives — re-arm per
         const body = await res.text();
         for (let i = 1; i <= totalChunks; i++) assert.ok(body.includes(`chunk-${i}`), `missing chunk-${i}: ${body.slice(0, 300)}`);
         assert.ok(body.includes("[DONE]"), `healthy stream must complete with the terminal event: ${body.slice(0, 300)}`);
-        assert.ok(!body.includes("stream error"), `healthy stream must not trip the stall guard: ${body.slice(0, 300)}`);
+        assert.ok(!body.includes("upstream_stream_truncated"), `healthy stream must not trip the stall guard: ${body.slice(0, 300)}`);
     } finally {
         restoreStall();
         restoreIdle();
