@@ -3978,10 +3978,13 @@ async function prepareResponses(
             const devContent = devParts.join("\n\n---\n\n");
             responsesDevContent = devContent;
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
-            // #1611: id value rides the ephemeral tail (see prepareAnthropic).
-            const idItems: ResponseInputItem[] = typeof rebuiltInput === "string" ? [{ type: "message", role: "user", content: rebuiltInput }] : rebuiltInput;
-            idItems.push({ type: "message", role: "user", content: conversationIdTailNote(ensureCanonicalId(session)) });
-            rebuiltInput = idItems;
+            // #1611: id value rides the ephemeral tail (see prepareAnthropic);
+            // #1614: gated like every other lane — quiet hosts stay note-free.
+            if (sharedMcpLaneActive()) {
+                const idItems: ResponseInputItem[] = typeof rebuiltInput === "string" ? [{ type: "message", role: "user", content: rebuiltInput }] : rebuiltInput;
+                idItems.push({ type: "message", role: "user", content: conversationIdTailNote(ensureCanonicalId(session)) });
+                rebuiltInput = idItems;
+            }
             if (!process.env.ACP_NO_INJECT_TOOL && injectTools) {
                 const respExtra = [...(absorbActive ? [absorbTools.responses] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
                 toolsOut = responsesTextProtocol
