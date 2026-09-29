@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { markDirty, preCompactionArchiveOf, peekSession, findSessionByCanonicalId, type Session } from "./session.js";
 import { getStore } from "./persist.js";
 import { ccrEnabled, contentStoreOf } from "./store.js";
+import { safePrefix } from "./text-safe.js";
 
 /** Bounded retention for large-decompress temp files. Each decompress with
  *  body > 10000 writes one file under tmpdir(); the reaper unlinks oldest past
@@ -311,17 +312,7 @@ function resolveDecompressRange(args: Record<string, unknown>, ctx: ProxyToolCtx
     return `[decompress ${block.blockId} ${startRaw}–${endRaw}: restored ${parts.length} item(s) — full content follows]`;
 }
 
-// Back off a cut that lands between the two halves of a surrogate pair, so the
-// truncated prefix never ends on a lone high surrogate (#816: strict-UTF-8
-// gateways 500 deterministically on re-encoded request bodies).
-function safePrefix(text: string, n: number): string {
-    let cut = Math.min(n, text.length);
-    if (cut > 0 && cut < text.length) {
-        const c = text.charCodeAt(cut - 1);
-        if (c >= 0xD800 && c <= 0xDBFF) cut -= 1;
-    }
-    return text.slice(0, cut);
-}
+
 
 /** Shared search_context execution for all wire paths. Distinguishes "no active
  *  blocks at all" (searching is pointless until compress runs — an explicit
