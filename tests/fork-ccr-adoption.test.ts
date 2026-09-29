@@ -7,7 +7,7 @@
 // fork unchanged.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -34,6 +34,7 @@ import { getStore, SessionStore, _setStoreForTest } from "../src/persist.ts";
 import { applyRanges } from "../src/stream.ts";
 import { parseCompressInput } from "../src/compress-tool.ts";
 import { maybeAdoptForkBlocks } from "../src/fork-adoption.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 process.env.BILI_PERSIST = "0";
 
@@ -311,7 +312,7 @@ test("child persists its own companion and survives a proxy restart (#1341)", ()
         assert.ok(drainPendingRetrievals(reloaded)[0].text?.includes(BIG_A.slice(0, 200)), "true original after reload");
     } finally {
         _setStoreForTest(new SessionStore({ enabled: false }));
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 

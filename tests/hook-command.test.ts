@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isOursSessionStartEntry, portableHookCommand } from "../src/plugin-install.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 // The SessionStart hook is the one place bili hands a client a SHELL STRING
 // rather than an argv array, so the client's shell re-parses our path. The unit
@@ -141,7 +142,7 @@ test("the emitted command really runs: bare token + spaced argument, through eve
         }
         assert.ok(ran.length > 0, "no shell available to verify against");
     } finally {
-        fs.rmSync(root, { recursive: true, force: true });
+        rmrf(root);
     }
 });
 
@@ -162,6 +163,6 @@ test("the & fallback really runs under PowerShell", { skip: process.platform !==
         assert.equal(r.status, 0, `${r.status} for: ${command}\n${r.out}`);
         assert.match(r.out, /HOOKOK/, `${command}\n${r.out}`);
     } finally {
-        fs.rmSync(root, { recursive: true, force: true });
+        rmrf(root);
     }
 });

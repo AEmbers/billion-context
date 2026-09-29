@@ -24,6 +24,7 @@ import { loadConversations, recordPluginSession, flushConversations } from "../s
 import { unpackDeadProxyUrlsInFile, liveProxyPorts, prepareDshHome } from "../src/launcher.ts";
 import { pluginInstall } from "../src/plugin-install.ts";
 import { setLogCapture } from "../src/logger.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 function tmpStateDir(): { dir: string; restore: () => void } {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bili-inst-state-"));
@@ -337,7 +338,7 @@ test("unpackDeadProxyUrlsInFile: dead-origin wraps unpacked, live-origin wraps k
         assert.match(out, /baseUrl: http:\/\/127\.0\.0\.1:9001\/bili\/https:\/\/keep\.example\.com\/v1/, "live-origin wrap kept");
     } finally {
         st.restore();
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -356,10 +357,10 @@ test("dsh overlay: nested generated settings.yaml is never promoted into the rea
         const real = fs.readFileSync(path.join(home, "settings.yaml"), "utf8");
         assert.ok(!real.includes("poisoned"), "real settings.yaml clean");
     } finally {
-        if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
-        fs.rmSync(home, { recursive: true, force: true });
+        if (tmp) rmrf(tmp);
+        rmrf(home);
         try {
-            fs.rmSync(overlay, { recursive: true, force: true });
+            rmrf(overlay);
         } catch {}
     }
 });
@@ -386,6 +387,6 @@ test("plugin install: refuses to freeze a dead or missing proxy origin (#403)", 
         else process.env.CODEX_HOME = prevCodex;
         if (prevEnv !== undefined) process.env.BILI_MCP_PROXY = prevEnv;
         st.restore();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });

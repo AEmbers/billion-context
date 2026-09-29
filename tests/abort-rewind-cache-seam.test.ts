@@ -34,6 +34,7 @@ import { startServer } from "../src/server.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
 import type { ProxyOptions } from "../src/config.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 type Item = Record<string, unknown>;
 
@@ -294,6 +295,6 @@ test("abort/rewind cycles keep the outbound prefix item-stable (#1613 suspects A
     } finally {
         await closeServer(proxy);
         await closeServer(upstream);
-        try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+        try { rmrf(tmp); } catch { /* ignore */ }
     }
 });
