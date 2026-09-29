@@ -19,6 +19,7 @@ import { adoptContentStore, drainPendingRetrievals, executeRetrieve, retrieveToo
 import { RETRIEVE_TOOL_NAME } from "../src/compress-tool.ts";
 import { getSession } from "../src/session.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 // Unit tests never touch the real data/state trees: persistence off by
 // default; the envelope round-trip builds its own throwaway SessionStore.
@@ -224,7 +225,7 @@ test("envelope round-trip: dirty flag gates the write; reload restores the store
         assert.equal(findEnvelope(PERSIST_TMP), null, "emptied store deletes the envelope");
     } finally {
         _setStoreForTest(new SessionStore({ enabled: false }));
-        rmSync(PERSIST_TMP, { recursive: true, force: true });
+        rmrf(PERSIST_TMP);
     }
 });
 
@@ -249,7 +250,7 @@ test("flushAll retries a dirty content store after a transient write failure", a
         assert.equal(session.contentStoreDirty, true, "failed content-store write stays dirty for retry");
         assert.ok(logs.some((line) => line.includes("content-store write failed")), "transient write failure was observed");
 
-        rmSync(file, { recursive: true, force: true });
+        rmrf(file);
         await store.flushAll([session]);
         assert.equal(session.contentStoreDirty, false, "graceful flush retries the dirty content store");
         assert.ok(existsSync(file), "content-store envelope is restored once the transient failure clears");
@@ -257,7 +258,7 @@ test("flushAll retries a dirty content store after a transient write failure", a
     } finally {
         store.cancelAll();
         _setStoreForTest(new SessionStore({ enabled: false }));
-        rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 

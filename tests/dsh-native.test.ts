@@ -6,6 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import { pathToFileURL } from "node:url";
 import { apply, planNativeDsh, shouldBootstrapNativeDsh, persistClientEvent, _resetRegisterForTest, _setSpawnForTest, _stateHeadersForTest, _stateRespawnForTest, _stateTakeoverGateForTest, _noteRoutedForTest, _resetRoutedForTest } from "../src/agent/dsh-native.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 // #1365: legacy dead-attach suites must not pay the 5s routed-evidence grace
 // default (waitFor below caps at 5s — a full grace would race it). Pinned-path
@@ -63,7 +64,7 @@ test("stripLegacyManagedBlock: restores the placeholder when nothing meaningful 
         assert.equal(fs.readFileSync(path.join(dir, "cordis.patch.yml"), "utf8"), `${HEADER}[]\n`);
         assert.equal(stripLegacyManagedBlock(dir), false);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -80,7 +81,7 @@ test("stripLegacyManagedBlock: preserves user entries; leaves non-managed files 
         assert.equal(stripLegacyManagedBlock(dir), false);
         assert.equal(fs.readFileSync(path.join(dir, "cordis.patch.yml"), "utf8"), `${HEADER}[]\n`);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -95,7 +96,7 @@ test("stripLegacyManagedBlock: preserves user comments when nothing meaningful r
         assert.ok(out.includes("[]"));
         assert.ok(!out.includes(DSH_PATCH_BEGIN));
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -194,7 +195,7 @@ test("dsh install drives the dsh plugin channel per profile, no managed blocks w
         });
     } finally {
         _setDshRunnersForTest(undefined);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -229,7 +230,7 @@ test("dsh remove uninstalls through the same channel and migrates legacy blocks"
         });
     } finally {
         _setDshRunnersForTest(undefined);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -245,7 +246,7 @@ test("dsh install surfaces channel failures with context", async () => {
         });
     } finally {
         _setDshRunnersForTest(undefined);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -272,7 +273,7 @@ test("dsh status: bundle / mixed / legacy / absent", async () => {
             assert.match(st(), /legacy managed block — rerun 'bili plugin install dsh' to migrate/);
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -296,7 +297,7 @@ test("dshNativeInstalled: true iff any profile has the bundle or a legacy manage
             assert.equal(dshNativeInstalled(), false);
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -312,7 +313,7 @@ test("dshBundleInstalled: true iff the profile manifest lists billion-context as
         fs.writeFileSync(path.join(home, "web", "package.json"), JSON.stringify({ dsh: { profile: { bundles: ["billion-context"] } } }));
         assert.equal(dshBundleInstalled(path.join(home, "web")), true);
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -328,7 +329,7 @@ test("dshProfileDirs: skips node_modules, errors when profiles root is absent", 
             assert.ok(dirs[0].endsWith("headless"));
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -501,7 +502,7 @@ test("apply() attach mode: registers manifest tools verbatim, gates headers, for
         });
     } finally {
         proxy.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -537,7 +538,7 @@ test("apply() /acp-cache (#1146): forwards acp_cache bound to the initiator sess
             }
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -567,7 +568,7 @@ test("apply() /acp-cache (#1146): unreachable proxy reports an error", async () 
             }
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -605,7 +606,7 @@ test("apply() inactive-context registration failure is silent and terminal (dsh 
     } finally {
         console.error = origErr;
         proxy.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -621,7 +622,7 @@ test("apply() is a no-op under the kill switches", async () => {
             assert.equal(ctx.registeredCommands.length, 0);
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -660,7 +661,7 @@ test("apply() runtime-info (#955): model services stamp model/window/max-output 
         });
     } finally {
         proxy.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -706,7 +707,7 @@ test("apply() runtime-info (#956): a mid-resolve model switch discards the stale
         });
     } finally {
         proxy.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -741,7 +742,7 @@ test("apply() /acp pre-first-request (#955): renders the runtime-table entry bef
         });
     } finally {
         proxy.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -785,7 +786,7 @@ test("#983 apply() attach mode: a dead preset falls back to a spawned proxy and 
         _setSpawnForTest(undefined);
         live.close();
         forward.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -810,7 +811,7 @@ test("#983 apply() attach mode: a healthy preset attaches without any spawn", as
     } finally {
         _setSpawnForTest(undefined);
         proxy.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -845,7 +846,7 @@ test("#983 maybeRetry self-heals a base-less register after a failed respawn", a
     } finally {
         _setSpawnForTest(undefined);
         forward.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -875,8 +876,8 @@ test("#1117 apply() installs takeoverGate keyed on currentInitiator attribution"
         });
     } finally {
         proxy.close();
-        fs.rmSync(stateHome, { recursive: true, force: true });
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(stateHome);
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -923,8 +924,8 @@ test("#1158 apply() gate refusal logs each endpoint once per process with attrib
         });
     } finally {
         proxy.close();
-        fs.rmSync(stateHome, { recursive: true, force: true });
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(stateHome);
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -992,8 +993,8 @@ test("#1158 L2 gate three-state: thrown attribution is a distinct state; counts 
         });
     } finally {
         proxy.close();
-        fs.rmSync(stateHome, { recursive: true, force: true });
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(stateHome);
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -1029,8 +1030,8 @@ test("#1158 apply() persists bootstrap failures to bili.log (GUI stderr is invis
     } finally {
         console.error = origErr;
         _setSpawnForTest(undefined);
-        fs.rmSync(home, { recursive: true, force: true });
-        fs.rmSync(stateHome, { recursive: true, force: true });
+        rmrf(home);
+        rmrf(stateHome);
         _resetRegisterForTest(undefined);
     }
 });
@@ -1056,7 +1057,7 @@ test("#1158 persistClientEvent: standard line shape into bili.log; broken fs nev
             fs.rmSync(blocker, { force: true });
         }
     } finally {
-        fs.rmSync(stateHome, { recursive: true, force: true });
+        rmrf(stateHome);
     }
 });
 
@@ -1116,7 +1117,7 @@ test("#1130 apply() attach mode: runtime death of the shared proxy re-probes and
         _setSpawnForTest(undefined);
         fallback.close();
 
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });
@@ -1161,7 +1162,7 @@ test("#1365 apply() attach mode: routed evidence pins the channel — a transien
         clearTimeout(upTimer);
         server.close();
         _setSpawnForTest(undefined);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRoutedForTest();
         _resetRegisterForTest(undefined);
     }
@@ -1212,7 +1213,7 @@ test("#1365 apply() attach mode: routed evidence + persistently dead target — 
         console.error = origErr;
         server.close();
         _setSpawnForTest(undefined);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRoutedForTest();
         _resetRegisterForTest(undefined);
     }
@@ -1249,7 +1250,7 @@ test("#1365 apply() attach mode: late routed evidence rebinds the bili tools to 
     } finally {
         a.close();
         b.close();
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRoutedForTest();
         _resetRegisterForTest(undefined);
     }
@@ -1298,7 +1299,7 @@ test("#1365 apply() attach mode: runtime death with routed evidence — waits th
         clearTimeout(upTimer);
         server.close();
         _setSpawnForTest(undefined);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
         _resetRoutedForTest();
         _resetRegisterForTest(undefined);
     }

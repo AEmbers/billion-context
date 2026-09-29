@@ -4772,6 +4772,104 @@ function beginPreflightHold(res: http.ServerResponse, prepared: Prepared, log: (
     return () => clearInterval(iv);
 }
 
+// #1647: sibling of the #568 hold, covering the STREAMING phase. After the 2xx
+// commit, bili keeps consuming upstream bytes that never reach the client — the
+// rewriter/strip pipes swallow SSE comment pings (`: ping`, which llama.cpp &
+// friends emit precisely to keep intermediate hops alive), and the
+// fake-completion backstop + compress loop buffer whole rounds before emitting.
+// The CLIENT-side undici default bodyTimeout (300s, inactivity-based; Node's
+// built-in fetch cannot override it per-request) then kills any prefill longer
+// than 300s even though leg 2 (#551/#556) survived it — and wrappers misread
+// that death as a dead proxy and silently re-send DIRECT (losing compression).
+// Hold the client exactly like #568 does: while zero bytes reach the socket,
+// emit one SSE comment line (a spec-mandated no-op for every SSE consumer).
+// Armed once per response at the 2xx commit point; self-clears on res close,
+// so no stop() needs threading through the pipe branches below. Safe under any
+// framing: content-length is a hop header stripped from respHeaders, so the
+// response is always chunked downstream.
+const STREAM_KEEPALIVE_DEFAULT_MS = 15_000;
+
+function streamKeepaliveMs(): number {
+    const raw = process.env.BILI_STREAM_KEEPALIVE_MS;
+    if (!raw) return STREAM_KEEPALIVE_DEFAULT_MS;
+    const v = Number(raw);
+    return Number.isFinite(v) && v >= 0 ? Math.floor(v) : STREAM_KEEPALIVE_DEFAULT_MS;
+}
+
+export function beginStreamKeepalive(res: http.ServerResponse, sid: string, log: (level: string, msg: string) => void): void {
+    const idleMs = streamKeepaliveMs();
+    if (idleMs <= 0 || res.destroyed || res.writableEnded) return;
+    const sock = res.socket;
+    if (!sock) return;
+    let baseline = sock.bytesWritten;
+    let warned = false;
+    let stopped = false;
+    // Line-boundary guard: an SSE comment is a no-op ONLY when it starts at a
+    // line boundary. Every processed pipe in this file re-emits whole events,
+    // but the raw pipeThrough lanes (title-gen, classifier bypass,
+    // ACP_NO_INJECT_TOOL — server.ts !useRewriter branch) forward upstream
+    // chunks verbatim, so a partial `data:` line can sit un-terminated on the
+    // wire when the interval fires. Injecting a comment there splices it into
+    // the client's JSON. Track the last byte written and skip the beat while
+    // mid-line; the 300s budget tolerates skips, corruption does not.
+    // `__biliKeepaliveBoundary` (on the res) is the live boundary state so a
+    // second arming on the same res shares one truth; undefined = not yet patched.
+    const anyRes = res as unknown as { __biliKeepaliveBoundary?: boolean };
+    let origWrite: typeof res.write;
+    if (anyRes.__biliKeepaliveBoundary === undefined) {
+        origWrite = res.write.bind(res);
+        anyRes.__biliKeepaliveBoundary = true; // headers just committed — at a boundary
+        res.write = ((...args: Parameters<typeof origWrite>) => {
+            const chunk = args[0];
+            try {
+                if (typeof chunk === "string") {
+                    if (chunk.length > 0) anyRes.__biliKeepaliveBoundary = chunk.endsWith("\n");
+                } else if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) {
+                    if (chunk.length > 0) anyRes.__biliKeepaliveBoundary = chunk[chunk.length - 1] === 0x0a;
+                }
+            } catch { /* observation must never break the write */ }
+            return origWrite(...args);
+        }) as typeof res.write;
+    }
+    const stop = (): void => {
+        if (stopped) return;
+        stopped = true;
+        clearInterval(iv);
+        res.removeListener("close", stop);
+    };
+    res.once("close", stop);
+    // Check cadence: idleMs/3 keeps worst-case gap-to-first-keepalive well
+    // inside the threshold even with timer drift; the 50ms floor only matters
+    // for tiny opt-in values (tests / exotic setups).
+    const iv = setInterval(() => {
+        try {
+            if (res.destroyed || res.writableEnded || !res.socket) {
+                stop();
+                return;
+            }
+            const written = res.socket.bytesWritten;
+            if (written > baseline) {
+                baseline = written;
+                return;
+            }
+            // Mid-line: skip this beat. No baseline mutation, so the next tick
+            // re-checks; when the pending line completes, its own write flips
+            // the flag and keep-alives resume. (Note: a keep-alive write itself
+            // bumps bytesWritten, so the following tick sees "progress" and
+            // skips — effective cadence ≈ 2×interval. Harmless vs the 300s
+            // budget; noted here so the 2× isn't mistaken for a bug.)
+            if (anyRes.__biliKeepaliveBoundary === false) return;
+            res.write(": bili-keepalive\n\n");
+            if (!warned) {
+                warned = true;
+                log("info", `[${sid}] stream silent ${idleMs}ms — holding client with SSE keep-alive comments past its undici body timeout (#1647)`);
+            }
+        } catch {
+            stop();
+        }
+    }, Math.max(50, Math.floor(idleMs / 3)));
+}
+
 /** #1493: the OUTBOUND payload size (what would actually be sent upstream):
  *  post-fold message content + wire overhead + images. Single source of truth —
  *  BOTH preflightCompressIfNeeded (trigger floor + fit gates) and armFailureShrink
@@ -5119,6 +5217,7 @@ async function forward(
     affinity?: string,
     overflowRefold?: (realWindow: number | undefined) => Promise<string | Buffer | null>,
 ): Promise<void> {
+    const forwardStartedAt = Date.now();
     // E2: a codex native-compaction request intercepted in prepare() carries a
     // forged success response — serve it without contacting upstream.
     if (prepared?.codexForge) {
@@ -5327,6 +5426,12 @@ async function forward(
     registerRequestAbort(res, clientAbort);
     res.on("close", () => {
         if (!res.writableEnded) {
+            // #1647: without this, a client killed by its own undici bodyTimeout
+            // (starved by upstream-caused silence) is indistinguishable in the log
+            // from a user cancel. Elapsed + bytes-to-client separates the two.
+            const ageMs = Date.now() - forwardStartedAt;
+            const clientBytes = res.socket?.bytesWritten ?? 0;
+            log("info", `[${prepared?.session.id ?? "passthrough"}] client disconnected mid-stream after ${ageMs}ms (${clientBytes} bytes written to client)`);
             clientAbort.abort();
             if (prepared?.session) noteClientAbort(prepared.session);
         }
@@ -5719,6 +5824,16 @@ async function forward(
             loggerLog("warn", `[${prepared?.session.id ?? "unknown"}] ← upstream ${upstream.status} returned a null body; responding empty to client`);
         }
         return;
+    }
+    // #1647: hold the client across streaming-phase silence — upstream pings
+    // swallowed by the rewrite/strip pipes, buffered rounds (see
+    // beginStreamKeepalive). SSE only: comment injection is framing-safe only
+    // where the body is an event stream. Self-clears on res close.
+    if (
+        prepared?.stream === true &&
+        (upstream.headers.get("content-type") ?? "").includes("text/event-stream")
+    ) {
+        beginStreamKeepalive(res, prepared.session.id, log);
     }
     // #1536: origin of the URL fetched for THIS request — cache-invalidation
     // attribution identity shared by the plugin pipes below and the compress
