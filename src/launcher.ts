@@ -49,6 +49,7 @@ import {
     type ProxyStartingMarker,
 } from "./instance.js";
 import { selfPackageRoot, isBiliPiEntry, ompPluginLoadedFrom, dshNativeInstalled, claudeNativeInstalled } from "./plugin-install.js";
+import { log as teeLog } from "./logger.js";
 
 /** Absolute path of a file inside our dist/, resolved via the package root
  * (import.meta.url-based) so it survives global-installed symlink bins
@@ -242,6 +243,11 @@ export interface LauncherDeps {
      *  THIS layer but flags the handle (#1322), any other failure warns and
      *  degrades to the single-owner watchdog behavior. */
     registerWatcher?: (origin: string, pid: number) => Promise<WatcherRegistration>;
+    /** #1623: diagnostic sink for attach-decision outcomes (probe drops,
+     *  compatibility skips, gate refusals) — these used to be silent, which
+     *  made "why did we spawn instead of attach" undiagnosable. Default tees
+     *  to bili.log + stderr. */
+    attachDiag?: (msg: string) => void;
     /** #1292: simulated OS for spawn planning and platform-gated arg
      *  construction — tests drive win32 paths from a POSIX host. Defaults
      *  to process.platform. */
@@ -2475,20 +2481,23 @@ function isStartingMarkerActive(marker: ProxyStartingMarker, nowMs: number): boo
  *  unpublished branch) must not be served by the stale instance. codeFingerprint
  *  is the attaching side's hash of the script it WOULD spawn; undefined means
  *  it cannot be verified, which is treated as incompatible (never attach). */
-function instanceCompatible(inst: ProxyInstanceFile, opts: LaunchOptions, codeFingerprint?: string): boolean {
-    if (inst.codeFingerprint === undefined || inst.codeFingerprint !== codeFingerprint) return false;
-    if (opts.lane !== undefined && inst.lane !== undefined && inst.lane !== opts.lane) return false;
-    if (inst.host !== opts.host || inst.passthrough !== opts.passthrough) return false;
+/** #1623: undefined = compatible; otherwise the FIRST failing check as a
+ *  stable reason code, so attach diagnostics can say WHICH field rejected a
+ *  live candidate instead of dropping it silently. */
+function instanceCompatible(inst: ProxyInstanceFile, opts: LaunchOptions, codeFingerprint?: string): string | undefined {
+    if (inst.codeFingerprint === undefined || inst.codeFingerprint !== codeFingerprint) return "code-fingerprint-mismatch";
+    if (opts.lane !== undefined && inst.lane !== undefined && inst.lane !== opts.lane) return "lane-mismatch";
+    if (inst.host !== opts.host || inst.passthrough !== opts.passthrough) return "host-or-passthrough-mismatch";
     const wantDomains = opts.mitmDomains ?? [];
-    if (inst.mitmDomains.length !== wantDomains.length || inst.mitmDomains.some((d, i) => d !== wantDomains[i])) return false;
+    if (inst.mitmDomains.length !== wantDomains.length || inst.mitmDomains.some((d, i) => d !== wantDomains[i])) return "mitm-domains-mismatch";
     const wantWindows = opts.modelWindows ?? {};
     const keys = Object.keys(wantWindows);
-    if (Object.keys(inst.modelWindows).length !== keys.length) return false;
-    if (!keys.every((k) => inst.modelWindows[k] === wantWindows[k])) return false;
+    if (Object.keys(inst.modelWindows).length !== keys.length) return "model-windows-mismatch";
+    if (!keys.every((k) => inst.modelWindows[k] === wantWindows[k])) return "model-windows-mismatch";
     const wantMax = opts.modelMaxOutputs ?? {};
     const maxKeys = Object.keys(wantMax);
-    if (Object.keys(inst.modelMaxOutputs ?? {}).length !== maxKeys.length) return false;
-    return maxKeys.every((k) => (inst.modelMaxOutputs ?? {})[k] === wantMax[k]);
+    if (Object.keys(inst.modelMaxOutputs ?? {}).length !== maxKeys.length) return "model-max-outputs-mismatch";
+    return maxKeys.every((k) => (inst.modelMaxOutputs ?? {})[k] === wantMax[k]) ? undefined : "model-max-outputs-mismatch";
 }
 
 /** #1232: every healthy live instance — not just the last writer of the
@@ -2500,6 +2509,7 @@ function instanceCompatible(inst: ProxyInstanceFile, opts: LaunchOptions, codeFi
 async function probeLiveInstances(
     readInstance: () => ProxyInstanceFile | { origin: string } | undefined,
     fetchHealthInfo: (origin: string) => Promise<HealthInfo | undefined>,
+    diag?: (msg: string) => void,
 ): Promise<Array<{ inst: ProxyInstanceFile; health: HealthInfo }>> {
     const seen = new Map<string, ProxyInstanceFile>();
     const inst = readInstance();
@@ -2507,10 +2517,10 @@ async function probeLiveInstances(
     for (const live of discoverLiveInstances()) seen.set(live.instanceId || live.origin, live);
     const checked = await Promise.all(
         [...seen.values()].map(async (c): Promise<{ inst: ProxyInstanceFile; health: HealthInfo } | undefined> => {
-            if (!isPidAlive(c.pid)) return undefined;
+            if (!isPidAlive(c.pid)) { diag?.(`native-attach: drop ${c.origin} (pid ${c.pid}): owner process gone`); return undefined; }
             const health = await fetchHealthInfo(c.origin);
-            if (!health || !health.ok) return undefined;
-            if (health.instanceId !== undefined && health.instanceId !== c.instanceId) return undefined;
+            if (!health || !health.ok) { diag?.(`native-attach: drop ${c.origin} (pid ${c.pid}): health probe failed`); return undefined; }
+            if (health.instanceId !== undefined && health.instanceId !== c.instanceId) { diag?.(`native-attach: drop ${c.origin} (pid ${c.pid}): instance id mismatch (${c.instanceId} vs ${health.instanceId})`); return undefined; }
             return { inst: c, health };
         }),
     );
@@ -2546,19 +2556,22 @@ function pickAttachable(
     codeFingerprint: string | undefined,
     attachExternal: boolean,
     refusedLog: Set<string>,
+    diag?: (msg: string) => void,
 ): ProxyInstanceFile | undefined {
     let best: ProxyInstanceFile | undefined;
     let bestClass = 2;
     let bestStartedAt = Number.NEGATIVE_INFINITY;
     for (const c of candidates) {
-        if (!instanceCompatible(c.inst, opts, codeFingerprint)) continue;
-        if (opts.strictPort && c.inst.port !== opts.port) continue;
+        const incompatible = instanceCompatible(c.inst, opts, codeFingerprint);
+        if (incompatible !== undefined) { diag?.(`native-attach: skip ${c.inst.origin} (pid ${c.inst.pid}): incompatible (${incompatible})`); continue; }
+        if (opts.strictPort && c.inst.port !== opts.port) { diag?.(`native-attach: skip ${c.inst.origin} (pid ${c.inst.pid}): port mismatch`); continue; }
         // #1335: lifecycle gate — an unarmed (or unverifiable) listener is
         // never an attach target by default; log the refusal once per origin.
         if (!attachGateAllows(c.health, attachExternal)) {
             if (!refusedLog.has(c.inst.origin)) {
                 refusedLog.add(c.inst.origin);
                 console.error(gateRefusalMessage(c.inst, c.health));
+                diag?.(gateRefusalMessage(c.inst, c.health));
             }
             continue;
         }
@@ -2587,10 +2600,11 @@ async function waitForStarterInstance(
     codeFingerprint: string | undefined,
     attachExternal: boolean,
     refusedLog: Set<string>,
+    diag?: (msg: string) => void,
 ): Promise<ProxyInstanceFile | undefined> {
     const deadline = now() + SPAWN_WAIT_MS;
     const probe = async (): Promise<ProxyInstanceFile | undefined> =>
-        pickAttachable(await probeLiveInstances(readInstance, fetchHealthInfo), opts, codeFingerprint, attachExternal, refusedLog);
+        pickAttachable(await probeLiveInstances(readInstance, fetchHealthInfo, diag), opts, codeFingerprint, attachExternal, refusedLog, diag);
     let inst: ProxyInstanceFile | undefined;
     while (now() < deadline) {
         await sleepImpl(HEALTH_POLL_INTERVAL_MS);
@@ -2600,6 +2614,21 @@ async function waitForStarterInstance(
         if (!still || !isStartingMarkerActive(still, now())) break;
     }
     return inst ?? (await probe());
+}
+
+/** #1623: the probe-only half of ensureProxyRunning's attach decision — a
+ *  live, compatible, gate-passing instance WITHOUT spawning, waiting for
+ *  starters, or registering a watcher. For zcode exit-handoff and watchdog
+ *  drift-repair, where bringing up a NEW proxy would be wrong. */
+export async function findLiveAttachableInstance(
+    opts: LaunchOptions,
+    deps: LauncherDeps = {},
+): Promise<ProxyInstanceFile | undefined> {
+    const fetchHealthInfo = deps.fetchHealthInfo ?? fetchHealthInfoDefault;
+    const readInstance = deps.readInstanceFile ?? readProxyInstanceFile;
+    const attachExternal = (deps.resolveAttachExternal ?? resolveNativeAttachExternal)();
+    const probed = await probeLiveInstances(readInstance, fetchHealthInfo, deps.attachDiag);
+    return pickAttachable(probed, opts, entryScriptFingerprint(deps.scriptPath ?? process.argv[1]), attachExternal, new Set(), deps.attachDiag);
 }
 
 export function findFreePort(preferred: number, host = LAUNCHER_DEFAULT_HOST): Promise<number> {
@@ -2770,6 +2799,7 @@ export async function ensureProxyRunning(
     // Refusal log dedup: pickAttachable runs again on every starter-poll tick,
     // so each refused origin is announced exactly once per bring-up.
     const refusedLog = new Set<string>();
+    const attachDiag = deps.attachDiag ?? ((msg: string) => teeLog("info", msg));
     // Same expression as the spawn path's BILI_PARENT_PID: one owner-pid
     // semantic for spawned AND attached proxies (#1190).
     const watchPid = opts.parentPid ?? process.pid;
@@ -2799,8 +2829,8 @@ export async function ensureProxyRunning(
     // candidates come from every live registry entry, not only the last
     // writer of the single proxy-origin file (that pointer can belong to
     // another client's per-lane proxy).
-    const probed = await probeLiveInstances(readInstance, fetchHealthInfo);
-    const existing = pickAttachable(probed, opts, codeFingerprint, attachExternal, refusedLog);
+    const probed = await probeLiveInstances(readInstance, fetchHealthInfo, attachDiag);
+    const existing = pickAttachable(probed, opts, codeFingerprint, attachExternal, refusedLog, attachDiag);
     if (existing) {
         // strictPort (#964) is enforced inside pickAttachable: the client
         // dials a STATIC url — attaching to a healthy proxy on a DIFFERENT
@@ -2812,7 +2842,7 @@ export async function ensureProxyRunning(
         // pinned port — self-managed fallback is impossible here (we cannot
         // bind that port either). Fail fast with an actionable error instead
         // of burning SPAWN_WAIT_MS into a confusing EADDRINUSE.
-        const squatter = probed.find((c) => c.inst.port === opts.port && instanceCompatible(c.inst, opts, codeFingerprint));
+        const squatter = probed.find((c) => c.inst.port === opts.port && instanceCompatible(c.inst, opts, codeFingerprint) === undefined);
         if (squatter) {
             throw new Error(
                 `bili: port ${opts.port} is held by a lifecycle-less bili proxy at ${squatter.inst.origin} (pid ${squatter.inst.pid}) — ` +
@@ -2829,7 +2859,7 @@ export async function ensureProxyRunning(
     // (singleFlight, #706); this is the cross-process half.
     const waitForOtherStarter = async (): Promise<ProxyHandle | undefined> => {
         console.error("bili: another bili launch is bringing up a proxy — waiting for it instead of spawning a second");
-        const waited = await waitForStarterInstance(readInstance, fetchHealthInfo, now, sleepImpl, opts, codeFingerprint, attachExternal, refusedLog);
+        const waited = await waitForStarterInstance(readInstance, fetchHealthInfo, now, sleepImpl, opts, codeFingerprint, attachExternal, refusedLog, attachDiag);
         if (waited) {
             return attachTo(waited);
         }

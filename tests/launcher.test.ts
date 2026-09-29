@@ -18,6 +18,7 @@ import {
 } from "../src/instance.ts";
 import {
     LAUNCHER_DEFAULT_HOST,
+    findLiveAttachableInstance,
     isLaunchClient,
     baseClientName,
     piTestArgs,
@@ -5573,4 +5574,68 @@ test("runLaunch goose: custom provider rides the regenerated GOOSE_PATH_ROOT ove
         }
         fs.rmSync(home, { recursive: true, force: true });
     }
+});
+
+// #1623: attach decisions must leave a trace. Every silent drop/skip branch
+// in probeLiveInstances/pickAttachable now emits a reason via attachDiag so
+// "why did we spawn instead of attaching?" is diagnosable from bili.log.
+
+test("findLiveAttachableInstance probes only — no spawn, no wait (#1623)", async () => {
+    let spawned = false;
+    const inst = await findLiveAttachableInstance(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            spawnImpl: () => { spawned = true; return makeFakeChild(42433); },
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", watchdog: { armed: true } }),
+            readInstanceFile: () => recordedInstance(),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(spawned, false);
+    assert.equal(inst?.origin, "http://127.0.0.1:8787");
+});
+
+test("attach diagnostics record an owner-process-gone drop (#1623)", async () => {
+    const diag: string[] = [];
+    const inst = await findLiveAttachableInstance(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", watchdog: { armed: true } }),
+            readInstanceFile: () => recordedInstance({ pid: 99999999 }),
+            attachDiag: (m) => diag.push(m),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(inst, undefined);
+    assert.ok(diag.some((m) => m.includes("owner process gone")), `diag was: ${JSON.stringify(diag)}`);
+});
+
+test("attach diagnostics record a fingerprint-mismatch skip (#1623)", async () => {
+    const diag: string[] = [];
+    const inst = await findLiveAttachableInstance(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", watchdog: { armed: true } }),
+            readInstanceFile: () => recordedInstance({ codeFingerprint: "deadbeef" }),
+            attachDiag: (m) => diag.push(m),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(inst, undefined);
+    assert.ok(diag.some((m) => m.includes("code-fingerprint-mismatch")), `diag was: ${JSON.stringify(diag)}`);
+});
+
+test("attach diagnostics record a lifecycle-gate refusal (#1623)", async () => {
+    const diag: string[] = [];
+    const inst = await findLiveAttachableInstance(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1" }),
+            readInstanceFile: () => recordedInstance(),
+            attachDiag: (m) => diag.push(m),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(inst, undefined);
+    assert.ok(diag.some((m) => m.includes("refusing to attach")), `diag was: ${JSON.stringify(diag)}`);
 });
