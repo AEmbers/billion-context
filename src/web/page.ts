@@ -91,8 +91,11 @@ export function renderPage(origin: string, version: string): string {
 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
 <input id="log-search" type="search" class="search" placeholder="${zh("logs.filter_ph")}" data-i18n-ph="logs.filter_ph">
 <select id="log-lines" style="border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;background:var(--bg-muted)"><option value="200">200</option><option value="500" selected>500</option><option value="1000">1000</option><option value="2000">2000</option></select>
+<label style="display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--text-muted);cursor:pointer"><input type="checkbox" id="log-ctx" checked style="accent-color:#4a9eff"><span data-i18n="logs.ctx">${zh("logs.ctx")}</span></label>
+<label style="display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--text-muted);cursor:pointer"><input type="checkbox" id="log-win" style="accent-color:#4a9eff"><span data-i18n="logs.win">${zh("logs.win")}</span></label>
 <span id="log-count" class="dim small"></span>
 <button id="log-dl" class="btn sm" data-i18n="logs.dl">${zh("logs.dl")}</button>
+<button id="log-dl-all" class="btn sm" data-i18n="logs.dl_all">${zh("logs.dl_all")}</button>
 </div>
 <dl class="kv"><div class="k" data-i18n="logs.path">${zh("logs.path")}</div><div class="v" style="display:flex;gap:8px;align-items:center"><span id="log-path" class="mono dim small"></span><button id="copy-log-path" class="btn sm copy-btn" data-copy="" data-i18n="common.copy">${zh("common.copy")}</button></div></dl>
 </div></div>
