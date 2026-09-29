@@ -86,6 +86,45 @@ test("restoreOutputBudget: high-water learning + starved-budget restore (#546)",
     assert.equal(responsesStarved.max_output_tokens, 32689, "responses field restored on the same field");
 });
 
+test("restoreOutputBudget: configured-output-limit floor for poisoned or missing high-water (#1665)", () => {
+    // Death spiral: the client decays through small positive values before
+    // starving completely — the water mark ends up holding a death rattle.
+    const s = metaSession("poison");
+    restoreOutputBudget({ max_tokens: 384000 }, s, noopLog);
+    restoreOutputBudget({ max_tokens: 680 }, s, noopLog);
+    restoreOutputBudget({ max_tokens: 234 }, s, noopLog);
+    assert.equal(s.metadata.outputBudgetHighWater, 234, "last non-starved value wins (decay tracked)");
+    const starved = { max_tokens: 1, tools: [{ name: "t" }] } as { max_tokens: number };
+    restoreOutputBudget(starved, s, noopLog, 384000);
+    assert.equal(starved.max_tokens, 384000, "death-rattle water mark floored by the configured output limit");
+    // A healthy water mark above the floor keeps winning (client intent beats declaration).
+    const s2 = metaSession("healthy");
+    restoreOutputBudget({ max_tokens: 500000 }, s2, noopLog);
+    const starved2 = { max_tokens: 1, tools: [{ name: "t" }] } as { max_tokens: number };
+    restoreOutputBudget(starved2, s2, noopLog, 384000);
+    assert.equal(starved2.max_tokens, 500000, "water mark above the floor untouched");
+    // Born-dead session: the first request bili ever sees is already starved.
+    const s3 = metaSession("borndead");
+    const bornDead = { max_tokens: 1, tools: [{ name: "t" }] } as { max_tokens: number };
+    restoreOutputBudget(bornDead, s3, noopLog, 32768);
+    assert.equal(bornDead.max_tokens, 32768, "missing water mark falls back to the configured limit");
+    // No configured limit → old behavior: nothing to restore to.
+    const s4 = metaSession("nofloor");
+    const noFloor = { max_tokens: 1, tools: [{ name: "t" }] } as { max_tokens: number };
+    restoreOutputBudget(noFloor, s4, noopLog);
+    assert.equal(noFloor.max_tokens, 1, "undefined configured limit leaves the request untouched");
+    // A limit at/below the side threshold is not a usable floor.
+    const s5 = metaSession("tinyfloor");
+    restoreOutputBudget({ max_tokens: 234 }, s5, noopLog);
+    const tinyFloor = { max_tokens: 1, tools: [{ name: "t" }] } as { max_tokens: number };
+    restoreOutputBudget(tinyFloor, s5, noopLog, 200);
+    assert.equal(tinyFloor.max_tokens, 234, "limit <= 200 cannot floor");
+    // Side requests (no tools) never receive the floor.
+    const side = { max_tokens: 100 } as { max_tokens: number };
+    restoreOutputBudget(side, s3, noopLog, 32768);
+    assert.equal(side.max_tokens, 100, "side request untouched even with a floor available");
+});
+
 const MODEL = "claude-sonnet-4-5";
 const SESSION = "side-iso-sess";
 const MAIN_INPUT_TOKENS = 50_000;
@@ -212,7 +251,7 @@ interface Rig {
 // sonnet-4-5 → 200k) unless the operator explicitly tunes
 // compress.modelContextLimit, which outranks everything (#344). The rig exposes
 // both so tests can pin the exact window the guard sees.
-async function startRig(opts?: { modelContextLimit?: number; compressModelContextLimit?: number; store?: SessionStore }): Promise<Rig> {
+async function startRig(opts?: { modelContextLimit?: number; compressModelContextLimit?: number; store?: SessionStore; routeModels?: Record<string, { context?: number; output?: number }> }): Promise<Rig> {
     const modelContextLimit = opts?.modelContextLimit ?? 200_000;
     const rig: Rig = { proxyPort: 0, upstreamPort: 0, proxy: null as unknown as http.Server, upstream: null as unknown as http.Server, sideScript: null, lastBody: null, upstreamHits: 0, sideErrorStatus: null, sideErrorBody: null };
     const upstream = http.createServer((req, res) => {
@@ -248,7 +287,7 @@ async function startRig(opts?: { modelContextLimit?: number; compressModelContex
         port: 0,
         host: "127.0.0.1",
         upstream: "http://127.0.0.1",
-        routes: { [`http://127.0.0.1:${upstreamPort}`]: {} },
+        routes: { [`http://127.0.0.1:${upstreamPort}`]: opts?.routeModels ? { models: opts.routeModels } : {} },
         modelContextLimit,
         kernelConfig: defaultConfig(modelContextLimit),
         compress: { injectTool: true, injectNudge: true, ...(opts?.compressModelContextLimit !== undefined ? { modelContextLimit: opts.compressModelContextLimit } : {}) },
@@ -394,6 +433,32 @@ test("e2e: starved tool-carrying main request re-enters pipeline at restored bud
         const s3 = getSession(SESSION);
         assert.equal(JSON.stringify(s3.state), stateBeforeSide, "side request left kernel state untouched");
         assert.equal(JSON.stringify(s3.stats), statsBeforeSide, "side request left stats untouched");
+    } finally {
+        await closeRig(rig);
+    }
+});
+
+test("e2e: starved main request with a poisoned high-water is floored by the configured output limit (#1665)", async () => {
+    const rig = await startRig({ routeModels: { [MODEL]: { output: 4096 } } });
+    try {
+        const url = `http://127.0.0.1:${rig.proxyPort}/bili/http://127.0.0.1:${rig.upstreamPort}/v1/messages`;
+        const headers: Record<string, string> = { "content-type": "application/json", "x-acp-session": SESSION };
+        const tools = [{ name: "compress", description: "compress", input_schema: { type: "object", properties: {} } }];
+
+        // First request bili sees for this session is already mid-death-spiral:
+        // the client's raw-history estimate decayed its budget to 234 (>200, so it
+        // seeds the water mark) — without the floor every later starved turn would
+        // restore 234 forever.
+        const r1 = await fetch(url, { method: "POST", headers, body: JSON.stringify({ model: MODEL, max_tokens: 234, stream: true, tools, messages: mainConversation(8) }) });
+        assert.equal(r1.status, 200);
+        await r1.text();
+        assert.equal(getSession(SESSION).metadata.outputBudgetHighWater, 234, "poisoned water mark seeded from the decaying client");
+
+        // Fully starved now: the configured output limit must floor the restore.
+        const r2 = await fetch(url, { method: "POST", headers, body: JSON.stringify({ model: MODEL, max_tokens: 1, stream: true, tools, messages: mainConversation(9) }) });
+        assert.equal(r2.status, 200);
+        await r2.text();
+        assert.equal(rig.lastBody && rig.lastBody.max_tokens, 4096, "configured output limit floors the poisoned restore (#1665)");
     } finally {
         await closeRig(rig);
     }
