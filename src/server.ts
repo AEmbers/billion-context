@@ -2327,8 +2327,9 @@ async function handle(
         storeEffectiveSearchPlanAware(session, resolvedSearchPlanAware);
         // #546: restore a client-shrunk output budget BEFORE the side gate so a
         // tool-carrying main request re-enters the pipeline at full budget (see
-        // restoreOutputBudget for the starvation mechanism).
-        restoreOutputBudget(parsed, session, log);
+        // restoreOutputBudget for the starvation mechanism). #1665: the
+        // operator-declared model output limit floors the restore target.
+        restoreOutputBudget(parsed, session, log, resolveConfiguredOutputLimit(opts.routes, route?.rewrittenUrl, (parsed as { model?: string }).model));
         // #896: the per-scope output-headroom cap (compress.outputHeadroomMaxPct,
         // three-level merge; default 0.25, aligned with billion-context-pi).
         // Resolved once here so the side-request guard below AND the main-path
@@ -2776,7 +2777,7 @@ const ACP_TAG_MARK = "\x3cacp ";
 // their anchors) for strict backends (#377).
 /** [#651] Strip oversized reasoning from closed compress turns (see
  *  src/reasoning-drop.ts) with an ops log line when anything was dropped. */
-function withReasoningDrop(
+export function withReasoningDrop(
     msgs: BiliMessage[],
     reasoning: CompressReasoningConfig | undefined,
     log: (level: string, msg: string) => void,
@@ -2786,6 +2787,16 @@ function withReasoningDrop(
     // [#684] strict-echo upstreams: reasoning must round-trip with tool_calls,
     // so #651's drop must not fire. Learned/static strictness both land here.
     if (strictEcho) return msgs;
+    // [#1658] Anthropic-wire twin of that gate, detected from the payload
+    // itself: a reasoning message carrying a signature is a SIGNED thinking
+    // block on the wire (the kernel stamps thinkingSignature from the wire
+    // signature; only the Anthropic codec does), and signed thinking must
+    // round-trip with its tool_use sibling or the upstream rejects the pair
+    // (#684 invariant). Dropping the pre-compress run would orphan it, so
+    // any signed thinking in view disables the drop for this request.
+    // Presence-based and per-request: Claude sessions without extended
+    // thinking keep #651's savings.
+    if (msgs.some((m) => m.contentType === "reasoning" && typeof m.thinkingSignature === "string" && m.thinkingSignature.length > 0)) return msgs;
     const out = dropCompressReasoning(msgs, reasoning);
     if (out.length !== msgs.length) {
         log("info", `[${sessionId}] compress-reasoning: dropped ${msgs.length - out.length} reasoning message(s) from closed compress turns (#651)`);
@@ -2825,10 +2836,12 @@ export function warnReasoningPairs(
  *  inbound assistant message WITH a thinking block now rides an outbound
  *  assistant message with none. Outbound-only asymmetry (some tool_use turns
  *  think, others don't) is ordinary Claude Code traffic: turns without
- *  extended thinking never carry a block, and #651's dropCompressReasoning
- *  creates the same shape by design — the old heuristic warned on every
- *  healthy multi-turn session. Turns match by stable tool_use id (the kernel
- *  codec round-trips it verbatim); benign asymmetry stays fully silent. */
+ *  extended thinking never carry a block. #651's dropCompressReasoning can no
+ *  longer create this shape either — since [#1658] the drop is gated out
+ *  whenever signed thinking is in view. Turns match by stable tool_use id
+ *  (the kernel codec round-trips it verbatim); benign asymmetry stays fully
+ *  silent. Any remaining fire means another path lost thinking (e.g. a fold
+ *  pruned the block while preserving the tool_use) — investigate. */
 export function warnAnthropicThinkingPairs(
     inboundMessages: unknown[],
     outboundMessages: unknown[],
@@ -4082,6 +4095,7 @@ async function prepareResponses(
             if (absorbActive) devParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
             const devContent = devParts.join("\n\n---\n\n");
             responsesDevContent = devContent;
+            if (forgedSummaries.length > 0) log("debug", `[${sessionId}] [inject] ${forgedSummaries.length} captured summary block(s) re-injected into developer message`);
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
             if (!process.env.ACP_NO_INJECT_TOOL && injectTools) {
                 const respExtra = [...(absorbActive ? [absorbTools.responses] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
@@ -4092,6 +4106,7 @@ async function prepareResponses(
         } else if (projection.systemParts.length > 0 || forgedSummaries.length > 0) {
             const devContent = [...projection.systemParts, ...forgedSummaries].join("\n\n---\n\n");
             responsesDevContent = devContent;
+            if (forgedSummaries.length > 0) log("debug", `[${sessionId}] [inject] ${forgedSummaries.length} captured summary block(s) re-injected into developer message`);
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
         }
         if (sysNotes.length > 0) {
@@ -4119,6 +4134,7 @@ async function prepareResponses(
                         : rebuiltInput;
                     inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) });
                     rebuiltInput = inputItems;
+                    log("debug", `[${sessionId}] [inject] ephemeral nudge appended as trailing user turn (${rendered.text.length} chars)`);
                 }
             } catch {
             }
@@ -4134,6 +4150,7 @@ async function prepareResponses(
                 : rebuiltInput;
             inputItems.push({ type: "message", role: "user", content: imgNote });
             rebuiltInput = inputItems;
+            log("debug", `[${sessionId}] [inject] image-full restore note appended as trailing user turn (${imgNote.length} chars)`);
         }
         transformOk = true;
     } catch (err) {
@@ -5185,7 +5202,10 @@ async function forward(
     if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainContentDetection !== false) {
         try {
             const stamped = stampOutbound(JSON.parse(wireBody), prepared.protocol, instanceId);
-            if (stamped !== null) wireBody = JSON.stringify(stamped);
+            if (stamped !== null) {
+                wireBody = JSON.stringify(stamped);
+                log("debug", `[${prepared.session.id}] [stamp] outbound ${prepared.protocol} request carries checkpoint carrier`);
+            }
         } catch (err) {
             log("debug", `[${prepared.session.id}] [chain] outbound stamping failed (${String(err)}); forwarding unstamped`);
         }
