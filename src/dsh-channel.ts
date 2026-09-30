@@ -253,7 +253,12 @@ function formatDshError(err: unknown, args: readonly string[]): Error {
     if (e.code === "ENOENT") {
         return new Error("dsh CLI not found (not on PATH, not in the known install locations probed) — install deepseek-harness, or set BILI_DSH_BIN to its executable path, then retry");
     }
-    const stderr = typeof e.stderr === "string" ? e.stderr.trim() : e.stderr instanceof Buffer ? e.stderr.toString("utf8").trim() : "";
+    const stderr =
+        typeof e.stderr === "string"
+            ? e.stderr.trim()
+            : e.stderr instanceof Buffer // #1732: raw bytes from encoding:"buffer" runners must go through decodeChildOutput, not a lossy utf8 stringify
+              ? decodeChildOutput(e.stderr).trim()
+              : "";
     const detail = stderr || (typeof e.message === "string" && e.message.length > 0 ? e.message : `exit ${e.status ?? "?"}`);
     return new Error(`dsh ${args.join(" ")} failed: ${detail}`);
 }
@@ -264,12 +269,30 @@ function formatDshError(err: unknown, args: readonly string[]): Error {
  *  accepting a lossy UTF-8 interpretation (the old `encoding: "utf8"` mode
  *  turned the classic "'dsh' 不是内部或外部命令" failure into mojibake in the
  *  log file). Pure ASCII and valid UTF-8 output decodes identically either way. */
+// #1732: GBK bytes whose lead is 0xC2–0xDF with trail 0x80–0xBF are ALSO
+// valid UTF-8, decoding "successfully" into Greek/Coptic/Cyrillic — strict
+// UTF-8 alone cannot tell them apart (GBK 系统 → "ϵς"). cmd.exe/pnpm output
+// never uses those scripts on purpose, so a run of them plus a GBK re-read
+// that yields CJK means we misread GBK as UTF-8. (Real Greek text whose GBK
+// re-read happens to produce CJK would flip this — vanishingly rare here.)
+const UTF8_GBK_TRAP = /[\u0370-\u052F]{2}/;
+const HAS_CJK = /[\u3400-\u9FFF\uF900-\uFAFF]/;
+
 export function decodeChildOutput(buf: Buffer | string | null | undefined): string {
     if (buf == null) return "";
     const raw = typeof buf === "string" ? Buffer.from(buf, "utf8") : buf;
     if (raw.length === 0) return "";
     try {
-        return new TextDecoder("utf-8", { fatal: true }).decode(raw);
+        const utf8 = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+        if (UTF8_GBK_TRAP.test(utf8)) {
+            try {
+                const gbk = new TextDecoder("gbk").decode(raw);
+                if (HAS_CJK.test(gbk)) return gbk;
+            } catch {
+                /* not GBK either — keep the UTF-8 reading */
+            }
+        }
+        return utf8;
     } catch {
         try {
             return new TextDecoder("gbk").decode(raw);
@@ -302,11 +325,16 @@ function defaultSyncRun(plan: DshPlan): { stdout: string; stderr: string } {
 const pExecFile = promisify(execFile);
 
 async function defaultAsyncRun(plan: DshPlan): Promise<{ stdout: string; stderr: string }> {
-    const { stdout, stderr } = await pExecFile(plan.command, plan.args, {
+    // encoding:"buffer" (#1732): execFile's default utf8 mode lossily
+    // stringifies GBK bytes BEFORE decodeChildOutput ever sees them — the
+    // "ϵς" mojibake observed on the async/auto-update refresh path. Capture
+    // raw buffers (thrown errors carry Buffer stderr too) and decode centrally.
+    const { stdout, stderr } = (await pExecFile(plan.command, plan.args, {
         timeout: DSH_EXEC_TIMEOUT_MS,
+        encoding: "buffer",
         windowsVerbatimArguments: plan.windowsVerbatimArguments,
         windowsHide: true,
-    });
+    })) as { stdout: Buffer | string; stderr: Buffer | string };
     return { stdout: decodeChildOutput(stdout), stderr: decodeChildOutput(stderr) };
 }
 

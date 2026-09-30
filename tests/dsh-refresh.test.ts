@@ -135,6 +135,20 @@ test("decodeChildOutput: GBK bytes from Chinese Windows cmd.exe decode instead o
     assert.equal(typeof decodeChildOutput(Buffer.from([0xff, 0xfe, 0x41])), "string");
 });
 
+test("decodeChildOutput: pure-trap GBK that is also valid UTF-8 still decodes as GBK", () => {
+    // GBK 系统 (cfb5cdb3) is simultaneously valid UTF-8 ("ϵς", Greek) — the
+    // strict-utf8 gate would pass and hand back mojibake. The content
+    // heuristic (Greek/Cyrillic run + GBK re-read with CJK) must catch it.
+    assert.equal(decodeChildOutput(Buffer.from("cfb5cdb3", "hex")), "系统");
+    // real cmd.exe sentence mostly made of trap pairs decodes as a whole too
+    const sentence = Buffer.from("cfb5cdb3d5d2b2bbb5bdd6b8b6a8b5c4c2b7beb6a1a3", "hex"); // 系统找不到指定的路径。
+    assert.equal(decodeChildOutput(sentence), "系统找不到指定的路径。");
+    // genuine UTF-8 CJK output is never re-read as GBK
+    assert.equal(decodeChildOutput(Buffer.from("中文正常输出", "utf8")), "中文正常输出");
+    // string input (pre-decoded by callers) round-trips
+    assert.equal(decodeChildOutput("已解好的字符串"), "已解好的字符串");
+});
+
 // — registry vs local dep specs ---------------------------------------
 
 test("isRegistryDepSpec: registry forms yes, local pins no", () => {
