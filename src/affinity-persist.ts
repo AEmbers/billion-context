@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { prefixAffinity } from "./prefix-affinity.js";
+import { prefixAffinity, type AffinitySnapshotEntry, MAX_TRACKED_SESSIONS, TTL_MS } from "./prefix-affinity.js";
 import { stateDir } from "./paths.js";
 import { log } from "./logger.js";
 
@@ -22,16 +22,86 @@ function affinityFile(): string {
 let timer: NodeJS.Timeout | null = null;
 let writing = false;
 
+/** Entries another process left on disk since we hydrated; null on read failure
+ *  (the caller then writes its own snapshot unchanged). */
+function readDiskEntries(): AffinitySnapshotEntry[] | null {
+    try {
+        const file = affinityFile();
+        if (!fs.existsSync(file)) return [];
+        const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+        if (!Array.isArray(parsed.entries)) return [];
+        return parsed.entries.filter(
+            (e): e is AffinitySnapshotEntry =>
+                !!e && typeof e === "object" &&
+                typeof (e as AffinitySnapshotEntry).sessionId === "string" &&
+                typeof (e as AffinitySnapshotEntry).depth === "number" &&
+                typeof (e as AffinitySnapshotEntry).tailHash === "string" &&
+                Array.isArray((e as AffinitySnapshotEntry).itemHashes) &&
+                ((e as AffinitySnapshotEntry).itemHashes as unknown[]).every((h) => typeof h === "string") &&
+                typeof (e as AffinitySnapshotEntry).lastSeen === "number",
+        );
+    } catch {
+        return null;
+    }
+}
+
+/** #1724: union of ours + disk keyed by sessionId, deeper/fresher chain wins per
+ *  id — a restart or sibling lane can no longer clobber another process's chains
+ *  via whole-file last-writer-wins (generalizes #405's "keep fresher" to a store
+ *  with no global counter). Counts same-depth forks; the caller reports how
+ *  many disk-only chains survived the final write. */
+function mergeWithDisk(
+    mine: AffinitySnapshotEntry[],
+    disk: AffinitySnapshotEntry[],
+): { entries: AffinitySnapshotEntry[]; forks: number } {
+    const byId = new Map<string, AffinitySnapshotEntry>();
+    for (const e of disk) byId.set(e.sessionId, e);
+    let forks = 0;
+    for (const m of mine) {
+        const d = byId.get(m.sessionId);
+        if (!d) {
+            byId.set(m.sessionId, m);
+            continue;
+        }
+        if (m.depth === d.depth && m.tailHash !== d.tailHash) forks++;
+        byId.set(m.sessionId, m.depth > d.depth || (m.depth === d.depth && m.lastSeen >= d.lastSeen) ? m : d);
+    }
+    return { entries: [...byId.values()], forks };
+}
+
+/** The union is monotonic (nothing removes disk-only chains), so without
+ *  re-applying the store's own bounds the file would grow one entry per
+ *  chain that churns through the LRU cap over a process's lifetime. Mirror
+ *  importSnapshot's read-time hygiene on the write path: drop TTL-expired
+ *  chains and keep at most MAX_TRACKED_SESSIONS, most-recently-seen first. */
+function normalizeForWrite(entries: AffinitySnapshotEntry[]): AffinitySnapshotEntry[] {
+    const now = Date.now();
+    const live = entries.filter((e) => now - e.lastSeen <= TTL_MS);
+    if (live.length <= MAX_TRACKED_SESSIONS) return live;
+    return [...live].sort((a, b) => b.lastSeen - a.lastSeen).slice(0, MAX_TRACKED_SESSIONS);
+}
+
 function writeSnapshot(): void {
     if (writing) return;
     writing = true;
     try {
         const file = affinityFile();
-        const snapshot = { version: 1, entries: prefixAffinity.exportSnapshot() };
+        const mine = prefixAffinity.exportSnapshot();
+        const disk = readDiskEntries();
+        const merged = disk === null ? { entries: mine, forks: 0 } : mergeWithDisk(mine, disk);
+        const entries = normalizeForWrite(merged.entries);
+        const snapshot = { version: 1, entries };
         const tmp = `${file}.tmp`;
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(tmp, JSON.stringify(snapshot));
         fs.renameSync(tmp, file);
+        if (disk !== null) {
+            const mineIds = new Set(mine.map((e) => e.sessionId));
+            const preserved = entries.filter((e) => !mineIds.has(e.sessionId)).length;
+            if (preserved > 0 || merged.forks > 0) {
+                log("info", `[prefix-affinity] write merged ${entries.length} chain(s): kept ${preserved} disk-only, resolved ${merged.forks} same-depth fork(s) across instances (#1724)`);
+            }
+        }
     } catch (e) {
         log("warn", `[prefix-affinity] persist failed (${e instanceof Error ? e.message : String(e)}); affinity survives in memory`);
     } finally {

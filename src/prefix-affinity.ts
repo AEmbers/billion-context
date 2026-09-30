@@ -50,11 +50,14 @@ import { createHash } from "node:crypto";
 const MIN_CANONICAL_BYTES = 24;
 
 /** Upper bound on tracked chains (LRU-evicted, global — content is the
- *  only key, so there are no per-credential buckets). */
-const MAX_TRACKED_SESSIONS = 256;
+ *  only key, so there are no per-credential buckets). Exported so the
+ *  persistence layer (#499 P1a / #1724) can enforce the same bound on the
+ *  on-disk snapshot it writes back. */
+export const MAX_TRACKED_SESSIONS = 256;
 
-/** Chains unused for this long stop matching (sessions may outlive tracking). */
-const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Chains unused for this long stop matching (sessions may outlive tracking).
+ *  Exported so the persistence layer applies the same expiry when writing. */
+export const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Leading-run length used to attribute a NEW anonymous session's birth to a
  *  truncated replay of a tracked chain (#1115: lineage attribution ONLY —
