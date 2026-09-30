@@ -40,7 +40,7 @@ const PUBLIC_HOST_SUFFIXES = [
     "minimax.io",
 ];
 
-const CREDENTIAL_HEADER_RE = /key|auth|token|cookie/i;
+export const CREDENTIAL_HEADER_RE = /key|auth|token|cookie/i;
 
 // #897: host masking is ON by default (#255 — logs get pasted into public
 // issues). Operators who want the real target hosts in their local log can
@@ -129,4 +129,23 @@ export function maskHostInText(text: string, host: string): string {
         if (form.length > 0) text = text.split(form).join(PRIVATE_HOST);
     }
     return text;
+}
+
+/**
+ * Sink-level safety net (#1718): scrub credential-shaped tokens out of
+ * arbitrary log text. Per-call-site structural masking (maskHeaderForLog,
+ * maskUrlForLog) covers known shapes, but free-form text — upstream/gateway
+ * error bodies that echo the rejected API key, exception messages — can carry
+ * secrets in any shape. Applied once at the logger choke point so every
+ * current and future call site is covered. Patterns are deliberately
+ * conservative: high-signal credential shapes only, no hits on prose or
+ * usage-count labels ("prompt_tokens=", plural "tokens:" never match).
+ */
+export function redactSecretsInText(text: string): string {
+    if (!text) return text;
+    return text
+        .replace(/\b(bearer|basic)\s+([A-Za-z0-9._~+\/=-]{8,})/gi, (_m, scheme: string, tok: string) => `${scheme} <masked ${tok.length} chars>`)
+        .replace(/(?<![A-Za-z0-9])(?:sk|xai)-[A-Za-z0-9_-]{8,}/g, "<masked key>")
+        .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, "<masked jwt>")
+        .replace(/(\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|secret|passwd|password|token)\b\s*[:=]\s*)(["']?)([A-Za-z0-9._~+\/=-]{8,})\2/gi, (_m, pre: string, q: string, val: string) => `${pre}${q}<masked ${val.length} chars>${q}`);
 }

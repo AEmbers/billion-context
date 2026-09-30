@@ -11,7 +11,7 @@ import { startServer } from "../src/server.ts";
 import type { ProxyOptions } from "../src/config.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
-import { setLogCapture } from "../src/logger.ts";
+import { closeLogger, configureLogger, log as loggerLog, setLogCapture } from "../src/logger.ts";
 import { formatUpstreamError } from "../src/upstream-proxy.ts";
 import {
     isMaskHostsEnabled,
@@ -23,6 +23,7 @@ import {
     maskHostPortForLog,
     maskUrlForLog,
     maskUrlsInText,
+    redactSecretsInText,
     setMaskHostsEnabled,
 } from "../src/log-mask.ts";
 import { assertPortDead } from "./port-race.ts";
@@ -444,5 +445,58 @@ test("ws upgrade rejection: host header scrubbed from log (#255)", async () => {
         else process.env.XDG_STATE_HOME = prev.xdgState;
         await close(proxy!);
         rmrf(tmpRoot);
+    }
+});
+
+test("redactSecretsInText: scrubs credential-shaped tokens from free-form text (#1718)", () => {
+    assert.equal(
+        redactSecretsInText("Authorization: Bearer sk-ant-api03-abc123xyz"),
+        "Authorization: Bearer <masked 22 chars>",
+    );
+    assert.equal(
+        redactSecretsInText("proxy auth failed: Basic dXNlcm5hbWU6cGFzc3dvcmQ="),
+        "proxy auth failed: Basic <masked 24 chars>",
+    );
+    assert.equal(redactSecretsInText("invalid api key sk-proj-AbCdEfGhIjKlMn12"), "invalid api key <masked key>");
+    assert.equal(redactSecretsInText("xai-abcdefghijklmnop rejected"), "<masked key> rejected");
+    assert.equal(
+        redactSecretsInText('{"error":{"message":"bad credentials","api_key":"sk-secret-value-12"}}'),
+        '{"error":{"message":"bad credentials","api_key":"<masked key>"}}',
+    );
+    assert.equal(redactSecretsInText("GET /v1?api_key=abcd1234efgh5678"), "GET /v1?api_key=<masked 16 chars>");
+    assert.equal(
+        redactSecretsInText("token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dozjgNryP4J3jVmNHl0w5N"),
+        "token: <masked jwt>",
+    );
+    const negatives = [
+        "task-abcdefghi",
+        "prompt_tokens=1234 completion_tokens=5678",
+        "the token was expired yesterday",
+        "tokens: 1234",
+        "token=abc",
+        "x-request-id=req-abcdefghij",
+        "",
+    ];
+    for (const s of negatives) assert.equal(redactSecretsInText(s), s, `must stay verbatim: ${s}`);
+});
+
+test("logger sink: file lines scrubbed, capture hook stays raw (#1718)", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bili-log-sink-"));
+    const file = path.join(tmpRoot, "sink.log");
+    const captured: string[] = [];
+    setLogCapture((_level, msg) => captured.push(msg));
+    try {
+        configureLogger(file);
+        const secret = "sk-test-leak-1234567890";
+        loggerLog("warn", `upstream 401 body: {"error":{"code":"invalid_api_key","api_key":"${secret}"}}`);
+        await closeLogger();
+        const onDisk = fs.readFileSync(file, "utf8");
+        assert.ok(!onDisk.includes(secret), `secret leaked into log file:\n${onDisk}`);
+        assert.ok(onDisk.includes("<masked"), onDisk);
+        assert.ok(captured[0]?.includes(secret), "capture hook must receive the raw message (in-process seam)");
+    } finally {
+        configureLogger(undefined);
+        setLogCapture(null);
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
 });
