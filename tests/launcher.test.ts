@@ -78,6 +78,7 @@ import {
     ensureProxyRunning,
     resolveNodeRuntime,
     stopProxy,
+    stopProxyGuarded,
     resolveLauncherWindow,
     resolveCodexBudgetArgs,
     resolveClaudeBudgetEnv,
@@ -920,6 +921,110 @@ test("ompPluginLoadedFrom: only entries whose file exists count as loaded", () =
     } finally {
         rmrf(home);
     }
+});
+
+
+// #1753 (shutdown side): the wrapper's exit must not kill a shared instance.
+test("stopProxyGuarded: spares a spawned instance that other watchers still share (#1753)", async () => {
+    let killed = false;
+    const child = makeFakeChild(42470);
+    child.kill = () => { killed = true; return true; };
+    let healthCalls = 0;
+    await stopProxyGuarded({ origin: "http://127.0.0.1:18787", port: 18787, child }, async () => {
+        healthCalls++;
+        return { ok: true, watchdog: { armed: true, watchers: [process.pid, 42500] } };
+    });
+    assert.equal(healthCalls, 1, "guard consults /__bili/health exactly once");
+    assert.equal(killed, false, "instance with other live watchers must be spared");
+});
+
+test("stopProxyGuarded: kills when the wrapper is the last watcher (#1753)", async () => {
+    let killed = false;
+    const child = makeFakeChild(42471);
+    child.kill = () => { killed = true; return true; };
+    await stopProxyGuarded({ origin: "http://127.0.0.1:18787", port: 18787, child }, async () => ({
+        ok: true,
+        watchdog: { armed: true, watchers: [process.pid] },
+    }));
+    assert.equal(killed, true, "solo owner still owns the shutdown");
+});
+
+test("stopProxyGuarded: health parse failure degrades to the old kill behavior (#1753)", async () => {
+    let killed = false;
+    const child = makeFakeChild(42472);
+    child.kill = () => { killed = true; return true; };
+    await stopProxyGuarded({ origin: "http://127.0.0.1:18787", port: 18787, child }, async () => undefined);
+    assert.equal(killed, true, "unverifiable lifecycle → take it down, nothing else claims it");
+});
+
+test("stopProxyGuarded: unarmed watchdog without watchers still kills (#1753)", async () => {
+    let killed = false;
+    const child = makeFakeChild(42473);
+    child.kill = () => { killed = true; return true; };
+    await stopProxyGuarded({ origin: "http://127.0.0.1:18787", port: 18787, child }, async () => ({
+        ok: true,
+        watchdog: { armed: true },
+    }));
+    assert.equal(killed, true, "absent watchers list → nobody else to spare it for");
+});
+
+test("stopProxyGuarded: attached handles never consult or kill (#1753)", async () => {
+    let killed = false;
+    let healthCalls = 0;
+    const child = makeFakeChild(42474);
+    child.kill = () => { killed = true; return true; };
+    await stopProxyGuarded({ origin: "http://127.0.0.1:18787", port: 18787, attached: true, child }, async () => {
+        healthCalls++;
+        return { ok: true, watchdog: { armed: true, watchers: [process.pid, 42500] } };
+    });
+    assert.equal(healthCalls, 0);
+    assert.equal(killed, false);
+});
+
+test("runLaunch: client exit spares the shared proxy when other watchers remain (#1753)", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-spare-"));
+    const fakeBin = path.join(home, process.platform === "win32" ? "fake-pi.exe" : "fake-pi");
+    fs.writeFileSync(fakeBin, "");
+    let proxyKilled = false;
+    const spawnImpl: SpawnFn = (cmd, _args, options) => {
+        if (cmd === fakeBin) {
+            const child = makeFakeChild(0);
+            const orig = child.on.bind(child);
+            (child as { on: SpawnChild["on"] }).on = (event, listener) => {
+                orig(event, listener);
+                if (event === "exit") setTimeout(() => listener(0, null), 0);
+                return child;
+            };
+            return child;
+        }
+        const child = makeFakeChild(42480);
+        child.kill = () => { proxyKilled = true; return true; };
+        return child;
+    };
+    const prevHome = process.env.HOME;
+    const prevBin = process.env.BILI_CLIENT_BIN;
+    const prevExit = process.exit;
+    process.env.HOME = home;
+    process.env.BILI_CLIENT_BIN = fakeBin;
+    process.exit = (() => undefined) as typeof process.exit;
+    try {
+        await runLaunch(
+            { client: "pi", clientArgs: [], overrides: {} },
+            {
+                fetchImpl: async () => ({ ok: true }),
+                fetchHealthInfo: async () => ({ ok: true, pid: 42480, watchdog: { armed: true, watchers: [process.pid, 42500] } }),
+                spawnImpl,
+                sleep: () => Promise.resolve(),
+            },
+        );
+    } finally {
+        process.exit = prevExit;
+        process.env.HOME = prevHome;
+        if (prevBin === undefined) delete process.env.BILI_CLIENT_BIN;
+        else process.env.BILI_CLIENT_BIN = prevBin;
+        rmrf(home);
+    }
+    assert.equal(proxyKilled, false, "runLaunch exit must spare the instance other sessions are watching");
 });
 
 // #1753: spawn-wait fallback stubs identify as the most recently faked child.
