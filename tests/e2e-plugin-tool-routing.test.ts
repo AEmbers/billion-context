@@ -245,12 +245,23 @@ function mcpCall(baseUrl: string, conversationId: string, method: string, params
         child.on("error", reject);
         const send = (obj: unknown) => child.stdin.write(`${JSON.stringify(obj)}\n`);
         // MCP handshake first (initialize → initialized), then the real call —
-        // the exact order a codex host drives the shim in.
+        // the exact order a codex host drives the shim in. stdin stays OPEN:
+        // the shim exits on stdin end (src/mcp.ts `"end" → process.exit(0)`),
+        // so ending it early would kill an in-flight reply — the exact flake
+        // the first push hit on every CI lane. We wait for the reply, then kill.
         send({ jsonrpc: "2.0", id: id - 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } } });
         send({ jsonrpc: "2.0", method: "notifications/initialized" });
         send({ jsonrpc: "2.0", id, method, params });
-        // give the shim a moment, then close stdin so it exits after replying
-        setTimeout(() => child.stdin.end(), 300);
+        const waitForReply = (): void => {
+            const hit = stdout.find((l) => { try { return JSON.parse(l)?.id === id; } catch { return false; } });
+            if (hit !== undefined) {
+                clearTimeout(timer);
+                child.kill();
+                return;
+            }
+            setTimeout(waitForReply, 50);
+        };
+        waitForReply();
         child.on("close", () => {
             clearTimeout(timer);
             resolve({ stdout, stderr });
