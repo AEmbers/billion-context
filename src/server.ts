@@ -481,6 +481,14 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     const backstopRaw = Number(process.env.BILI_CLIENT_ERROR_BACKSTOP_MS);
     const clientErrorBackstopMs = Number.isInteger(backstopRaw) && backstopRaw >= 0 ? backstopRaw : 30_000;
     log("info", `[conn] keepAliveTimeout=${keepAliveTimeoutMs}ms clientErrorBackstop=${clientErrorBackstopMs}ms`);
+    // #1714: BILI_STREAM_STALL_MS is retired (#1706 incident: a stale 400ms
+    // export turned every thinking-phase silence into a false truncation).
+    // The value is now ignored; name it once at startup so stale shell exports
+    // announce themselves instead of silently dying.
+    const retiredStallEnv = process.env.BILI_STREAM_STALL_MS;
+    if (retiredStallEnv !== undefined && retiredStallEnv.trim() !== "") {
+        log("warn", `[config] BILI_STREAM_STALL_MS=${retiredStallEnv} is no longer read (#1714) — ignored; upstream silence is bounded by the ${Math.round(upstreamTimeoutMs() / 60000)}-minute idle budget (BILI_UPSTREAM_TIMEOUT_MS)`);
+    }
     // #1452: per-connection lifecycle ledger — turns "which side closed this
     // socket, and why" from forensic inference into one debug line per
     // connection (zero payload content). reason=destroyed means nobody ended
