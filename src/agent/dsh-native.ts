@@ -32,7 +32,8 @@
 // left to the kernel's natural ingest diff (#395 gap, acceptable: manual
 // /compact is rare and auto mode is off).
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { defaultLogFile } from "../paths.js";
 import { VERSION } from "../version.js";
@@ -136,6 +137,46 @@ let webProfileWarned = false;
 type ModelInfoCache = { provider: string; model: string; contextWindow?: number; maxOutput?: number };
 const modelInfo: { cached?: ModelInfoCache; services?: { llm?: PluginContext["llm"]; agentDefaultModel?: PluginContext["agentDefaultModel"] }; refreshing: boolean } = { refreshing: false };
 
+/** Fallback window lookup (#window-fallback): when the host's
+ *  llm.resolveModelInfo returns no context.contextWindow (custom pi-ai
+ *  providers whose catalog entry lost the field on the way through), read the
+ *  window directly from the host profile's cordis.patch.yml — the same file
+ *  the GUI "模型" page writes. Scans every profile dir for a models[] entry
+ *  whose id matches the model and returns its contextWindow. Best-effort:
+ *  any read/parse failure just yields undefined. */
+function contextWindowFromHostProfile(model: string): number | undefined {
+    try {
+        const profilesDir = path.join(os.homedir(), ".dsh", "profiles");
+        if (!existsSync(profilesDir)) return undefined;
+        for (const entry of readdirSync(profilesDir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const file = path.join(profilesDir, entry.name, "cordis.patch.yml");
+            if (!existsSync(file)) continue;
+            const text = readFileSync(file, "utf8");
+            // Match a models[] entry block: "- id: <model>" followed (within a
+            // few lines, before the next "- id:") by "contextWindow: <n>".
+            const lines = text.split(/\r?\n/);
+            let inEntry = false;
+            for (const line of lines) {
+                if (/^\s*-\s+id:/.test(line)) {
+                    inEntry = line.includes(model);
+                    continue;
+                }
+                if (inEntry && /^\s*-\s/.test(line)) inEntry = false;
+                if (!inEntry) continue;
+                const m = /^\s+contextWindow:\s*([0-9]+)/.exec(line);
+                if (m) {
+                    const n = Number(m[1]);
+                    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+                }
+            }
+        }
+    } catch {
+        // best-effort only
+    }
+    return undefined;
+}
+
 function selectionStillCurrent(svc: { agentDefaultModel?: PluginContext["agentDefaultModel"] }, provider: string, model: string): boolean {
     try {
         const live = svc.agentDefaultModel?.currentSelection?.();
@@ -160,7 +201,9 @@ function refreshModelInfo(origin: string | undefined): void {
     if (modelInfo.cached?.provider === provider && modelInfo.cached?.model === model) return;
     const resolve = svc.llm?.resolveModelInfo;
     if (resolve === undefined) {
-        modelInfo.cached = { provider, model };
+        // #window-fallback: no host llm service — still recover the window
+        // from the host profile file so the proxy is not left guessing.
+        modelInfo.cached = { provider, model, contextWindow: contextWindowFromHostProfile(model) };
         return;
     }
     modelInfo.refreshing = true;
@@ -172,10 +215,15 @@ function refreshModelInfo(origin: string | undefined): void {
             // cache (and report) the OLD model's numbers — the next
             // headersFor refresh re-resolves the new one (review on #956).
             if (!selectionStillCurrent(svc, provider, model)) return;
+            let contextWindow = typeof info?.context?.contextWindow === "number" && info.context.contextWindow > 0 ? Math.floor(info.context.contextWindow) : undefined;
+            // #window-fallback: custom providers may lose contextWindow on the
+            // way through the host's model catalog — recover it from the host
+            // profile's cordis.patch.yml (the GUI model editor's file).
+            if (contextWindow === undefined) contextWindow = contextWindowFromHostProfile(model);
             modelInfo.cached = {
                 provider,
                 model,
-                contextWindow: typeof info?.context?.contextWindow === "number" && info.context.contextWindow > 0 ? Math.floor(info.context.contextWindow) : undefined,
+                contextWindow,
                 maxOutput: typeof info?.defaultMaxTokens === "number" && info.defaultMaxTokens > 0 ? Math.floor(info.defaultMaxTokens) : undefined,
             };
         })
@@ -183,7 +231,7 @@ function refreshModelInfo(origin: string | undefined): void {
             if (!selectionStillCurrent(svc, provider, model)) return;
             // Resolution failed (transient catalog read, model offline): keep
             // the model id (usable for registry lookup) without window claims.
-            modelInfo.cached = { provider, model };
+            modelInfo.cached = { provider, model, contextWindow: contextWindowFromHostProfile(model) };
         })
         .finally(() => {
             modelInfo.refreshing = false;
