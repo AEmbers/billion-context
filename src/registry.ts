@@ -4,6 +4,7 @@ import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { cacheDir } from "./paths.js";
 import { log as loggerLog } from "./logger.js";
+import { modelRoots } from "./model-id.js";
 import { proxyDispatcher } from "./upstream-proxy.js";
 import { fetchWithTimeout } from "./fetch-util.js";
 import bundledSnapshot from "./registry-snapshot.json" with { type: "json" };
@@ -352,9 +353,7 @@ export function peekRegistryPriceProfile(model: string | undefined, host?: strin
     const costs = costCache;
     if (!costs || !model) return undefined;
     const provider = host ? providerFromHost(host) : undefined;
-    const roots = [model];
-    const slash = model.lastIndexOf("/");
-    if (slash > 0 && slash < model.length - 1) roots.push(model.slice(slash + 1));
+    const roots = modelRoots(model);
     const names: string[] = [];
     for (const root of roots) {
         for (const variant of modelVariants(root)) {
@@ -474,9 +473,7 @@ function registryLookup(reg: RegistryShape | null, model: string, host?: string,
     // the registry data was present and fresh yet unreachable, so the stale
     // built-in table won forever (#736). Try the bare basename after the full
     // name so a genuinely listed prefixed id still keeps precedence.
-    const roots = [model];
-    const slash = model.lastIndexOf("/");
-    if (slash > 0 && slash < model.length - 1) roots.push(model.slice(slash + 1));
+    const roots = modelRoots(model);
     const names: string[] = [];
     for (const root of roots) {
         for (const variant of modelVariants(root)) {

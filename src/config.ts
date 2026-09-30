@@ -3,6 +3,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { configFile } from "./paths.js";
 import { log as loggerLog } from "./logger.js";
+import { modelRoots } from "./model-id.js";
 import { validateHttpProxy, type ProxyFallbackOptions } from "./upstream-proxy.js";
 import { maskUrlForLog } from "./log-mask.js";
 import { resolveOutputHeadroomCap } from "./util.js";
@@ -435,16 +436,6 @@ const CONTEXT_LIMIT_TABLE: Array<{ match: RegExp; limit: number }> = [
     { match: /^kimi/i, limit: 200_000 },
     { match: /^llama-/i, limit: 200_000 },
 ];
-
-// Relay/vLLM deployments serve models under "prefix/name" ids that miss
-// every ^-anchored pattern ("meta-llama/Llama-4" vs /^llama-/i). Try the bare
-// basename too; the full name keeps precedence (#736).
-function modelRoots(model: string): string[] {
-    const roots = [model];
-    const slash = model.lastIndexOf("/");
-    if (slash > 0 && slash < model.length - 1) roots.push(model.slice(slash + 1));
-    return roots;
-}
 
 export function lookupContextLimit(model: string | undefined): number | undefined {
     if (!model) return undefined;
