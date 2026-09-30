@@ -49,9 +49,12 @@ function textMsg(id: string, role: "user" | "assistant", text: string): CoreMess
 }
 
 function seedDispatch(idCall: string, idResult: string, sessionId: string): CoreMessage[] {
+    // real opencode wire shape (sst/opencode tool/task.ts renderOutput): the
+    // call args never carry the id; the result text opens with the machine
+    // envelope `<task id="ses_..." state="completed">`.
     return [
-        { id: idCall, role: "assistant", contentType: "tool-call", toolName: "task", text: JSON.stringify({ description: "research", prompt: "go look", sessionId }) },
-        { id: idResult, role: "tool", contentType: "tool-result", toolName: "task", text: "The sub-agent finished its research and reported findings." },
+        { id: idCall, role: "assistant", contentType: "tool-call", toolName: "task", text: JSON.stringify({ description: "research", prompt: "go look" }) },
+        { id: idResult, role: "tool", contentType: "tool-result", toolName: "task", text: `<task id="${sessionId}" state="completed">\n<summary>research done</summary>\n<task_result>\nThe sub-agent finished its research and reported findings.\n</task_result>\n</task>` },
     ];
 }
 
@@ -74,6 +77,34 @@ test("capture reads the structured id fields of task dispatch payloads", () => {
     ];
     const covered = new Set(["a", "b", "c"]);
     assert.deepEqual(captureSubagentSessionIds(msgs, covered), ["ses_abc123", "ses_def456", "ses_ghi789"]);
+});
+
+test("capture reads the tool-result envelope header — the real opencode carrier", () => {
+    const mk = (id: string, text: string, contentType: "tool-result" | "tool-call" = "tool-result", toolName = "task"): CoreMessage =>
+        ({ id, role: "tool", contentType, toolName, text });
+    const msgs = [
+        mk("a", '<task id="ses_env001" state="completed">\n<task_result>\nok\n</task_result>\n</task>'),
+        mk("b", '<task id="ses_env002" state="running">\n<summary>thinking</summary>\n</task>'),
+        mk("c", '<task id="ses_env003" state="error">\n<task_error>\nboom\n</task_error>\n</task>'),
+        mk("d", 'leading prose then <task id="ses_notfirst" state="completed">'),
+        mk("e", '<task id="malformed-id" state="completed">'),
+        mk("f", '<task state="completed">\nno id attribute at all\n</task>'),
+        { id: "g", role: "tool", contentType: "tool-result", toolName: "bash", text: '<task id="ses_wrongtool" state="completed">' },
+        // opencode 2.x: tool renamed subagent, envelope attribute renamed sessionID
+        mk("h", '<subagent sessionID="ses_env004" state="completed">\nfinal output\n</subagent>', "tool-result", "subagent"),
+        // the gate is "subagent-dispatch tool + head-anchored machine envelope";
+        // either envelope shape on either dispatch tool name is fine (never
+        // occurs crossed in practice, but both are machine-written headers)
+        { id: "i", role: "tool", contentType: "tool-result", toolName: "task", text: '<subagent sessionID="ses_env005" state="completed">' },
+    ];
+    const covered = new Set(msgs.map((m) => m.id));
+    // only the head-anchored envelope of subagent-dispatch tools yields ids:
+    // completed, running and error states all count; buried/malformed/
+    // foreign-tool never do.
+    assert.deepEqual(
+        captureSubagentSessionIds(msgs, covered),
+        ["ses_env001", "ses_env002", "ses_env003", "ses_env004", "ses_env005"],
+    );
 });
 
 test("capture dedupes, caps shape strictly, and ignores everything but task tool JSON", () => {

@@ -1,7 +1,10 @@
 import { isSummaryMessageId, summaryMessageId } from "acp-kernel";
 
-// #1702 (redesigned per review): opencode's sub-agent dispatch tool carries the
-// child session id as a STRUCTURED field inside the tool-call arguments JSON.
+// #1702 (redesigned per review): opencode's sub-agent dispatch carries the
+// child session id in two machine-written places: the tool-call arguments
+// JSON (structured fields, where present) and the tool-result envelope
+// header `<task id="ses_..." state="...">` (opencode renderOutput — the
+// shape real traffic always has; the model never chooses the id itself).
 // Once a dispatch pair slides out of the protected zone, that id previously
 // survived only through the model's free-text summary — weak models drop it
 // (#1563 A/B: ~20% loss). Here the id is captured mechanically at fold commit
@@ -11,14 +14,15 @@ import { isSummaryMessageId, summaryMessageId } from "acp-kernel";
 // attach lines live only in rendered views. opencode only, per review: no other
 // client lane ships a structured sub-agent session field today.
 
-const SUBAGENT_TOOL_NAMES = new Set(["task"]);
+// "task" = opencode 1.x; "subagent" = opencode 2.x (packages/core/src/tool/plugin/subagent.ts:16).
+const SUBAGENT_TOOL_NAMES = new Set(["task", "subagent"]);
 const SES_ID_RE = /^ses_[A-Za-z0-9]+$/;
 const MAX_IDS_PER_BLOCK = 100;
 const METADATA_KEY = "subagentSessions";
 const PLUGIN_AGENT = "opencode";
 const SUMMARY_ID_PREFIX = summaryMessageId("");
 
-type SubagentMessage = { id: string; toolName?: string; text?: string };
+type SubagentMessage = { id: string; contentType?: string; toolName?: string; text?: string };
 type SubagentBlock = { blockId: string; effectiveMessageIds: string[]; directBlockIds: string[] };
 type SubagentSession = {
     metadata?: Record<string, unknown>;
@@ -39,15 +43,30 @@ export function subagentSessionsOf(session: SubagentSession | undefined): Record
     return out;
 }
 
-// Structured extraction ONLY: parse the dispatch message's JSON payload and
-// read known id fields. Prose is never regex-scanned — a prose mention is
-// model output, not machine truth (review direction on #1704: fields, not
-// patterns).
+// Structured extraction ONLY, from the two machine-written carriers:
+//   - the tool-call arguments JSON (dispatch message, structured fields);
+//   - the tool-result envelope header. opencode 1.x renderOutput writes
+//     `<task id="ses_..." state="...">`; opencode 2.x (subagent tool,
+//     packages/core/src/tool/plugin/subagent.ts) writes
+//     `<subagent sessionID="ses_..." state="completed">`. Both put the
+//     child session id as an XML attribute on the first line of the result
+//     text — model-chosen call args never carry it. The envelope is matched
+//     only at the head of the first non-empty line: it is a machine-generated
+//     wrapper, and head-anchoring keeps us off prose (review direction on
+//     #1704: fields, not patterns).
+const TASK_ENVELOPE_RE = /^<(?:task id|subagent sessionID)="(ses_[A-Za-z0-9]+)"(?:\s[^>]*)?>/;
+
 export function captureSubagentSessionIds(messages: SubagentMessage[], covered: Set<string>): string[] {
     const out: string[] = [];
     for (const m of messages) {
         if (!covered.has(m.id)) continue;
         if (typeof m.toolName !== "string" || !SUBAGENT_TOOL_NAMES.has(m.toolName)) continue;
+        if (m.contentType === "tool-result") {
+            const first = (m.text ?? "").split("\n", 1)[0]?.trim() ?? "";
+            const id = first.match(TASK_ENVELOPE_RE)?.[1];
+            if (id !== undefined && !out.includes(id)) out.push(id);
+            continue;
+        }
         let parsed: unknown;
         try {
             parsed = JSON.parse(m.text ?? "");
