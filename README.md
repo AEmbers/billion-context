@@ -152,7 +152,11 @@ Ports, briefly (#1660): `bili start` (manual) owns `8787`. Everything a lane
 spawns for you (native hooks, launcher lanes) lives in a separate
 self-managed zone starting at `18787` — collisions hop +1 and each lane
 remembers its drift, so zero-config installs never fight you for a port,
-and a deliberate `bili start` daemon is attached by default.
+and a deliberate `bili start` daemon is attached by default. An
+upgrade-restart that finds the previous build still draining on the lane's
+port waits for it to release (up to 5s) and rebinds the SAME port instead of
+drifting (#1723); only a genuinely occupied port hops +1 — and that hop is
+now logged loudly.
 
 ### Option 1 — Native plugin (`bili plugin install pi` / `omp` / `opencode` / `dsh` / `kimi` / `hermes` / `zcode`)
 

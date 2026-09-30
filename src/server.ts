@@ -86,7 +86,7 @@ import { getStore } from "./persist.js";
 import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError, enterSessionContext } from "./logger.js";
 import { queryLogLines } from "./web/logs-query.js";
 import { configFile, defaultLogFile, dumpsDir, stateDir } from "./paths.js";
-import { atomicWriteInstanceFile, clearProxyInstanceFile, entryScriptFingerprint, isPidAlive, registerInstanceAndWarn, unregisterInstance, type ProxyInstanceFile } from "./instance.js";
+import { atomicWriteInstanceFile, clearProxyInstanceFile, entryScriptFingerprint, findSameLanePredecessor, isPidAlive, listInstances, registerInstanceAndWarn, unregisterInstance, type ProxyInstanceFile } from "./instance.js";
 import { compressLoopResponsesJson } from "./compress-loop-responses.js";
 import { hoistTrappedToolItems } from "./tool-pair-order.js";
 import { runCompressLoop, pickAdapter } from "./loop/index.js";
@@ -659,6 +659,26 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     const MAX_LISTEN_ATTEMPTS = 17;
     let listenAttempts = 0;
     let lastTriedPort = opts.port;
+    // #1723 (#1660 follow-up): the upgrade-restart overlap. The launcher spawns
+    // this child while the OLD build's instance of the same lane is still
+    // draining (its host is exiting; the flush frees the port within seconds).
+    // Laddering +1 there is what ratchets the sticky port up one slot per
+    // auto-update forever. When EADDRINUSE hits a port held by a same-lane
+    // predecessor running DIFFERENT code, rebind the SAME port on a tick until
+    // it releases — bounded, so a holder that never leaves falls through to
+    // the plain ladder (today's behavior) after the budget is spent.
+    const PREDECESSOR_WAIT_TICKS = 10;
+    const PREDECESSOR_WAIT_MS = 500;
+    let predecessorTicksLeft = PREDECESSOR_WAIT_TICKS;
+    let predecessorWaitAnnounced = false;
+    const sameLanePredecessorHolds = (port: number): boolean => {
+        const pred = findSameLanePredecessor(listInstances(), port, launcherLane, ownFingerprint);
+        if (pred && !predecessorWaitAnnounced) {
+            predecessorWaitAnnounced = true;
+            log("warn", `port ${port} held by a same-lane predecessor (pid ${pred.pid}, different build) — waiting up to ${Math.round((PREDECESSOR_WAIT_TICKS * PREDECESSOR_WAIT_MS) / 1000)}s for it to release instead of drifting`);
+        }
+        return pred !== undefined;
+    };
     const announceListening = (): void => {
         const actualPort = server.address() === null ? opts.port : (server.address() as { port: number }).port;
         const nonLoopbackBind = opts.host === "0.0.0.0" || opts.host === "::" || !isLoopbackAddress(opts.host);
@@ -721,6 +741,14 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
                         : "Clear it in the web UI (概览 page) or remove \"passthrough\": true from the config file to re-enable compression."),
             );
         }
+        // #1723: residual zone drift is now an exception, not the norm — a
+        // lane'd launch landing ABOVE its preferred port means that port was
+        // held by something we must not wait on (foreign squatter, same-code
+        // peer). Clients pinned to the old port (lane wrappers, firewall
+        // rules, docs) point at air until they re-resolve; say so loudly.
+        if (launcherLane && actualPort > opts.port) {
+            log("warn", `[zone] lane "${launcherLane}" drifted ${opts.port} → ${actualPort} — the preferred port is still occupied by something else; anything pinned to ${opts.port} must re-resolve`);
+        }
         const envKnobs: string[] = [];
         if (process.env.ACP_PASSTHROUGH !== undefined) envKnobs.push(`ACP_PASSTHROUGH=${process.env.ACP_PASSTHROUGH}`);
         if (process.env.ACP_MODEL_CONTEXT_LIMIT !== undefined) envKnobs.push(`ACP_MODEL_CONTEXT_LIMIT=${process.env.ACP_MODEL_CONTEXT_LIMIT}`);
@@ -752,6 +780,11 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     // flush sessions, and exit cleanly (exit code 1 so callers/scripts notice).
     server.on("error", (err: NodeJS.ErrnoException) => {
         if (err.code === "EADDRINUSE" && launchToken && !strictPort && listenAttempts < MAX_LISTEN_ATTEMPTS) {
+            if (predecessorTicksLeft > 0 && sameLanePredecessorHolds(lastTriedPort)) {
+                predecessorTicksLeft -= 1;
+                setTimeout(() => attemptListen(lastTriedPort), PREDECESSOR_WAIT_MS);
+                return;
+            }
             listenAttempts += 1;
             const next = listenAttempts === MAX_LISTEN_ATTEMPTS ? 0 : lastTriedPort + 1;
             log("warn", `port ${lastTriedPort} busy — ${next === 0 ? "retrying on an ephemeral port" : `retrying on port ${next}`}`);
