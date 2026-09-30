@@ -237,7 +237,7 @@ function droppedEntriesNote(diagnostics: CompressParseDiagnostics): string {
         return `[The compress arguments arrived TRUNCATED — only the complete leading entries could be salvaged; any requested range not listed above was LOST, not compressed. Check acp_status for what is still compressible and re-issue the missing range(s).]`;
     }
     if (diagnostics.invalidItems <= 0) return "";
-    const reasons = (diagnostics.invalidReasons ?? []).slice(0, 3).map((r) => (r.length > 160 ? r.slice(0, 160) + "..." : r));
+    const reasons = (diagnostics.invalidReasons ?? []).slice(0, 3).map((r) => (r.length > 160 ? safePrefix(r, 160) + "..." : r));
     const why = reasons.length > 0 ? reasons.join(" | ") : `${diagnostics.invalidItems} entr(ies) failed validation (parse kind=${diagnostics.kind})`;
     const n = diagnostics.invalidItems;
     return `[${n} of the submitted entr${n === 1 ? "y" : "ies"} ${n === 1 ? "was" : "were"} REJECTED and NOT compressed: ${why}. Re-issue the rejected range${n === 1 ? "" : "s"} in a new compress call.]`;
@@ -297,7 +297,7 @@ function postCompressTail(ctx: RewriteCtx, cleanSuccess: boolean): string {
 // succeeded.
 function applyErrorNote(r: { errors: string[] }): string {
     if (r.errors.length === 0) return "";
-    const errs = r.errors.slice(0, 3).map((e) => e.length > 200 ? `${e.slice(0, 200)}…` : e).join(" | ");
+    const errs = r.errors.slice(0, 3).map((e) => e.length > 200 ? `${safePrefix(e, 200)}…` : e).join(" | ");
     return ` Errors: ${errs}`;
 }
 
@@ -313,7 +313,7 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         // header with no entries — stored in client history and re-sent forever,
         // and useless for self-correction. Inline the reasons instead (full
         // list stays logged above).
-        const reasons = rawReasons.slice(0, 3).map((r) => (r.length > 160 ? r.slice(0, 160) + "..." : r));
+        const reasons = rawReasons.slice(0, 3).map((r) => (r.length > 160 ? safePrefix(r, 160) + "..." : r));
         const why = reasons.length > 0 ? ` Rejected entries: ${reasons.join(" | ")}.` : "";
         // #1366: a call with NO content at all ({} / "" args — an "empty companion"
         // compress() emitted alongside the real one) must never be told to

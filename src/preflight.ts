@@ -16,6 +16,7 @@ import { fetchWithTimeout, isTransientUpstreamError, replayMaxAttempts, replayBa
 import { proxyDispatcher } from "./upstream-proxy.js";
 import { lastCompressSuffix, type Session } from "./session.js";
 import { peekRegistryOutputLimit } from "./registry.js";
+import { safePrefix } from "./text-safe.js";
 
 // #247: proactive pre-forward compression. When the session's real context
 // (previous turn's upstream input_tokens) exceeds the current model's window
@@ -213,7 +214,7 @@ function spanUnitsOf(messages: CoreMessage[], startIdx: number, endIdx: number, 
 // Message-level splitChunks cannot shrink a span dominated by one huge
 // message (e.g. a megabyte tool result); split its rendered content into
 // token-budgeted slices so every summarization call stays inside the window.
-function splitSummaryContent(content: string, budget: number, countTokens: (text: string) => number): string[] {
+export function splitSummaryContent(content: string, budget: number, countTokens: (text: string) => number): string[] {
     const chunks: string[] = [];
     let offset = 0;
     while (offset < content.length) {
@@ -223,6 +224,13 @@ function splitSummaryContent(content: string, budget: number, countTokens: (text
             const mid = Math.ceil((low + high) / 2);
             if (countTokens(content.slice(offset, mid)) <= budget) low = mid;
             else high = mid - 1;
+        }
+        // #1615 family: a budget boundary landing between the two halves of an
+        // astral char would strand a lone surrogate at this chunk's end (and the
+        // next chunk's start) — strict upstreams reject such summarization bodies.
+        if (low - offset > 1 && low < content.length) {
+            const c = content.charCodeAt(low - 1);
+            if (c >= 0xd800 && c <= 0xdbff) low -= 1;
         }
         chunks.push(content.slice(offset, low));
         offset = low;
@@ -837,7 +845,7 @@ export async function preflightCompress(deps: PreflightDeps, messages: CoreMessa
     // can legitimately diverge; recording where+why makes the divergence diffable.
     const skipReasons: string[] = [];
     const noteSkip = (reason: string): void => {
-        if (skipReasons.length < 8 && !skipReasons.includes(reason)) skipReasons.push(reason.slice(0, 200));
+        if (skipReasons.length < 8 && !skipReasons.includes(reason)) skipReasons.push(safePrefix(reason, 200));
     };
     let subMinNoted = false;
     let summaryCalls = 0;
@@ -1002,7 +1010,7 @@ export async function preflightCompress(deps: PreflightDeps, messages: CoreMessa
                     // #1372: the kernel verdict used to be discarded here — this is where
                     // "no range could be compressed" died silently (minCompressRange gate,
                     // unknown/consumed refs, fully protected span, dummy summary length).
-                    const verdict = [...preview.result.errors, ...preview.result.warnings].join("; ").slice(0, 300)
+                    const verdict = safePrefix([...preview.result.errors, ...preview.result.warnings].join("; "), 300)
                         || "the kernel created no block and reported no error";
                     deps.log("warn", `[preflight] preview rejected range ${skipKey}: ${verdict}`);
                     noteSkip(`${skipKey}: preview rejected — ${verdict}`);
@@ -1131,7 +1139,7 @@ export async function preflightCompress(deps: PreflightDeps, messages: CoreMessa
                 const applied = applyRanges(parseCompressInput({ content: [{ startId: startRef, endId: endRef, summary, topic: "preflight overflow compress" }] }), ctx);
                 if (applied.startsWith("[Compression FAILED")) {
                     deps.log("warn", `[preflight] ${applied}`);
-                    noteSkip(`${skipKey}: apply failed — ${applied.replace(/^\[Compression FAILED[:\s]*/, "").slice(0, 200)}`);
+                    noteSkip(`${skipKey}: apply failed — ${safePrefix(applied.replace(/^\[Compression FAILED[:\s]*/, ""), 200)}`);
                     skipSet.add(skipKey);
                     break;
                 }
@@ -1169,7 +1177,7 @@ export async function preflightCompress(deps: PreflightDeps, messages: CoreMessa
         // #1372: carry the actual per-range skip reasons too — the old hardcoded
         // parenthetical claimed causes that often had not happened (e.g. "below
         // minCompressRange" for a range that died before any summary call).
-        const unusableNote = lastUnusableDetail ? ` Last unusable summary: ${lastUnusableDetail.slice(0, 300)}.` : "";
+        const unusableNote = lastUnusableDetail ? ` Last unusable summary: ${safePrefix(lastUnusableDetail, 300)}.` : "";
         const skipNote = skipReasons.length > 0 ? ` Skipped: ${skipReasons.slice(0, 3).join(" | ")}.` : "";
         if (budgetHit) {
             failure = { kind: "exhausted", detail: `the preflight summarization budget (${MAX_SUMMARY_CALLS_PER_PREFLIGHT} calls per protection regime) was exhausted before the payload fit the window${unusableNote}${skipNote}` };

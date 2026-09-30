@@ -594,7 +594,7 @@ export async function* runCompressLoop(
                     continuationRetried = true;
                     const tail = assistantText.length <= TRUNCATION_CONTINUATION_TAIL_CHARS
                         ? assistantText
-                        : `…${assistantText.slice(-TRUNCATION_CONTINUATION_TAIL_CHARS)}`;
+                        : `…${safeSuffix(assistantText, TRUNCATION_CONTINUATION_TAIL_CHARS)}`;
                     ctx.log(`[acp-loop] round ${round}: upstream truncated after ${assistantText.length} text chars reached the client; retrying once with continuation nudge`);
                     const nudge: CoreMessage = {
                         id: `acp_truncation_retry_r${round}`,
