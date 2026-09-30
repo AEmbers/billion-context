@@ -45,6 +45,7 @@ const { SessionStore, _setStoreForTest } = await import("../src/persist.ts");
 const { _setForTest: setRegistryForTest } = await import("../src/registry.ts");
 const { resetToolRingForTest } = await import("../src/tool-ring.ts");
 const { _resetPluginStateForTest } = await import("../src/plugin.ts");
+const { setLogCapture } = await import("../src/logger.ts");
 const { startChatRelay } = await import("./e2e/chat-relay.ts");
 
 after(() => {
@@ -90,6 +91,10 @@ type RelayState = {
     lastDemandBytes: number;
     sinceDemand: number;
     failedCompressions: number;
+    /** Text body each text-turn emitted, in request order — lets the host
+     *  side assert the client received EXACTLY one copy (#1778: a false
+     *  retryEmptyTurn would stream the filler twice). */
+    texts: string[];
 };
 
 function parseRefIds(body: string): string[] {
@@ -172,8 +177,14 @@ function startMockChatRelay(state: RelayState): http.Server {
                 res.write(sseLine({ id: "g1", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 100, completion_tokens: 2 } }));
             } else {
                 const text = assistantText(state.upstreamReqs.length);
-                res.write(sseLine({ id: "g1", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: text } }] }));
+                // #1778: plain-prose turns carry reasoning_content, arming the
+                // pre-fix hazard — sawReasoning + fast-path text that never
+                // entered visibleTextChars made retryEmptyTurn re-issue the
+                // request and duplicate the already-delivered reply.
+                res.write(sseLine({ id: "g1", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", reasoning_content: `pondering turn ${state.upstreamReqs.length} before answering` } }] }));
+                res.write(sseLine({ id: "g1", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: text } }] }));
                 res.write(sseLine({ id: "g1", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 50 } }));
+                state.texts.push(text);
             }
             res.write("data: [DONE]\n\n");
             res.end();
@@ -230,7 +241,13 @@ test("plugin-lane grow-and-compress: MCP host loop folds via /__bili/plugin/tool
     setRegistryForTest({});
     _resetPluginStateForTest();
     resetToolRingForTest();
-    const state: RelayState = { upstreamReqs: [], compressCalls: 0, lastDemandBytes: Infinity, sinceDemand: 99, failedCompressions: 0 };
+    const state: RelayState = { upstreamReqs: [], compressCalls: 0, lastDemandBytes: Infinity, sinceDemand: 99, failedCompressions: 0, texts: [] };
+    // #1778: capture warn-level lines for the whole run — with the fast-path
+    // accounting fix, NO turn may end flagged as degenerate (every turn here
+    // delivers prose or a tool call), and the one-shot empty-turn retry must
+    // never fire (would duplicate already-delivered text).
+    const capturedWarns: string[] = [];
+    setLogCapture((level, msg) => { if (level === "warn") capturedWarns.push(msg); });
     const relay = startMockChatRelay(state);
     await listen(relay);
     const relayPort = (relay.address() as { port: number }).port;
@@ -298,6 +315,7 @@ test("plugin-lane grow-and-compress: MCP host loop folds via /__bili/plugin/tool
         {
             const prime = await modelRequest(CONV_B, [{ type: "message", role: "user", content: [{ type: "input_text", text: "second conversation, just staying active" }] }]);
             assert.ok(prime.text.length > 0, "priming turn must answer");
+            state.texts.length = 0; // the main loop's exact-text ledger starts after the prime
         }
 
         const history: HistoryItem[] = [];
@@ -330,6 +348,9 @@ test("plugin-lane grow-and-compress: MCP host loop folds via /__bili/plugin/tool
                 history.push({ type: "function_call_output", call_id: out.fnCall.callId, output: toolJson.result ?? "compressed" });
             } else {
                 assert.ok(out.text.length > 0, `turn ${i}: empty reply without a pending tool round-trip`);
+                // exactly ONE copy of the filler: a false retryEmptyTurn
+                // (#1778) would append a second, duplicated stream.
+                assert.equal(out.text, state.texts.shift() ?? "", `turn ${i}: client must receive exactly the one reply the relay emitted`);
                 textReplies++;
                 history.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: out.text }] });
             }
@@ -350,7 +371,11 @@ test("plugin-lane grow-and-compress: MCP host loop folds via /__bili/plugin/tool
         assert.ok(maxUpstreamBytes < LIVE_BYTES_THRESHOLD * 2, `upstream body must stay bounded (max ${maxUpstreamBytes}B vs threshold ${LIVE_BYTES_THRESHOLD}B)`);
         assert.ok(maxLiveMsgs < TURNS, `upstream live message count must stay well below client history (max ${maxLiveMsgs} vs ${TURNS} turns)`);
         assert.ok(clientBytes > maxUpstreamBytes * 2, `client history (${clientBytes}B) should far exceed max upstream body (${maxUpstreamBytes}B) after compression cycles`);
+        const degenerateWarns = capturedWarns.filter((w) => w.includes("degenerate-turn") && w.includes("plugin-passthrough-responses"));
+        assert.equal(degenerateWarns.length, 0, `no false degenerate-turn warn may fire for turns that delivered prose (#1778): ${JSON.stringify(degenerateWarns.slice(0, 2))}`);
+        assert.equal(capturedWarns.filter((w) => w.includes("degenerate terminal turn") && w.includes("retrying once")).length, 0, "the one-shot empty-turn retry must not fire for turns that delivered prose (#1778)");
     } finally {
+        setLogCapture(null);
         await close(proxy);
         await bridge.close();
         await close(relay);

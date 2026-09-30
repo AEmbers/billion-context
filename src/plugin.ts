@@ -2109,6 +2109,13 @@ export async function pipePluginResponsesWithStrip(
     let inRetry = false;
     /** Text the client actually assembled from this attempt's deltas. */
     let visibleTextChars = 0;
+    /** #1778: clean prose forwarded via the byte-identical fast path (never
+     *  enters tagFilter, so stats().outputChars alone misses it). The
+     *  degenerate-turn warn (#673) and the retryEmptyTurn gate (#732/#821)
+     *  both consult this — missing it false-warned every plain-prose turn on
+     *  the plugin responses lane and, worse, let the one-shot retry fire on
+     *  reasoning turns whose text had already reached the client. */
+    let fastPathChars = 0;
     /** Post-filter prose for the once-per-request #361 tool-call-XML warn at
      *  stream end (#1368): warn only, never stripped. */
     let proseAcc = "";
@@ -2149,7 +2156,9 @@ export async function pipePluginResponsesWithStrip(
             reason: responseStatus,
             terminalReason: "completed",
             toolCalls: sawFunctionCall ? 1 : 0,
-            text: st,
+            // #1778: fast-path prose bypasses the filter, so surface it here —
+            // otherwise every clean-prose turn looks like an empty one.
+            text: fastPathChars > 0 ? { inputChars: st.inputChars, outputChars: st.outputChars + fastPathChars, dropped: st.dropped } : st,
             sawThinking: sawReasoning,
             wire: "plugin-passthrough-responses",
         });
@@ -2472,6 +2481,8 @@ export async function pipePluginResponsesWithStrip(
                         }
                         if (!retryRewritePending() && !mayStartRenderTag(delta) && !mayStartMarkerLine(delta) && !mayStartBiliInternal(delta) && !tagFilter.pending()) {
                             proseAcc += delta;
+                            visibleTextChars += delta.length;
+                            fastPathChars += delta.length;
                             await write(rawEvent + "\n\n");
                             continue;
                         }
