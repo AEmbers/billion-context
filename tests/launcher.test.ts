@@ -926,6 +926,7 @@ test("ompPluginLoadedFrom: only entries whose file exists count as loaded", () =
 
 // #1753 (shutdown side): the wrapper's exit must not kill a shared instance.
 test("stopProxyGuarded: spares a spawned instance that other watchers still share (#1753)", async () => {
+    if (process.platform === "win32") return; // guard defers to the server-side watchdog on win32; POSIX decision tree pinned here
     let killed = false;
     const child = makeFakeChild(42470);
     child.kill = () => { killed = true; return true; };
@@ -939,6 +940,7 @@ test("stopProxyGuarded: spares a spawned instance that other watchers still shar
 });
 
 test("stopProxyGuarded: kills when the wrapper is the last watcher (#1753)", async () => {
+    if (process.platform === "win32") return;
     let killed = false;
     const child = makeFakeChild(42471);
     child.kill = () => { killed = true; return true; };
@@ -950,6 +952,7 @@ test("stopProxyGuarded: kills when the wrapper is the last watcher (#1753)", asy
 });
 
 test("stopProxyGuarded: health parse failure degrades to the old kill behavior (#1753)", async () => {
+    if (process.platform === "win32") return;
     let killed = false;
     const child = makeFakeChild(42472);
     child.kill = () => { killed = true; return true; };
@@ -958,6 +961,7 @@ test("stopProxyGuarded: health parse failure degrades to the old kill behavior (
 });
 
 test("stopProxyGuarded: unarmed watchdog without watchers still kills (#1753)", async () => {
+    if (process.platform === "win32") return;
     let killed = false;
     const child = makeFakeChild(42473);
     child.kill = () => { killed = true; return true; };
