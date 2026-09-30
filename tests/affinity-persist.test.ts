@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { PrefixAffinityResolver, prefixAffinity, MAX_TRACKED_SESSIONS, TTL_MS } from "../src/prefix-affinity.ts";
+import { PrefixAffinityResolver, prefixAffinity, MAX_TRACKED_SESSIONS } from "../src/prefix-affinity.ts";
 import { flushPrefixAffinity, hydratePrefixAffinity } from "../src/affinity-persist.ts";
 
 let tmp: string;
@@ -35,10 +35,12 @@ test("exportSnapshot/importSnapshot roundtrip preserves resolution", () => {
     assert.equal(replay.sessionId, first.sessionId, "rehydrated chain still resolves to the same session");
 });
 
-test("importSnapshot drops malformed and expired entries", () => {
+test("importSnapshot drops malformed entries; aged chains stay permanent (#1724)", () => {
     const r = new PrefixAffinityResolver();
     assert.equal(r.importSnapshot("nope"), 0);
-    assert.equal(r.importSnapshot([{ sessionId: 1 }, { sessionId: "x", depth: "3" }, null, { sessionId: "ok", depth: 3, tailHash: "t", itemHashes: ["h1", "h2"], lastSeen: Date.now() - 8 * 24 * 60 * 60 * 1000 }]), 0, "malformed + expired are skipped");
+    assert.equal(r.importSnapshot([{ sessionId: 1 }, { sessionId: "x", depth: "3" }, null]), 0, "malformed are skipped");
+    // 400 days old — the month/year single-session promise keeps it valid.
+    assert.equal(r.importSnapshot([{ sessionId: "ok", depth: 3, tailHash: "t", itemHashes: ["h1", "h2"], lastSeen: Date.now() - 400 * 24 * 60 * 60 * 1000 }]), 1, "permanent chains import regardless of age");
 });
 
 test("flush writes the snapshot file; hydrate reattaches after a restart", () => {
@@ -108,7 +110,7 @@ test("merge keeps the deeper disk copy when our in-memory snapshot is stale (#17
     assert.equal(parsed.entries[0].depth, mine.depth + 2, "fresher disk copy not rolled back by our stale write");
 });
 
-test("writeSnapshot re-applies the store's bounds to the union (TTL + LRU cap) (#1724)", () => {
+test("writeSnapshot re-applies the store's bounds to the union (LRU cap; chains are permanent) (#1724)", () => {
     const a = prefixAffinity.resolve(messages(7));
     assert.ok(a);
     prefixAffinity.note(a.sessionId, a.incomingDepth, a.tailHash, a.itemHashes);
@@ -118,7 +120,7 @@ test("writeSnapshot re-applies the store's bounds to the union (TTL + LRU cap) (
     for (let i = 0; i < MAX_TRACKED_SESSIONS + 50; i++) {
         pads.push({ sessionId: `pfa-pad-${i}`, depth: 3, tailHash: `t${i}`, itemHashes: ["h"], lastSeen: now - (i + 1) * 1000 });
     }
-    pads.push({ sessionId: "pfa-expired", depth: 3, tailHash: "te", itemHashes: ["h"], lastSeen: now - TTL_MS - 60_000 });
+    pads.push({ sessionId: "pfa-oldest", depth: 3, tailHash: "ta", itemHashes: ["h"], lastSeen: now - 400 * 24 * 60 * 60 * 1000 });
     const file = path.join(tmp, "billion-context", "prefix-affinity.json");
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ version: 1, entries: pads }));
@@ -127,9 +129,25 @@ test("writeSnapshot re-applies the store's bounds to the union (TTL + LRU cap) (
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { entries: { sessionId: string }[] };
     const ids = new Set(parsed.entries.map((e) => e.sessionId));
     assert.ok(ids.has(a.sessionId), "our own chain survives the capped write");
-    assert.ok(!ids.has("pfa-expired"), "TTL-expired disk entries are pruned at write time");
+    assert.ok(!ids.has("pfa-oldest"), "when the cap bites, the least-recently-seen entry is the first to go");
     assert.ok(!ids.has(`pfa-pad-${MAX_TRACKED_SESSIONS + 49}`), "oldest disk-only chains are LRU-capped at write time");
     assert.equal(parsed.entries.length, MAX_TRACKED_SESSIONS, "file stays bounded at the tracked-chain cap instead of growing per churned chain");
+});
+
+test("chains are permanent at write time — age alone never prunes (#1724)", () => {
+    const now = Date.now();
+    const file = path.join(tmp, "billion-context", "prefix-affinity.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ version: 1, entries: [
+        { sessionId: "pfa-year-old", depth: 5, tailHash: "ty", itemHashes: ["h"], lastSeen: now - 400 * 24 * 60 * 60 * 1000 },
+        { sessionId: "pfa-fresh", depth: 2, tailHash: "tf", itemHashes: ["h"], lastSeen: now },
+    ] }));
+
+    flushPrefixAffinity();
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { entries: { sessionId: string }[] };
+    const ids = new Set(parsed.entries.map((e) => e.sessionId));
+    assert.ok(ids.has("pfa-year-old"), "a 400-day-old chain survives the write — permanence means only the LRU cap, never age");
+    assert.ok(ids.has("pfa-fresh"), "fresh entry untouched");
 });
 
 test("a malformed disk entry cannot win a same-depth merge or persist (#1724)", () => {
