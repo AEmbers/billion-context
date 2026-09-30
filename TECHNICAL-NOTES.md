@@ -32,9 +32,11 @@ Attach discovery is lane-aware across **all** live instances (#1232): the launch
 
 ## Shared state dir and multi-instance security boundary (#394, #1724)
 
-Every bili instance on a host reads and writes the **same** state dir
-(`~/.local/state/billion-context/` — sessions, CCR content-store,
-prefix-affinity, instance registry). The control plane is lane-aware (#1232:
+Every bili instance on a host reads and writes the **same** per-host
+storage: the XDG data dir (`~/.local/share/billion-context/` — session
+records, CCR content-store, prefix-affinity) plus the state dir
+(`~/.local/state/billion-context/` — log, instance registry). The control
+plane is lane-aware (#1232:
 attach discovery and the #394 coexistence warning both respect declared
 lanes), but the **data plane is not partitioned** — there is no per-session
 owner and no per-lane isolation on disk. Two consequences follow:
@@ -47,21 +49,22 @@ owner and no per-lane isolation on disk. Two consequences follow:
 - **Restart drain race.** On a restart the new process hydrates the store
   before the old one finishes flushing, so last-writer-wins can drop the old
   process's final writes: lost tail updates and a provider prefix-cache bust
-  (the outbound body diverges from what the provider had cached). Mitigations
-  shipped in #1724: the #405 snapshot-counter guard (rejects stale session
-  writes), the prefix-affinity union-on-write guard (one instance's flush never
-  clobbers a sibling chain), and the #811 self-restart ordering fix (durable
-  state is flushed to disk before the replacement spawns). Host-driven restarts
+   (the outbound body diverges from what the provider had cached). The #1724
+   mitigations: the #405 snapshot-counter guard (rejects stale session writes),
+   the prefix-affinity union-on-write guard (#1737: one instance's flush never
+   clobbers a sibling chain), and the self-restart ordering fix (#1742: durable
+   state is flushed to disk before the replacement spawns). Host-driven restarts
   (dsh et al., #991) still rely on these data-layer guards, since their
   kill/spawn order is not bili-controlled.
 
 **Security posture:** the shared-state surface is protected *only* by the admin
-endpoint's loopback gate (non-loopback source addresses are refused) plus the
-filesystem permissions on the user's home/state dir — there is no per-session
-authorization. For a **single-user host** that is sufficient. On a
-**multi-user host** it is not: any local account able to reach the proxy's
-loopback port can read every session of every user. Such hosts must partition
-the state dir (per-user/per-lane subdirectories) — the root fix named in #1724
+endpoint's loopback gate (non-loopback source addresses are refused) plus
+filesystem permissions on the user's home tree (both dirs live under $HOME) —
+there is no per-session authorization. For a **single-user host** that is
+sufficient. On a **multi-user host** it is not: any local account able to reach
+the proxy's loopback port can read every session of every user. Such hosts must
+partition their per-host storage (per-user/per-lane subdirectories) — the root
+fix named in #1724
 (direction #1), still open as an architecture decision; Web UI scoping
 (#1724 direction #4) reduces cross-instance browsing but does not change this
 boundary.
