@@ -6,6 +6,8 @@
 // at extension load always wins. The patch is surgical — it rewrites ONLY
 // model-API shaped URLs and leaves every other request untouched.
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { envMillis } from "./native-bootstrap.js";
 import { BILI_PASSTHROUGH_HEADER } from "../util.js";
 
@@ -141,6 +143,18 @@ let moduleAnchor: typeof globalThis.fetch | undefined = typeof globalThis.fetch 
 let observedFetches: Array<typeof globalThis.fetch> = moduleAnchor !== undefined ? [moduleAnchor] : [];
 const knownDeadFetches = new Set<typeof globalThis.fetch>();
 let warnedReanchor = false;
+
+// #1662: per-request dispatch depth, tracked in an async context — NOT a
+// global counter, because concurrent top-level requests must not see each
+// other. 1 = inside bili's own dispatch body. A re-entry observed at depth
+// 1 is PROOF of accumulated nesting: a link of ours is being called from
+// within our own dispatch, which is only possible through a foreign wrapper
+// that captured one of our older tops (the churn shape of dsh-codex-
+// subscription). 2 = already performed the depth-1 termination jump; any
+// further re-entry falls back to the plain walk (degenerate multi-plugin
+// nesting) so the termination itself can never loop.
+const dispatchDepth = new AsyncLocalStorage<number>();
+let warnedReentry = false;
 
 /** #1410: the dead-closure signature. A wrapper whose owner nulled its
  *  closure locals dies exactly like this ("baseFetch is not a function").
@@ -513,8 +527,8 @@ export function installNativeFetchIntercept(state: NativeInterceptState): boolea
                 }
             }
         };
-        const patched = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-        const url = fetchUrlOf(input);
+        const dispatchBody = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+            const url = fetchUrlOf(input);
         if (url === undefined) return send(input, init);
         // #1268: hold the request until the host's ACP tool registration has
         // finished its first attempt, so headersFor can stamp it into plugin
@@ -701,6 +715,42 @@ export function installNativeFetchIntercept(state: NativeInterceptState): boolea
         }
     };
 
+        // #1662: re-entry termination. A coexisting plugin (dsh-codex-
+        // subscription shape) that repeatedly wraps the CURRENT top grows the
+        // chain one (wrapper, bili-link) pair per wrap: C_n → w_n → C_{n-1}
+        // → … . Pre-fix, every request walked the ENTIRE accumulated history
+        // (each stacked link re-running the full dispatch), so stack depth
+        // grew with session lifetime until the host process died with
+        // "RangeError: Maximum call stack size exceeded" (observed live on
+        // Windows). The depth check below is the proof of such nesting: an
+        // OUR link called from within our own dispatch can only be reached
+        // through a foreign wrapper that captured one of our older tops.
+        // Everything below that point is redundant — the top link already
+        // rewrote/stamped the request (model URLs) or passed it through
+        // unchanged (everything else) — so terminate the descent at the
+        // oldest still-live anchor (the host baseline that survived every
+        // prior teardown) instead of walking the history. Request depth
+        // becomes constant no matter how many times the coexisting plugin
+        // re-wraps. Degradation cost: with TWO concurrently-LIVE foreign
+        // wrappers, the older one's injection is skipped for these requests
+        // (same class as the documented BILI_RECLAIM_FETCH_PATCH=0 escape
+        // hatch; the churn case — one live wrapper — is fully preserved, its
+        // hook still runs below the top link).
+        const patched = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+            const depth = dispatchDepth.getStore();
+            if (depth === 1) {
+                if (!warnedReentry) {
+                    warnedReentry = true;
+                    console.warn("[bili-native] nested re-entry into the bili fetch chain detected (#1662) — a coexisting plugin re-wrapped bili's own chain; terminating the descent at the oldest live anchor so request depth stays constant");
+                }
+                const anchor = observedFetches.find((f) => !knownDeadFetches.has(f));
+                if (anchor !== undefined && anchor !== ds) return dispatchDepth.run(2, () => anchor(input, init));
+                return send(input, init);
+            }
+            if (depth !== undefined) return send(input, init);
+            return dispatchDepth.run(1, () => dispatchBody(input, init));
+        };
+
         const chain = patched as typeof globalThis.fetch;
         markOwnChain(chain);
         return chain;
@@ -730,16 +780,18 @@ export function installNativeFetchIntercept(state: NativeInterceptState): boolea
                 // budget on ourselves.
                 if (isOwnChain(v)) return;
                 // Visibility (#1158): an evict attempt used to be silent —
-                // log it so "un-routed by a third party" is diagnosable even
-                // when the heal itself is not wanted/limited away.
+                // log it so "un-routed by a third party" is diagnosable.
+                // Past REARM_LIMIT the WARNING stops (log spam), but the
+                // adoption continues: #1662 showed that surrendering the top
+                // slot past the limit (`top = v`) left every later foreign
+                // install stacking on the orphaned chain with ZERO visibility
+                // — unbounded growth, silent, until the host process died.
+                // With the re-entry termination in makeChain each further
+                // adopt costs O(1) per request regardless of history length,
+                // so the cap now bounds LOGGING only, and routing authority
+                // never leaves the guard.
                 if (rearmCount < REARM_LIMIT) {
                     console.warn(`[bili-native] third-party globalThis.fetch install detected (#1158) — re-chaining as downstream (evict attempt ${rearmCount + 1})`);
-                }
-                if (rearmCount >= REARM_LIMIT) {
-                    // A fighting patch (two self-healers) would loop forever;
-                    // past the limit stop guarding and let the winner stand.
-                    top = v as typeof globalThis.fetch;
-                    return;
                 }
                 rearmCount += 1;
                 noteFetch(v);
@@ -768,6 +820,7 @@ export function _resetForTest(opts: { anchor?: typeof globalThis.fetch } = {}): 
     observedFetches = moduleAnchor !== undefined ? [moduleAnchor] : [];
     knownDeadFetches.clear();
     warnedReanchor = false;
+    warnedReentry = false;
     if (preInstallDesc !== undefined) {
         const d = preInstallDesc;
         preInstallDesc = undefined;
