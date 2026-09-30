@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { collectBlockContent, defaultCountTokens, formatRanges, storeCoveredOriginals, viableRanges, type CompressionCore, type Config, type CoreMessage, type CompressionState, type NudgeDecision, type CompressParseDiagnostics } from "acp-kernel";
 import { handleAcpStatus } from "./acp-status.js";
 import { handleAcpCache, recordCacheFoldsFromBlocks } from "./cache-ledger.js";
@@ -9,6 +10,7 @@ import { adoptContentStore, contentStoreOf, ccrEnabled, drainPendingRetrievals, 
 import { IMAGE_FULL_TOOL_NAME, executeImageFull, imageCompressionEnabled } from "./image-compress.js";
 import { containsBiliInternalText, containsMarkerLineText, containsRenderTagText, stripAcpTags } from "./loop/tag-echo-filter.js";
 import { maxShrinkPerCompress } from "./fetch-util.js";
+import { attachSubagentSessions, subagentSessionNote, subagentSessionsOf, syncSubagentSessions } from "./subagent-sessions.js";
 import { safePrefix, safeSuffix, scrubLoneSurrogates } from "./text-safe.js";
 
 export type RewriteCtx = {
@@ -201,6 +203,27 @@ export function summaryFingerprintLine(blockId: string, summary: string): string
     return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
 }
 
+// #1718: log-safe variant of the fingerprint line. Summaries are
+// conversation-derived text (local paths, task state, decisions, commands), so
+// bili.log must carry only the length — never the head/tail excerpts. The
+// model-facing receipt keeps the full fingerprint (#1294 integrity check);
+// the two consumers diverge by design.
+export function summaryFingerprintLogLine(blockId: string, summary: string): string {
+    return ` · ${blockId} summary ${summary.length}ch`;
+}
+
+// #1718: m.id is a DETERMINISTIC content hash (deriveMessageId: sha256 over
+// role|contentType|toolCallId|toolName|text, see MESSAGE-IDENTITY.md) — logging
+// it raw lets identical messages be correlated across sessions/runs/machines
+// and enables offline guessing against low-entropy content. Salt with a
+// per-process random value: joins within one run still work, cross-run
+// correlation dies, and guessing is impossible without the salt (which never
+// leaves the process).
+const MSG_ID_LOG_SALT = randomBytes(8).toString("hex");
+export function saltedMsgIdForLog(id: string, salt: string = MSG_ID_LOG_SALT): string {
+    return "x_" + createHash("sha256").update(`${salt}:${id}`).digest("hex").slice(0, 10);
+}
+
 // #1494: entries dropped at PARSE time vanish from `ranges`, so the success
 // line ("Compressed <detail>") and the 0-blocks failure both list only the
 // survivors — a 3-entry call that silently loses one reads as a clean 2-block
@@ -340,7 +363,7 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
     ctx.log(`[acp-proxy: compress requested ${ranges.length} range(s): ${ranges.map((r) => `${r.startRef}–${r.endRef}`).join(", ")}]`);
     ctx.log(`[acp-proxy: ctx has ${ctx.messages.length} message(s), state has ${Object.keys(ctx.session.state.messageRefs?.byRef ?? {}).length} ref(s) mapped]`);
     if (ctx.messages.length > 0) {
-        const ids = ctx.messages.slice(0, 10).map((m) => `${m.id}(${(m.text ?? "").length}c)`).join(", ");
+        const ids = ctx.messages.slice(0, 10).map((m) => `${saltedMsgIdForLog(m.id)}(${(m.text ?? "").length}c)`).join(", ");
         ctx.log(`[acp-proxy: first msg ids: ${ids}]`);
     }
     try {
@@ -452,6 +475,9 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         // whenever some other range in the batch succeeded — surface them on
         // the success line too, not only on total failure.
         let msg = `[Compressed ${detail} → ${r.blocksCreated} block(s), ~${r.tokensCompressed} tokens saved.${warn}${applyErrorNote(r)}]`;
+        // #1718: log copy mirrors the receipt but swaps each fingerprint line
+        // for its length-only form — summary excerpts must not reach bili.log.
+        let logMsg = msg;
         // #1494: a partial fold must not read as a clean success — surface the
         // parse-dropped entries (and log them server-side) so the model
         // re-issues the rejected range instead of believing it folded.
@@ -460,13 +486,32 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         if (dropped !== "") {
             ctx.log(`[acp-proxy: compress PARTIAL — kind=${diagnostics.kind} ${diagnostics.invalidItems} entr(ies) rejected at parse: ${(diagnostics.invalidReasons ?? []).join(" | ")}]`);
             msg += `\n${dropped}`;
+            logMsg += `\n${dropped}`;
         }
         // #1294 P1: append a fingerprint line per created/updated block —
         // kernel refolds update an existing block's summary in place (same id),
         // so "updated" means any pre-existing block whose summary changed.
-        for (const b of res.state.blocks) {
+        // #1702: opencode sub-agent session ids are captured mechanically at
+        // this same fold commit into a metadata sidecar (structured field
+        // extraction from the dispatch pairs — summary text never carries the
+        // duty), and the receipt names them so the id stays model-visible.
+        const changedBlocks = res.state.blocks.filter((b) => {
             const prev = beforeSummaries.get(b.blockId);
-            if (prev === undefined || prev !== b.summary) msg += `\n${summaryFingerprintLine(b.blockId, b.summary)}`;
+            return prev === undefined || prev !== b.summary;
+        });
+        syncSubagentSessions(ctx.session, changedBlocks, ctx.compressMessages ?? ctx.messages);
+        const subagentMap = subagentSessionsOf(ctx.session);
+        for (const b of changedBlocks) {
+            msg += `\n${summaryFingerprintLine(b.blockId, b.summary)}`;
+            logMsg += `\n${summaryFingerprintLogLine(b.blockId, b.summary)}`;
+            const ids = subagentMap[b.blockId];
+            if (ids !== undefined && ids.length > 0) {
+                // block id + opaque ses_ identifier only — no summary text, so the
+                // note is safe in the log copy as well (#1718 scope is excerpts).
+                const note = `\n${subagentSessionNote(b.blockId, ids)}`;
+                msg += note;
+                logMsg += note;
+            }
         }
         // #189 staged compression (gated): a rewrite above the configured max
         // shrink is the shape that trips provider risk-control; steer the model
@@ -474,7 +519,9 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         // survives for prefix caching and each round's transition stays gentle.
         const maxShrink = maxShrinkPerCompress();
         if (maxShrink !== undefined && shrinkRatio > maxShrink) {
-            msg += ` [Staged-compress: this rewrite shrank context ${Math.round(shrinkRatio * 100)}%, above your ${Math.round(maxShrink * 100)}% per-compress target — the shape that trips provider risk-control (3007). Next time compress a SMALLER, TAIL-biased range (the most recent large content) and keep the stable prefix intact.]`;
+            const staged = ` [Staged-compress: this rewrite shrank context ${Math.round(shrinkRatio * 100)}%, above your ${Math.round(maxShrink * 100)}% per-compress target — the shape that trips provider risk-control (3007). Next time compress a SMALLER, TAIL-biased range (the most recent large content) and keep the stable prefix intact.]`;
+            msg += staged;
+            logMsg += staged;
         }
         // The fold materializes only at the NEXT request's processTurn; the
         // post-compress re-request re-sends the unfolded history (prefix-cache
@@ -486,8 +533,10 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         ctx.session.stats.lastInputTokens = Math.max(0, ctx.session.stats.lastInputTokens - r.tokensCompressed);
         // #1387: post-compress snapshot / stop signal ride on the netted
         // (post-compress) token count, matching what the next turn sees.
-        msg += postCompressTail(ctx, r.errors.length === 0);
-        ctx.log(`[acp-proxy: ${msg}]`);
+        const tail = postCompressTail(ctx, r.errors.length === 0);
+        msg += tail;
+        logMsg += tail;
+        ctx.log(`[acp-proxy: ${logMsg}]`);
         return msg;
     } catch (err) {
         ctx.log(`[acp-proxy: compress failed: ${String(err)}]`);

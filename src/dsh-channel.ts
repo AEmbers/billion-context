@@ -254,7 +254,7 @@ async function defaultAsyncRun(plan: DshPlan): Promise<{ stdout: string; stderr:
     return { stdout, stderr };
 }
 
-/** Run `dsh plugin <args…>` synchronously (CLI context — blocking is fine).
+/** Run `dsh <args…>` synchronously (CLI context — blocking is fine).
  *  Throws with actionable context when the dsh CLI is missing or exits
  *  non-zero (dsh forwards pnpm's stderr, e.g. "pnpm not found on PATH"). */
 export function runDshPlugin(args: string[], env: NodeJS.ProcessEnv = process.env): void {

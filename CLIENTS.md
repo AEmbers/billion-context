@@ -230,8 +230,13 @@ two small node scripts that do the work around the client:
   - **`direct` exemptions:** a provider route declaring `"direct": true` in
     the `providers` table (keyed by upstream URL — see CONFIGURATION.md)
     stays direct; the same exemption any lane can honor.
-  The lane pins its default port (`48789`, `BILI_ZCODE_PORT` to override) so
-  wrappers survive session restarts even without handoff. `BILI_ZCODE_ROUTE`
+  The lane launches its proxy in the self-managed port zone (#1660): zone
+  base `18787`, a per-lane sticky record so a past +1-ladder drift is
+  followed automatically, collisions resolved by the child's +1 ladder,
+  and the shared store rewritten to the live origin on drift — wrappers
+  survive session restarts even without handoff. `BILI_ZCODE_PORT` pins an
+  exact port instead (strict-port: a squatter is refused loudly, no hop).
+  `BILI_ZCODE_ROUTE`
   (`plans`/`none`) is a compat escape hatch, and `BILI_ZCODE_SIGNING_FIXED=1`
   flips the #1621 skips off once a ZCode build ships the signing fix.
 - **Watchdog & lifecycle:** the MCP child probes the proxy every 30 s. In
@@ -276,6 +281,36 @@ two small node scripts that do the work around the client:
   accounts. Pre-3.14 legacy-store clients are unaffected. Inert when
   `BILLION_CONTEXT_PROXY` is set (attach mode owns the proxy) or
   `BILI_PROVIDER_REWRITES` is defined. Opt-out: `BILI_NATIVE_ZCODE=0`.
+
+## Codex (OpenAI Codex CLI)
+
+Codex is the one client a plugin install cannot make self-sufficient. The seam
+matrix explains why: claude has a `SessionStart` hook + managed settings block,
+zcode has a provider store whose `baseURL` can be rewritten — codex has neither.
+Its model traffic routes via environment variables only (`HTTPS_PROXY` /
+`SSL_CERT_FILE` — this is how `bili codex` works); the default
+ChatGPT-login provider has no config-file routing seam, and a managed
+`model_providers` block would force `env_key` API-key auth and **drop the
+subscription login**. An MCP server cannot inject env into its parent process,
+so the plugin can never route codex's own traffic. Three postures:
+
+| Posture | What you get |
+|---|---|
+| `bili codex` (launcher) | Full zero-config: a self-managed lane proxy (#1660 zone, sticky port) + cert-MITM env injected into codex — tools *and* compression |
+| `bili plugin install codex` + a running bili + self-exported `HTTPS_PROXY` | Tools + compression for power users who manage their own env |
+| `bili plugin install codex` alone | The four tools appear in codex but no conversation is proxied, so there is nothing for them to act on; `tools/list` fails with -32003 (`bili proxy unreachable … — start bili or set BILI_MCP_PROXY`) when nothing is reachable |
+
+The install writes a single `[mcp_servers.bili]` block into `~/.codex/config.toml`
+(command = node, args = dist/mcp.js). #1660 removed the install-time origin bake
+(#403: a baked URL went stale after drift/reboot and left the tools pointing at
+a dead port); the shell resolves the proxy at session start — env
+`BILI_MCP_PROXY` > the live-instance record (any lane's proxy, or a
+`bili start` daemon) > the 8787 user-zone default — so a drifted or rebooted
+proxy never strands a dead URL, and the shell simply attaches to whatever is
+alive. Session binding is headless: the launcher passes
+`BILI_CONVERSATION_ID` at spawn time, and the plugin shell binds the next NEW
+session otherwise; per-call `conversation_id` overrides work as everywhere
+(#760).
 
 ## Gemini family (Gemini CLI / iFlow CLI / Qwen Code)
 
@@ -329,7 +364,7 @@ bili only compresses requests whose path matches a known wire protocol (`/chat/c
 
 That outcome is now loud instead of silent (#1290):
 
-- the client-side fetch hook logs each distinct unrouted endpoint once per process (`…is not a recognized model endpoint, so bili did not route it through the proxy…`);
+- the client-side fetch hook logs each distinct unrouted **POST** endpoint once per process (`…is not a recognized model endpoint, so bili did not route it through the proxy…`); non-POST traffic — npm registries, catalog JSONs, git refs — is silent by design (#1657: a GET cannot carry a prompt);
 - `unrecognizedPaths` (per-path counts) in `curl -s http://localhost:8787/__bili/stats` (loopback-only);
 - an `UNRECOGNIZED PATHS (instance-level)` section in `acp_status` output while such requests exist.
 

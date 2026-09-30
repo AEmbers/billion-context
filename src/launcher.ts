@@ -42,9 +42,11 @@ import {
     entryScriptFingerprint,
     isPidAlive,
     isProxyInstanceFile,
+    lanePreferredPort,
     readProxyInstanceFile,
     readStartingMarker,
     removeStartingMarker,
+    writeZonePort,
     type ProxyInstanceFile,
     type ProxyStartingMarker,
 } from "./instance.js";
@@ -252,6 +254,13 @@ export interface LauncherDeps {
      *  construction — tests drive win32 paths from a POSIX host. Defaults
      *  to process.platform. */
     platform?: NodeJS.Platform;
+    /** #1660: zone-port seam for tests. The preferred port a lane'd launch
+     *  tries before the proxy child's +1 ladder (default: the lane's sticky
+     *  record > zone base, instance.ts), and the sticky-settle write
+     *  (default: stateDir()/port-zone.json). Tests inject pure sinks so a
+     *  lane'd fake launch never touches the developer's real zone record. */
+    zonePreferredPort?: (lane: string) => number;
+    writeZonePort?: (lane: string, port: number) => void;
 }
 
 export function isLaunchClient(value: string): value is ClientName {
@@ -2418,19 +2427,29 @@ async function probeHealth(
 export interface HealthInfo {
     ok: boolean;
     instanceId?: string;
+    /** Responder's OS pid from /__bili/health. #1753: the spawn-wait
+     *  fallback uses this to verify the healthy responder on the preferred
+     *  port is the child WE spawned (and not a foreign proxy squatting it). */
+    pid?: number;
     /** #1330: watchdog state from /__bili/health. Absent on pre-#1330 builds —
-     *  unverifiable lifecycle, which the #1335 attach gate treats as unarmed. */
-    watchdog?: { armed: boolean };
+     *  unverifiable lifecycle, which the #1335 attach gate treats as unarmed.
+     *  #1753 (shutdown side): `watchers` is the live watcher-pid set — the
+     *  launcher consults it at client exit so a spawned-but-SHARED instance
+     *  is spared for its remaining owners instead of group-killed. */
+    watchdog?: { armed: boolean; watchers?: number[] };
 }
 
 async function fetchHealthInfoDefault(origin: string): Promise<HealthInfo | undefined> {
     try {
         const res = await fetch(healthUrl(origin), { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
         if (!res.ok) return undefined;
-        const data = (await res.json()) as { ok?: boolean; instanceId?: string; watchdog?: unknown };
+        const data = (await res.json()) as { ok?: boolean; instanceId?: string; pid?: unknown; watchdog?: unknown };
         const info: HealthInfo = { ok: Boolean(data.ok), instanceId: typeof data.instanceId === "string" ? data.instanceId : undefined };
+        if (typeof data.pid === "number") info.pid = data.pid;
         if (data.watchdog && typeof data.watchdog === "object" && typeof (data.watchdog as { armed?: unknown }).armed === "boolean") {
-            info.watchdog = { armed: (data.watchdog as { armed: boolean }).armed };
+            const wd = data.watchdog as { armed: boolean; watchers?: unknown };
+            const watchers = Array.isArray(wd.watchers) ? wd.watchers.filter((w): w is number => typeof w === "number") : undefined;
+            info.watchdog = { armed: wd.armed, watchers };
         }
         return info;
     } catch {
@@ -2538,6 +2557,16 @@ export function attachGateAllows(health: HealthInfo, attachExternal: boolean): b
     return health.watchdog?.armed === true;
 }
 
+/** #1660: the user-sovereignty zone marker — neither a declared lane nor a
+ *  launcher launch token exists only for a manually started `bili start`
+ *  daemon. By definition the user maintains it (they typed the command; it
+ *  has no session lifecycle BY DESIGN, not by drift), so lanes may attach to
+ *  it despite the unarmed watchdog — code-fingerprint and config-shape
+ *  compatibility still apply, and an older build stays incompatible. */
+function isUserZoneInstance(inst: ProxyInstanceFile): boolean {
+    return inst.lane === undefined && inst.launchToken === undefined;
+}
+
 function gateRefusalMessage(inst: ProxyInstanceFile, health: HealthInfo): string {
     const reason = health.watchdog && health.watchdog.armed === false
         ? "it reports NO session-lifecycle watchdog (started without BILI_PARENT_PID, e.g. manual `bili start`)"
@@ -2567,7 +2596,9 @@ function pickAttachable(
         if (opts.strictPort && c.inst.port !== opts.port) { diag?.(`native-attach: skip ${c.inst.origin} (pid ${c.inst.pid}): port mismatch`); continue; }
         // #1335: lifecycle gate — an unarmed (or unverifiable) listener is
         // never an attach target by default; log the refusal once per origin.
-        if (!attachGateAllows(c.health, attachExternal)) {
+        // #1660: a user-zone instance (manual `bili start`) is exempt — the
+        // missing watchdog is the user's deliberate posture, not drift.
+        if (!attachGateAllows(c.health, attachExternal) && !isUserZoneInstance(c.inst)) {
             if (!refusedLog.has(c.inst.origin)) {
                 refusedLog.add(c.inst.origin);
                 console.error(gateRefusalMessage(c.inst, c.health));
@@ -2886,11 +2917,23 @@ export async function ensureProxyRunning(
     // itself and retries on EADDRINUSE, reporting the real origin through
     // the instance file via this launchToken.
     const launchToken = randomUUID();
-    // #446: with no explicit --port the launcher binds an OS-assigned
-    // ephemeral port — its private proxy never squats on 8787, so clients
-    // pointed there only ever reach an explicitly-started `bili start`.
-    // The child's EADDRINUSE retry covers the pick/spawn race.
-    const port = opts.port > 0 ? opts.port : await pickEphemeralPort(opts.host);
+    // #1660: a lane'd launch with no explicit port binds the SELF-MANAGED
+    // ZONE — the lane's sticky port (a past ladder drift it still points at)
+    // else the zone base — instead of an OS-assigned ephemeral. An undeclared
+    // lane (manual `bili start`, the user zone on 8787) keeps the ephemeral
+    // default. The child's EADDRINUSE +1 ladder covers the pick/spawn race
+    // AND a squatted preferred port (zero-config resolution: the lane lands
+    // on base+1 and records it sticky; #1660).
+    const zoneLane = opts.lane !== undefined && opts.port <= 0 ? opts.lane : undefined;
+    const preferredPort = deps?.zonePreferredPort ?? lanePreferredPort;
+    const port = opts.port > 0
+        ? opts.port
+        : zoneLane !== undefined
+          ? preferredPort(zoneLane)
+          : await pickEphemeralPort(opts.host);
+    const settleZonePort = (settled: number): void => {
+        if (zoneLane !== undefined) (deps?.writeZonePort ?? writeZonePort)(zoneLane, settled);
+    };
     if (!script) throw new Error("bili: cannot resolve launcher script path");
     const logPath = path.join(os.tmpdir(), `bili-proxy-${port}.log`);
     const logFd = fs.openSync(logPath, "a");
@@ -2975,6 +3018,9 @@ export async function ensureProxyRunning(
         // emits 'error', not 'exit'. Unhandled, it becomes an uncaughtException
         // that kills the host process; capture it so we fail fast with the cause.
         let childError: unknown;
+        // #1753: announce a healthy-but-foreign responder on the preferred port
+        // at most once — silence would hide exactly the misroute this fix closes.
+        let squatterAnnounced = false;
         child.on?.("exit", (...rest: unknown[]) => {
             childExit = {
                 code: typeof rest[0] === "number" ? rest[0] : null,
@@ -2992,6 +3038,10 @@ export async function ensureProxyRunning(
             const inst = readInstance();
             if (isProxyInstanceFile(inst) && inst.launchToken === launchToken) {
                 if (await probeHealth(inst.origin, fetchImpl)) {
+                    // #1660: settle the lane's sticky record on the port the
+                    // child actually bound (preferred or laddered) so every
+                    // later launch of this lane tries it first.
+                    settleZonePort(inst.port);
                     return { origin: inst.origin, port: inst.port, child, logPath };
                 }
                 continue;
@@ -3001,9 +3051,27 @@ export async function ensureProxyRunning(
             // origin when NO record vouches for it — a LIVE record's owner owns
             // the discovery surface and our child is retry-binding elsewhere.
             // A stale record (dead pid / legacy plain) cannot vouch for anything.
+            // #1753: "healthy on the preferred port" alone is NOT proof the
+            // responder is our child — a foreign proxy can be squatting exactly
+            // that port (which is WHY our child laddered away). Verify the
+            // responder's pid matches the spawned child before exporting its
+            // origin to the client; otherwise keep waiting for the launchToken
+            // handshake instead of pinning the client to an instance the attach
+            // gate (#1225) itself would have rejected.
             const stale = !isProxyInstanceFile(inst) || !isPidAlive(inst.pid);
-            if (stale && (await probeHealth(proxyOrigin(opts.host, port), fetchImpl))) {
-                return { origin: proxyOrigin(opts.host, port), port, child, logPath };
+            if (stale) {
+                const preferredOrigin = proxyOrigin(opts.host, port);
+                const info = await fetchHealthInfo(preferredOrigin);
+                if (info?.ok && child.pid !== undefined && info.pid === child.pid) {
+                    settleZonePort(port);
+                    return { origin: preferredOrigin, port, child, logPath };
+                }
+                if (info?.ok && !squatterAnnounced) {
+                    squatterAnnounced = true;
+                    console.error(
+                        `bili: port ${port} answers health${info.pid !== undefined ? ` (pid ${info.pid})` : ""} but is not the proxy this launcher spawned (child pid ${child.pid ?? "?"}) — waiting for the spawned instance to report its real origin`,
+                    );
+                }
             }
         }
         if (childError !== undefined) {
@@ -3042,6 +3110,46 @@ export function stopProxy(handle: ProxyHandle): void {
     try {
         child.kill?.();
     } catch {}
+}
+
+/** #1753 (shutdown side): the wrapper's exit path used to kill the instance
+ *  it spawned unconditionally — taking down every ATTACHED session riding
+ *  that shared instance (live incident: exiting one `bili pi` killed the
+ *  proxy another live `bili pi` was watching; the client burned its 3
+ *  retries and died until some later wrapper re-spawned an instance on the
+ *  same port). The server's watcher-set watchdog (#7) already implements
+ *  the correct "die when the LAST owner exits" semantics; this guard defers
+ *  to it: if /__bili/health still lists watchers other than ourselves, the
+ *  instance is spared and the server retires it after its last watcher
+ *  leaves (WATCHER_IDLE_GRACE_MS). Health-parse failures degrade to the old
+ *  behavior (kill), which is safe: nothing else claims the instance. */
+export async function stopProxyGuarded(
+    handle: ProxyHandle,
+    fetchHealthInfo: (origin: string) => Promise<HealthInfo | undefined>,
+): Promise<void> {
+    if (handle.attached) return;
+    const child = handle.child;
+    if (!child || child.pid === undefined) return;
+    if (process.platform === "win32") {
+        // #414: POSIX-only kill path; win32 relies on the server-side
+        // parent-gone watchdog, which already honors the watcher set.
+        return;
+    }
+    let info: HealthInfo | undefined;
+    try {
+        info = await fetchHealthInfo(handle.origin);
+    } catch {
+        info = undefined;
+    }
+    const watchers = info?.ok ? (info.watchdog?.watchers ?? []) : [];
+    const others = watchers.filter((w) => w !== process.pid);
+    if (others.length > 0) {
+        console.error(
+            `bili: sparing the shared proxy at ${handle.origin} — ${others.length} other watcher${others.length === 1 ? "" : "s"} still attached; it will retire when the last one exits`,
+        );
+        return;
+    }
+    stopProxy(handle);
 }
 
 /** #679: quote one token for cmd.exe's line parser. Only whitespace-bearing
@@ -3778,7 +3886,7 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
         console.error(`bili: failed to launch ${params.client}: ${err instanceof Error ? err.message : String(err)}`);
         code = 1;
     } finally {
-        stopProxy(handle);
+        await stopProxyGuarded(handle, deps.fetchHealthInfo ?? fetchHealthInfoDefault);
         if (gooseOverlay) {
             try {
                 finalizeGooseHome(gooseOverlay);
@@ -3847,7 +3955,7 @@ export async function runTestPi(params: RunTestPiParams, deps: LauncherDeps = {}
         console.error(`bili: pi test failed: ${err instanceof Error ? err.message : String(err)}`);
         code = 1;
     } finally {
-        stopProxy(handle);
+        await stopProxyGuarded(handle, deps.fetchHealthInfo ?? fetchHealthInfoDefault);
     }
     process.exit(code ?? 0);
 }
