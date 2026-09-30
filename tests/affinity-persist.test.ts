@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { PrefixAffinityResolver, prefixAffinity } from "../src/prefix-affinity.ts";
+import { PrefixAffinityResolver, prefixAffinity, MAX_TRACKED_SESSIONS, TTL_MS } from "../src/prefix-affinity.ts";
 import { flushPrefixAffinity, hydratePrefixAffinity } from "../src/affinity-persist.ts";
 
 let tmp: string;
@@ -106,4 +106,44 @@ test("merge keeps the deeper disk copy when our in-memory snapshot is stale (#17
     flushPrefixAffinity();
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { entries: { depth: number }[] };
     assert.equal(parsed.entries[0].depth, mine.depth + 2, "fresher disk copy not rolled back by our stale write");
+});
+
+test("writeSnapshot re-applies the store's bounds to the union (TTL + LRU cap) (#1724)", () => {
+    const a = prefixAffinity.resolve(messages(7));
+    assert.ok(a);
+    prefixAffinity.note(a.sessionId, a.incomingDepth, a.tailHash, a.itemHashes);
+
+    const now = Date.now();
+    const pads: unknown[] = [];
+    for (let i = 0; i < MAX_TRACKED_SESSIONS + 50; i++) {
+        pads.push({ sessionId: `pfa-pad-${i}`, depth: 3, tailHash: `t${i}`, itemHashes: ["h"], lastSeen: now - (i + 1) * 1000 });
+    }
+    pads.push({ sessionId: "pfa-expired", depth: 3, tailHash: "te", itemHashes: ["h"], lastSeen: now - TTL_MS - 60_000 });
+    const file = path.join(tmp, "billion-context", "prefix-affinity.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ version: 1, entries: pads }));
+
+    flushPrefixAffinity();
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { entries: { sessionId: string }[] };
+    const ids = new Set(parsed.entries.map((e) => e.sessionId));
+    assert.ok(ids.has(a.sessionId), "our own chain survives the capped write");
+    assert.ok(!ids.has("pfa-expired"), "TTL-expired disk entries are pruned at write time");
+    assert.ok(!ids.has(`pfa-pad-${MAX_TRACKED_SESSIONS + 49}`), "oldest disk-only chains are LRU-capped at write time");
+    assert.equal(parsed.entries.length, MAX_TRACKED_SESSIONS, "file stays bounded at the tracked-chain cap instead of growing per churned chain");
+});
+
+test("a malformed disk entry cannot win a same-depth merge or persist (#1724)", () => {
+    const a = prefixAffinity.resolve(messages(6));
+    assert.ok(a);
+    prefixAffinity.note(a.sessionId, a.incomingDepth, a.tailHash, a.itemHashes);
+    const file = path.join(tmp, "billion-context", "prefix-affinity.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ version: 1, entries: [{ sessionId: a.sessionId, depth: a.incomingDepth, tailHash: "deadbeef" }] }));
+
+    flushPrefixAffinity();
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { entries: { tailHash: string; itemHashes: string[] }[] };
+    const ours = parsed.entries.find((e) => e.tailHash === a.tailHash);
+    assert.ok(ours, "the corrupt same-depth copy is rejected, our valid chain is written back");
+    assert.ok(Array.isArray(ours.itemHashes) && ours.itemHashes.every((h) => typeof h === "string"));
+    assert.ok(!parsed.entries.some((e) => e.tailHash === "deadbeef"), "corrupt entry does not persist on disk");
 });
