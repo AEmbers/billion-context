@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { prefixAffinity, type AffinitySnapshotEntry, MAX_TRACKED_SESSIONS, TTL_MS } from "./prefix-affinity.js";
+import { prefixAffinity, type AffinitySnapshotEntry, MAX_TRACKED_SESSIONS } from "./prefix-affinity.js";
 import { stateDir } from "./paths.js";
 import { log } from "./logger.js";
 
@@ -9,7 +9,7 @@ import { log } from "./logger.js";
  * pure in-memory (#309), so a proxy restart orphaned every anonymous session:
  * the next replay forked a fresh session with zero compression state and
  * resent the raw history (#351 — 458K tokens, 0% cache). The chains are
- * small (≤256 sessions × ≤128 hashes); persist them to the state dir with a
+ * small (≤1024 sessions × ≤128 hashes); persist them to the state dir with a
  * debounced atomic write and hydrate on boot.
  */
 
@@ -70,15 +70,13 @@ function mergeWithDisk(
 }
 
 /** The union is monotonic (nothing removes disk-only chains), so without
- *  re-applying the store's own bounds the file would grow one entry per
+ *  re-applying the store's own bound the file would grow one entry per
  *  chain that churns through the LRU cap over a process's lifetime. Mirror
- *  importSnapshot's read-time hygiene on the write path: drop TTL-expired
- *  chains and keep at most MAX_TRACKED_SESSIONS, most-recently-seen first. */
+ *  the store's semantics on the write path (#1724 permanence: chains never
+ *  expire with time — only the LRU cap applies, most-recently-seen first). */
 function normalizeForWrite(entries: AffinitySnapshotEntry[]): AffinitySnapshotEntry[] {
-    const now = Date.now();
-    const live = entries.filter((e) => now - e.lastSeen <= TTL_MS);
-    if (live.length <= MAX_TRACKED_SESSIONS) return live;
-    return [...live].sort((a, b) => b.lastSeen - a.lastSeen).slice(0, MAX_TRACKED_SESSIONS);
+    if (entries.length <= MAX_TRACKED_SESSIONS) return entries;
+    return [...entries].sort((a, b) => b.lastSeen - a.lastSeen).slice(0, MAX_TRACKED_SESSIONS);
 }
 
 function writeSnapshot(): void {
