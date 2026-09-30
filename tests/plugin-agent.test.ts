@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmrf } from "./tmp-rm.ts";
 
 process.env.NODE_ENV = "test";
 
@@ -1584,12 +1585,16 @@ test("plugin install/remove roundtrips for pi/omp/codex/opencode under a fake HO
         assert.match(pluginInstall("codex"), /installed/);
         const toml = fs.readFileSync(path.join(home, "config.toml"), "utf8");
         assert.match(toml, /\[mcp_servers\.bili\]\ncommand = /);
-        assert.match(toml, /BILI_MCP_PROXY = "http:\/\/127\.0\.0\.1:8787"/);
+        // #1660: no baked origin — the MCP shell discovers the live proxy at
+        // startup (env > instance file > 8787), so the block cannot go stale.
+        assert.doesNotMatch(toml, /BILI_MCP_PROXY/);
         fs.writeFileSync(path.join(home, "config.toml"), toml + "\n[mcp_servers.other]\ncommand = \"x\"\n");
         assert.match(pluginInstall("codex"), /already installed/);
-        fs.writeFileSync(path.join(home, "config.toml"), fs.readFileSync(path.join(home, "config.toml"), "utf8").replace("8787", "9999"));
+        // a user-tampered command (their own node path) is not canonical →
+        // refreshed back to the current canonical block
+        fs.writeFileSync(path.join(home, "config.toml"), fs.readFileSync(path.join(home, "config.toml"), "utf8").replace(JSON.stringify(process.execPath), JSON.stringify("/tampered/node")));
         assert.match(pluginInstall("codex"), /refreshed/);
-        assert.match(fs.readFileSync(path.join(home, "config.toml"), "utf8"), /BILI_MCP_PROXY = "http:\/\/127\.0\.0\.1:8787"/);
+        assert.doesNotMatch(fs.readFileSync(path.join(home, "config.toml"), "utf8"), /tampered/);
         assert.match(pluginRemove("codex"), /removed/);
         const tomlAfter = fs.readFileSync(path.join(home, "config.toml"), "utf8");
         assert.doesNotMatch(tomlAfter, /mcp_servers\.bili/);
@@ -1606,8 +1611,8 @@ test("plugin install/remove roundtrips for pi/omp/codex/opencode under a fake HO
         assert.match(tomlEdge, /\[mcp_servers\.other\]\ncommand = "x"\n/);
 
         // #638: a malformed block (args as string - legal TOML, invalid codex
-        // schema) with a matching origin must NOT short-circuit to "already
-        // installed"; reinstall must self-heal it to the canonical block.
+        // schema). Legacy blocks carried a baked env origin — the heal must
+        // drop it, not preserve it (#1660).
         const selfRoot = path.dirname(path.dirname(path.resolve("src/plugin-install.ts")));
         const malformed = `[mcp_servers.other]\ncommand = "x"\n[mcp_servers.bili]\ncommand = "node"\nargs = '[\"${path.join(selfRoot, "dist", "mcp.js")}\"]'\nenv = { BILI_MCP_PROXY = "http://127.0.0.1:8787" }\n`;
         fs.writeFileSync(path.join(home, "config.toml"), malformed);
@@ -1616,6 +1621,7 @@ test("plugin install/remove roundtrips for pi/omp/codex/opencode under a fake HO
         const tomlHealed = fs.readFileSync(path.join(home, "config.toml"), "utf8");
         assert.match(tomlHealed, /args = \[/);
         assert.doesNotMatch(tomlHealed, /args = '\[/);
+        assert.doesNotMatch(tomlHealed, /BILI_MCP_PROXY/, "legacy baked origin dropped on heal (#1660)");
         assert.match(tomlHealed, /\[mcp_servers\.other\]\ncommand = "x"\n/);
         // A now-canonical block stays "already installed" on rerun.
         assert.match(pluginInstall("codex"), /already installed/);
@@ -1668,7 +1674,7 @@ test("plugin install/remove roundtrips for pi/omp/codex/opencode under a fake HO
         assert.equal(rows.length, 9);
         assert.deepEqual(PLUGIN_AGENTS, ["pi", "omp", "claude", "codex", "opencode", "dsh", "kimi", "hermes", "zcode"]);
     });
-    fs.rmSync(home, { recursive: true, force: true });
+    rmrf(home);
 });
 
 test("plugin install opencode without a live proxy: MCP shell skipped, native plugin still installed (#820)", async () => {
@@ -1694,7 +1700,7 @@ test("plugin install opencode without a live proxy: MCP shell skipped, native pl
             assert.equal(after.compaction, undefined);
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -1744,7 +1750,7 @@ test("plugin install opencode replaces legacy opencode-acp entries — array and
             assert.equal(msg.includes("other-plugin"), false);
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -1770,7 +1776,7 @@ test("plugin install/remove/status survive a non-object mcp in opencode.json (#8
             assert.equal(pluginStatusAll().find((r) => r.agent === "opencode")?.status, "not installed");
         });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -1843,7 +1849,7 @@ test("omp plugin: scoped matching, existence check, overlay redirect (issue #392
     } finally {
         if (createdOmpDist) fs.rmSync(ompDistFile, { force: true });
     }
-    fs.rmSync(home, { recursive: true, force: true });
+    rmrf(home);
 });
 
 test("resolveProxyOrigin discovers the running proxy via the state file", async () => {
@@ -1859,7 +1865,7 @@ test("resolveProxyOrigin discovers the running proxy via the state file", async 
     await withEnv({ XDG_STATE_HOME: state, BILI_MCP_PROXY: "http://10.0.0.5:9000" }, () => {
         assert.equal(resolveProxyOrigin(), "http://10.0.0.5:9000");
     });
-    fs.rmSync(state, { recursive: true, force: true });
+    rmrf(state);
 });
 
 test("plugin install refuses to touch broken or non-object configs", async () => {
@@ -1882,7 +1888,7 @@ test("plugin install refuses to touch broken or non-object configs", async () =>
         fs.writeFileSync(path.join(ocDir, "opencode.json"), "nope{");
         assert.throws(() => pluginInstall("opencode"), /not valid JSON/);
     });
-    fs.rmSync(home, { recursive: true, force: true });
+    rmrf(home);
 });
 
 // #836 (found in #809 N4): a non-object `mcp` (e.g. bare string) made
@@ -1917,7 +1923,7 @@ test("plugin opencode survives a non-object mcp (issue #836 / #809 N4)", async (
         assert.deepEqual(data[ocKey], [path.join(ocDir, "plugins", "billion-context")]);
         assert.deepEqual(data.compaction, { auto: false });
     });
-    fs.rmSync(home, { recursive: true, force: true });
+    rmrf(home);
 });
 
 // #839 (found while reviewing #837): same bug class as #836 on the claude side
@@ -1937,7 +1943,7 @@ test("plugin claude survives a non-object mcpServers (issue #839)", async () => 
         assert.equal(pluginStatusAll().find((r) => r.agent === "claude")!.status, "not installed");
         assert.equal(fs.readFileSync(cFile, "utf8"), malformed);
     });
-    fs.rmSync(home, { recursive: true, force: true });
+    rmrf(home);
 });
 
 test("plugin list survives a broken host config (per-row error, no crash)", async () => {
@@ -1955,7 +1961,7 @@ test("plugin list survives a broken host config (per-row error, no crash)", asyn
         const pi = rows.find((r) => r.agent === "pi")!;
         assert.equal(pi.status, "not installed");
     });
-    fs.rmSync(home, { recursive: true, force: true });
+    rmrf(home);
 });
 
 test("mcp forwardTool times out against a hanging proxy", async () => {
