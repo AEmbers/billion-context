@@ -39,7 +39,7 @@ import { createWriteStream, fstatSync, mkdirSync, statSync, renameSync, unlinkSy
 import path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { VERSION } from "./version.js";
-import { redactSecretsInText } from "./log-mask.js";
+import { maskIpsInText, redactSecretsInText } from "./log-mask.js";
 
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB → rotate
 
@@ -235,7 +235,7 @@ export const log: Logger = (level, msg) => {
             // best-effort: a broken test/probe sink must never crash logging
         }
     }
-    const safe = redactSecretsInText(msg);
+    const safe = maskIpsInText(redactSecretsInText(msg));
     const ts = new Date().toISOString();
     const sess = sessionCtx.getStore();
     const head = `${ts} [${level}]${sess ? ` [sess=${sess}]` : ""} [v=${VERSION}]`;

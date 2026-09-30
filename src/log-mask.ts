@@ -131,6 +131,48 @@ export function maskHostInText(text: string, host: string): string {
     return text;
 }
 
+// Canonical compressed/full IPv6 grammar — used to VALIDATE colon-run
+// candidates so clocks ("12:34:56"), MACs ("aa:bb:cc:dd:ee:ff") and version
+// strings never match.
+const STRICT_IPV6_RE = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,7}:$|^(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}$|^(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}$|^(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}$|^[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}$|^:(?::[0-9a-fA-F]{1,4}){1,7}$|^::$/;
+
+function isIpv4Literal(s: string): boolean {
+    const parts = s.split(".");
+    return parts.length === 4 && parts.every((p) => p.length >= 1 && p.length <= 3 && /^\d+$/.test(p) && Number(p) <= 255 && !(p.length > 1 && p[0] === "0"));
+}
+
+function isLoopbackIp(ip: string): boolean {
+    return ip === "::1" || ip === "0:0:0:0:0:0:0:1" || ip === "0.0.0.0" || ip.startsWith("127.");
+}
+
+/**
+ * Sink-level safety net (#1718): scrub non-loopback IP literals out of
+ * arbitrary log text. undici/OS error messages embed the dialed endpoint
+ * verbatim ("connect ETIMEDOUT 203.0.113.5:8443"), and per-site masking only
+ * swaps the TARGET hostname's forms — a resolved IP or an IP-literal endpoint
+ * still leaks through the generic catch-all. Applied at the logger choke point
+ * alongside redactSecretsInText(). Gated by the same maskHostsEnabled switch
+ * as host masking (IPs are host identity, not credentials): operators who set
+ * BILI_LOG_MASK_HOSTS=0 to see real endpoints keep seeing real IPs. Ports are
+ * preserved (matches maskHostPortForLog). Loopback (127.*, ::1, 0.0.0.0) is
+ * exempt — it identifies bili's own local proxy, not an external party.
+ */
+export function maskIpsInText(text: string): string {
+    if (!text || !maskHostsEnabled) return text;
+    // Bracketed IPv6 (URL/socket form): [2001:db8::1]:8443 -> [<private-host>]:8443
+    text = text.replace(/\[((?:[0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}|::+)\]/g, (m, inner: string) =>
+        isLoopbackIp(inner.replace(/^:+|:+$/g, "") === "" ? "::" : inner) ? m : `[${PRIVATE_HOST}]`);
+    // Bare IPv6: extract hex+colon runs, validate against the strict grammar.
+    text = text.replace(/(?<![0-9a-zA-Z])([0-9a-fA-F:]{2,45})(?![0-9a-fA-F])/g, (m, run: string) => {
+        if (!run.includes(":") || !STRICT_IPV6_RE.test(run)) return m;
+        return isLoopbackIp(run) ? m : PRIVATE_HOST;
+    });
+    // Bare IPv4: validate octets (rejects "10.0.19045.3209"-style version strings).
+    text = text.replace(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g, (m, ip: string) =>
+        isIpv4Literal(ip) && !isLoopbackIp(ip) ? PRIVATE_HOST : m);
+    return text;
+}
+
 /**
  * Sink-level safety net (#1718): scrub credential-shaped tokens out of
  * arbitrary log text. Per-call-site structural masking (maskHeaderForLog,

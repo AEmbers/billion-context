@@ -21,6 +21,7 @@ import {
     maskHostForLog,
     maskHostInText,
     maskHostPortForLog,
+    maskIpsInText,
     maskUrlForLog,
     maskUrlsInText,
     redactSecretsInText,
@@ -478,6 +479,30 @@ test("redactSecretsInText: scrubs credential-shaped tokens from free-form text (
         "",
     ];
     for (const s of negatives) assert.equal(redactSecretsInText(s), s, `must stay verbatim: ${s}`);
+});
+
+test("maskIpsInText: non-loopback IP literals scrubbed from free-form text (#1718)", () => {
+    assert.equal(maskIpsInText("connect ETIMEDOUT 203.0.113.5:8443"), "connect ETIMEDOUT <private-host>:8443");
+    assert.equal(maskIpsInText("upstream refused 192.168.1.50:443 after 3 retries"), "upstream refused <private-host>:443 after 3 retries");
+    assert.equal(maskIpsInText("peer 2001:db8:0:0:0:0:2:1 seen"), "peer <private-host> seen");
+    assert.equal(maskIpsInText("connect ECONNREFUSED [2001:db8::1]:8443"), "connect ECONNREFUSED [<private-host>]:8443");
+    const negatives = [
+        "local proxy http://127.0.0.1:8787 ok",
+        "loopback ::1 and [::1]:8080 stay",
+        "bind 0.0.0.0:8787",
+        "build 10.0.19045.3209 unchanged",
+        "time 12:34:56 unchanged",
+        "mac aa:bb:cc:dd:ee:ff unchanged",
+        "999.1.1.1 bad octet unchanged",
+        "",
+    ];
+    for (const s of negatives) assert.equal(maskIpsInText(s), s, `must stay verbatim: ${s}`);
+    setMaskHostsEnabled(false);
+    try {
+        assert.equal(maskIpsInText("203.0.113.5:8443"), "203.0.113.5:8443", "BILI_LOG_MASK_HOSTS=0 opt-out must keep real IPs");
+    } finally {
+        setMaskHostsEnabled(true);
+    }
 });
 
 test("logger sink: file lines scrubbed, capture hook stays raw (#1718)", async () => {
