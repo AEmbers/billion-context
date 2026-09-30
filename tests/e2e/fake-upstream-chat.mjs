@@ -137,7 +137,7 @@ function answerFor(convKey, firstUserText, body) {
     const isTitleCall =
         messages.some((m) => m?.role === "system" && /title generator/i.test(stripAcps(flatContent(m.content)))) ||
         users.some((u) => /^generate a title\b/i.test(stripAcps(flatContent(u.content)).trim()));
-    if (isTitleCall) return { content: "e2e-title", queueIdx: -1 };
+    if (isTitleCall) return { content: "e2e-title", queueIdx: -1, title: true };
     const lastUserText = users.length > 0 ? flatContent(users[users.length - 1].content) : firstUserText;
     let sourceText = lastUserText;
     if (parseDirectives(lastUserText).length === 0 && users.length > 1) {
@@ -212,6 +212,10 @@ const server = http.createServer((req, res) => {
                         toolArgs: reply.toolArgs ?? null,
                         lastUser: firstUserText.slice(0, 120),
                         lastUserRef: lastUserRefMatch ? lastUserRefMatch[1] : null,
+                        // #1699: title side-channel marker — after the fix these
+                        // rows route VERBATIM (no ref tags, no injected tools),
+                        // so suites must not mistake them for main turns.
+                        title: reply.title === true,
                     }) + "\n");
                 } catch { /* noop */ }
                 if (parsed.stream) {

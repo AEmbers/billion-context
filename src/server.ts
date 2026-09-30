@@ -109,7 +109,7 @@ import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConver
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
-import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, isPluginFoldCallId, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
+import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, isPluginFoldCallId, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRequestAgentHeader, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
 import { evaluateChain, extractChainCarriers, stampOutbound, stripEmbeddedChainCarriers } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
@@ -2361,7 +2361,11 @@ async function handle(
         // the #460 render-tag strip pipes still run (response hygiene), while
         // preflight / fake-completion retry / the loop / usage sniffing are all
         // skipped. processedMessages stays empty so the loop can never engage.
-        if (!countTokens && !responsesCompact && protocol !== null && isSideRequest(parsed)) {
+        // #1699: opencode v2 title-gen requests carry no max_tokens, so the budget
+        // heuristic alone misses them. The host stamps its per-request persona id
+        // (x-bili-plugin-agent); a known side-request agent routes verbatim by intent.
+        const requestAgent = pluginRequestAgentHeader(req.headers);
+        if (!countTokens && !responsesCompact && protocol !== null && isSideRequest(parsed, requestAgent)) {
             // #554: the passthrough below skips EVERY input-side guard by design
             // (#388) — a full-history side request over the window is a
             // guaranteed upstream 400 (and title-gen/probe clients re-issue it,
@@ -2392,7 +2396,7 @@ async function handle(
                 logRequestCost(log, session.id, inboundMsgs, inboundBytes, reqT0);
                 return;
             }
-            log("info", `[${session.id}] side request (max_tokens<=${SIDE_REQUEST_MAX_TOKENS}) → passthrough + tag strip only, kernel state untouched`);
+            log("info", `[${session.id}] side request (${requestAgent !== undefined ? `agent=${requestAgent}` : `max_tokens<=${SIDE_REQUEST_MAX_TOKENS}`}) → passthrough + tag strip only, kernel state untouched`);
             const sideBody = scrubAnthropicPck(protocol, bodyBuffer, log);
             const sidePrepared: Prepared = {
                 body: sideBody,
