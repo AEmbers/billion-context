@@ -21,6 +21,15 @@ hook 附着前先探测候选者的 `/__bili/health`:armed → 附着并注册 w
 
 附着发现在**所有**存活实例间是 lane 感知的(#1232):启动器探测实例注册表里的每一条存活记录,而不只是单个实例文件(last-writer-wins —— 并发多客户端下它可能指向别的客户端的代理),并对每个候选应用上面的门禁。兼容候选中,lane 与启动器自身声明一致的最新实例胜出;未声明 lane 的实例(用户主权区守护进程)在 lane 轴上通配,且门禁默认豁免(#1660)。`another bili instance is running` 告警(#394)也是 lane 感知的:同 lane 或无 lane 共存时触发,两个*不同声明* lane 之间保持沉默(它们的会话文件互不相交)。
 
+## 共享 state 目录与多实例安全边界(#394、#1724)
+
+同一台 host 上的每个 bili 实例读写的是**同一个** state 目录(`~/.local/state/billion-context/` —— sessions、CCR content-store、prefix-affinity、实例注册表)。控制面是 lane 感知的(#1232:附着发现与 #394 共存告警都尊重已声明 lane),但**数据面没有分区** —— 既无按会话的属主,也无按 lane 的磁盘隔离。由此带来两个后果:
+
+- **跨实例会话可见。** 每个实例的 Web UI(`__bili/sessions` list / detail / logs)都会重新扫描整个共享存储,因此任何经回环可达的实例都能枚举并读取*任意*会话 —— 原始报文、content-store 载荷、压缩块 —— 无论它由该 host 上哪个其他实例/lane 创建。
+- **重启 drain 竞态。** 重启时新进程在旧进程完成 flush 之前就 hydrate 了存储,last-writer-wins 可能丢掉旧进程的最终写入:tail 更新丢失,以及 provider 前缀缓存击穿(出站 body 与 provider 已缓存的前缀分叉)。#1724 已落地的缓解:#405 快照计数器守卫(拒绝陈旧会话写入)、prefix-affinity union-on-write 守卫(一个实例的 flush 永不覆盖兄弟 chain)、#811 自重启顺序修复(durable state 在替换进程 spawn 之前落盘)。host 驱动的重启(dsh 等,#991)仍依赖这些数据层守卫,因为其 kill/spawn 顺序不受 bili 控制。
+
+**安全边界:** 共享 state 面目前**仅**由管理端点的回环门禁(非回环源地址被拒绝)+ 用户 home/state 目录的文件系统权限保护 —— 没有按会话的鉴权。对**单用户 host** 这已足够。对**多用户 host** 则不够:任何能触达代理回环端口的本地账户都能读取所有用户的所有会话。这类 host 必须给 state 目录分区(按用户/按 lane 子目录)—— 即 #1724 指出的根因修复(direction #1),目前仍作为架构决策开放;Web UI scoping(#1724 direction #4)能减少跨实例浏览,但不改变这一边界。
+
 ## Runtime-info 协议(#955)
 
 原生插件就在客户端进程里,因此能读到客户端自己将要使用的模型配置。它通过两个通道把真相推给代理,代理在上下文窗口解析链里优先采用它而不是 models.dev 注册表/内置表:
