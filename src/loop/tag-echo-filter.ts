@@ -57,7 +57,12 @@ const NAME = ACP_NAME_ALT;
 // Opening-tag attrs are bounded: a render tag opening is short (tokens + type,
 // \x3c 50 chars). An unbounded \x3c<name> …\x3e match would swallow a long prose span
 // that merely starts with a tag head and contains a \x3e somewhere later.
-const PAIRED = new RegExp("\x3c" + NAME + "\\s[^<>]{0,256}>([^<>]{0,64})\x3c\\/" + NAME + ">");
+// A render tag wraps exactly one bare ref: the kernel emits <acp tokens="…"
+// type="…">mNNNNN</acp> and nothing else between the tags (#1720). Content that
+// is not a ref is prose wearing tags — the tags go, the content stays. No g
+// flag: createTagEchoFilter drives it with exec() on a sliding buffer.
+const PAIRED = new RegExp("\x3c" + NAME + "\\s[^<>]{0,256}>(\\s*m\\d{4,}\\s*)\x3c\\/" + NAME + ">");
+const REF_LIKE = /^\s*m\d{4,}\s*$/;
 const LONE_OPEN = new RegExp("\x3c" + NAME + "(?:\\s[^<>]{0,256})?>");
 const LONE_CLOSE = new RegExp("\x3c\\/" + NAME + "(?=[\\s>])[^<>]{0,32}>");
 // A suffix of the buffer that could still grow into a render tag: either an
@@ -102,14 +107,18 @@ const IMITATION_SWALLOW_CAP = 4096;
  *  tag in s, or -1. #673: the close name may be a typo variant; termination
  *  still requires the strict \x3e right after the name — malformed closes are
  *  LONE_CLOSE's job, not the swallow terminator's. */
-function looseCloseEnd(s: string): number {
+function looseCloseSpan(s: string): { start: number; end: number } | null {
     let idx = s.indexOf(CLOSE_HEAD);
     while (idx >= 0) {
         const m = CLOSE_NAME_ANCHORED.exec(s.slice(idx + 2));
-        if (m && s[idx + 2 + m[0].length] === ">") return idx + 2 + m[0].length + 1;
+        if (m && s[idx + 2 + m[0].length] === ">") return { start: idx, end: idx + 2 + m[0].length + 1 };
         idx = s.indexOf(CLOSE_HEAD, idx + 1);
     }
-    return -1;
+    return null;
+}
+function looseCloseEnd(s: string): number {
+    const span = looseCloseSpan(s);
+    return span === null ? -1 : span.end;
 }
 
 /** The span of one wrapped-turn imitation in `s`: where it starts, and the span
@@ -508,12 +517,22 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void): TagEcho
         for (;;) {
             if (swallowUntilClose) {
                 const combined = swallowed + buf;
-                const end = looseCloseEnd(combined);
-                if (end >= 0) {
-                    drop(combined.slice(0, end));
+                const span = looseCloseSpan(combined);
+                if (span !== null) {
+                    // Only a ref-shaped body is tag content (#1720): a prose
+                    // body between paired tags is released and just the close
+                    // goes. An attested imitation (swallowReleases=false)
+                    // discards whatever the body is.
+                    const inner = combined.slice(0, span.start);
+                    if (REF_LIKE.test(inner) || !swallowReleases) {
+                        drop(combined.slice(0, span.end));
+                    } else {
+                        out += inner;
+                        drop(combined.slice(span.start, span.end));
+                    }
                     swallowed = "";
                     swallowUntilClose = false;
-                    buf = combined.slice(end);
+                    buf = combined.slice(span.end);
                     continue;
                 }
                 if (combined.length > swallowLimit) {

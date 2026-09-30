@@ -74,13 +74,24 @@ test("stripAcpTags removes paired render tags with their ref", () => {
     assert.equal(stripAcpTags(`before ${TAG("m00155")} after`), "before  after");
 });
 
+test("stripAcpTags keeps prose between paired tags and strips only the tags (#1720)", () => {
+    const Z = "Z".repeat(30);
+    assert.equal(stripAcpTags(`${OPEN}tokens="1" type="text">${Z}${CLOSE}`), Z);
+    assert.equal(stripAcpTags(`${OPEN}tokens="1" type="text">\n正文段落\n${CLOSE}`), "\n正文段落\n");
+    assert.equal(stripAcpTags(`${OPEN}tokens="1" type="text">这是什么东西${CLOSE}`), "这是什么东西");
+});
+
+test("stripAcpTags still strips whitespace-padded ref echoes (#1720)", () => {
+    assert.equal(stripAcpTags(`before ${OPEN}tokens="1" type="text"> m00123 ${CLOSE} after`), "before  after");
+});
+
 test("stripAcpTags removes lone open/close tags", () => {
     assert.equal(stripAcpTags(`a ${OPEN}tokens="1"> tail`), "a  tail");
     assert.equal(stripAcpTags(`x ${CLOSE} y`), "x  y");
 });
 
 test("stripAcpTags leaves underscore trigger tags intact", () => {
-    const s = `${LT}acp_compress${LT}/acp_compress${OPEN}x="">ref${CLOSE}`;
+    const s = `${LT}acp_compress${LT}/acp_compress${OPEN}x="">m00123${CLOSE}`;
     assert.equal(stripAcpTags(s), `${LT}acp_compress${LT}/acp_compress`);
 });
 
@@ -165,6 +176,10 @@ test("streaming filter matches stripAcpTags for every split position", () => {
         `mixed ${LT}acp tokens="36" type="text"\x3em00473${LT}/acip\x3e tail`,
         `rev ${LT}apic tokens="9" type="text"\x3em001${LT}/acp\x3e tail`,
         `safe #include ${LT}acpi/acpi.h\x3e and ${LT}caption\x3ex${LT}/caption\x3e ${LT}app id="1"\x3erun${LT}/app\x3e`,
+        `${OPEN}tokens="1" type="text">${"Z".repeat(30)}${CLOSE}`,
+        `${OPEN}tokens="1" type="text">\n正文段落\n${CLOSE}`,
+        `回答开始。${OPEN}tokens="1" type="text">这是什么东西${CLOSE}回答结束。`,
+        `lead ${OPEN}tokens="1" type="text"> m00123 ${CLOSE} tail`,
     ];
     for (const full of cases) {
         const expected = stripAcpTags(full);
@@ -467,6 +482,26 @@ test("streaming flush drops content of a tag left unclosed at end of stream", ()
     assert.ok(f.dropped());
 });
 
+test("streaming filter keeps prose between paired tags, dropping only the tags (#1720)", () => {
+    const full = `回答开始。${OPEN}tokens="1" type="text">这是什么东西${CLOSE}回答结束。`;
+    const f = createTagEchoFilter();
+    let visible = "";
+    for (let i = 0; i < full.length; i += 5) visible += f.push(full.slice(i, i + 5));
+    visible += f.flush();
+    assert.equal(visible, "回答开始。这是什么东西回答结束。");
+    assert.ok(f.dropped(), "the tag fragments are accounted as dropped");
+});
+
+test("streaming filter still drops a ref echo whose open tag arrives alone in a chunk (#1720)", () => {
+    const open = `${OPEN}tokens="1" type="text">`;
+    const f = createTagEchoFilter();
+    let visible = f.push(open);
+    visible += f.push(`m00123${CLOSE}`);
+    visible += f.flush();
+    assert.equal(visible, "");
+    assert.ok(f.dropped());
+});
+
 test("long tag-like spans are prose, not tags (bounded open match)", () => {
     const span = `${OPEN}${"x".repeat(300)}>`;
     assert.equal(stripAcpTags(`before ${span} after`), `before ${span} after`);
@@ -522,7 +557,7 @@ test("stripAcpTags removes typo'd acplike render tags (#673)", () => {
     assert.equal(stripAcpTags(`${LT}acpi tokens="36" type="text"\x3em00473${LT}/acpi\x3e`), "");
     assert.equal(stripAcpTags(`before ${LT}acp tokens="2" type="text"\x3em00473${LT}/acip\x3e after`), "before  after");
     for (const name of ["acpi", "acip", "apic", "cap", "cpa", "pac", "pca"]) {
-        assert.equal(stripAcpTags(`${LT}${name} tokens="1" type="text"\x3em001${LT}/${name}\x3e`), "", name);
+        assert.equal(stripAcpTags(`${LT}${name} tokens="1" type="text"\x3em00473${LT}/${name}\x3e`), "", name);
     }
 });
 
@@ -553,7 +588,7 @@ test("legit angle-bracket text survives the loosened filter (#673)", () => {
 });
 
 test("filter stats() accumulates lifetime input/output/dropped (#673)", () => {
-    const first = `hello ${TAG("m1")}`;
+    const first = `hello ${TAG("m00123")}`;
     const f = createTagEchoFilter();
     f.push(first);
     f.flush();
