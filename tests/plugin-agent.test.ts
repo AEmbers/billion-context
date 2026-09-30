@@ -10,7 +10,7 @@ import { rmrf } from "./tmp-rm.ts";
 
 process.env.NODE_ENV = "test";
 
-import { proxyBaseFromUrl, proxyBaseFromEnv, detectProxyBase, fetchManifest, forwardTool, fetchStatus } from "../src/agent/shared.ts";
+import { proxyBaseFromUrl, proxyBaseFromEnv, detectProxyBase, fetchManifest, forwardTool, fetchStatus, destinationRoutedThroughProxy } from "../src/agent/shared.ts";
 import { wrapCacheReport, wrapRuleReport } from "../src/acp-panel.ts";
 import biliPlugin, { createBiliPlugin } from "../src/agent/pi.ts";
 import ompPlugin from "../src/agent/omp.ts";
@@ -482,6 +482,71 @@ test("#1382: compaction cancel requires evidence the proxy carries this conversa
         });
     } finally {
         await identityProxy.close();
+    }
+});
+
+test("#1392: non-http(s) provider rides bili only when opted in AND carried", async () => {
+    // #1383's stopgap vetoed ALL non-http(s) baseUrls (e.g. pi-claude-bridge's literal
+    // "claude-bridge"), so a proxy's mere existence could never claim compaction for
+    // traffic that bypasses it. #1392 narrows that veto: an explicitly opted-in provider
+    // (BILI_NON_HTTP_PROVIDERS) falls through to the SAME carriage-evidence gate. Opt-in
+    // widens the candidate set only — unrouted traffic still never cancels (#1382 invariant).
+    const bridgeCtx = {
+        sessionManager: { getSessionId: () => "sess-optin" },
+        model: { contextWindow: 1000000, baseUrl: "claude-bridge", provider: "claude-bridge" },
+        cwd: "/tmp",
+    };
+    const unknownProxy = await startFakeProxy({ statusOk: false });
+    const knownProxy = await startFakeProxy({ statusOk: true });
+    try {
+        // (A) Unopted-in: byte-for-byte the #1382/stopgap behavior — even though the proxy
+        // confirms carriage here, no opt-in means the non-http(s) veto still holds.
+        await withEnv({ BILLION_CONTEXT_PROXY: knownProxy.origin, BILI_NON_HTTP_PROVIDERS: undefined }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const handler = pi.events.get("session_before_compact")!;
+            assert.equal(await handler({ reason: "threshold" }, bridgeCtx), undefined, "non-opted-in non-http(s) provider stays vetoed even when the proxy confirms carriage");
+        });
+
+        // (B) Opted-in but UNROUTED: the veto lifts, yet there is no carriage evidence (no
+        // local stamp + proxy reports unknown) → still no cancel. This IS the safety property.
+        await withEnv({ BILLION_CONTEXT_PROXY: unknownProxy.origin, BILI_NON_HTTP_PROVIDERS: "claude-bridge" }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const handler = pi.events.get("session_before_compact")!;
+            assert.equal(await handler({ reason: "threshold" }, bridgeCtx), undefined, "opted-in but unrouted → no carriage evidence → native compaction proceeds");
+        });
+
+        // (C) Opted-in AND routed: the proxy confirms it carries this conversation → the
+        // cancel now correctly fires (the whole point of the opt-in).
+        await withEnv({ BILLION_CONTEXT_PROXY: knownProxy.origin, BILI_NON_HTTP_PROVIDERS: "claude-bridge" }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const handler = pi.events.get("session_before_compact")!;
+            assert.deepEqual(await handler({ reason: "threshold" }, bridgeCtx), { cancel: true }, "opted-in + proxy confirms carriage → compaction ownership claimed");
+        });
+
+        // (D) Mismatched allowlist id: opting in a DIFFERENT provider does not lift the veto
+        // for this one — ids match exactly, so a typo cannot accidentally opt a provider in.
+        await withEnv({ BILLION_CONTEXT_PROXY: knownProxy.origin, BILI_NON_HTTP_PROVIDERS: "some-other-provider" }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const handler = pi.events.get("session_before_compact")!;
+            assert.equal(await handler({ reason: "threshold" }, bridgeCtx), undefined, "allowlist naming a different provider does not opt this one in");
+        });
+
+        // (E) [#1392 Phase A guard] Opt-in widens ONLY the compaction-ownership candidate
+        // set — it must never widen wire-side routing: a non-http baseUrl stays outside
+        // destinationRoutedThroughProxy (no /bili/ rewrites, no stamped cache keys, no MITM
+        // candidacy), whatever BILI_NON_HTTP_PROVIDERS says. Guards Phase B against
+        // accidentally wiring the flag into stamp eligibility.
+        await withEnv({ BILLION_CONTEXT_PROXY: knownProxy.origin, BILI_NON_HTTP_PROVIDERS: "claude-bridge" }, async () => {
+            assert.equal(destinationRoutedThroughProxy("claude-bridge"), false, "opt-in must not route a non-http baseUrl through the proxy wire surface");
+            assert.equal(destinationRoutedThroughProxy("claude-bridge://x"), false, "opaque scheme never parses as routable");
+        });
+    } finally {
+        await unknownProxy.close();
+        await knownProxy.close();
     }
 });
 
