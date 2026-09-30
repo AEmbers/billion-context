@@ -439,6 +439,7 @@ test("runLaunch pi: native -e plugin injected only when not installed", async ()
         return makeFakeChild(42422);
     };
     const fetchImpl = async () => ({ ok: true });
+    const fetchHealthInfo = async () => ({ ok: true, pid: 42422 });
 
     // runLaunch ends with process.exit() — stub it or it kills the test
     // runner and every test registered after this one silently never runs.
@@ -452,7 +453,7 @@ test("runLaunch pi: native -e plugin injected only when not installed", async ()
     try {
         await runLaunch(
             { client: "pi", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo, spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.deepEqual(clientArgsSeen[0].slice(0, 2), ["-e", distAgent]);
@@ -462,7 +463,7 @@ test("runLaunch pi: native -e plugin injected only when not installed", async ()
         clientArgsSeen.length = 0;
         await runLaunch(
             { client: "pi", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo, spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.ok(!clientArgsSeen[0].includes("-e"));
@@ -474,7 +475,7 @@ test("runLaunch pi: native -e plugin injected only when not installed", async ()
         clientArgsSeen.length = 0;
         await runLaunch(
             { client: "pi", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo, spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.deepEqual(clientArgsSeen[0].slice(0, 2), ["-e", distAgent]);
@@ -484,7 +485,7 @@ test("runLaunch pi: native -e plugin injected only when not installed", async ()
         clientArgsSeen.length = 0;
         await runLaunch(
             { client: "pi", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo, spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.ok(!clientArgsSeen[0].includes("-e"));
@@ -550,7 +551,7 @@ test("runLaunch pi #535: refuses launch when http rewrites needed and extension 
         // no dist file, no installed plugin entry → refuse, and refuse BEFORE
         // spawning anything (no proxy child, no client)
         await assert.rejects(
-            runLaunch({ client: "pi", clientArgs: [], overrides: {} }, { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve() }),
+            runLaunch({ client: "pi", clientArgs: [], overrides: {} }, { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42422 }), spawnImpl, sleep: () => Promise.resolve() }),
             /needs provider URL rewrites but the bili extension cannot load/,
         );
         assert.equal(clientArgsSeen.length, 0);
@@ -561,7 +562,7 @@ test("runLaunch pi #535: refuses launch when http rewrites needed and extension 
         fs.writeFileSync(path.join(piHome, "settings.json"), JSON.stringify({ packages: [root] }));
         await runLaunch(
             { client: "pi", clientArgs: [], overrides: {} },
-            { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42422 }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.ok(!clientArgsSeen[0].includes("-e"), "installed entry loads the plugin — no -e double load");
@@ -627,7 +628,7 @@ test("runLaunch omp #535: refuses launch when http rewrites needed and extension
         // no dist file, no installed config.yml entry → refuse BEFORE spawning
         // anything (no proxy child, no client)
         await assert.rejects(
-            runLaunch({ client: "omp", clientArgs: [], overrides: {} }, { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve() }),
+            runLaunch({ client: "omp", clientArgs: [], overrides: {} }, { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42422 }), spawnImpl, sleep: () => Promise.resolve() }),
             /omp needs provider URL rewrites but the bili extension cannot load/,
         );
         assert.equal(clientArgsSeen.length, 0);
@@ -640,7 +641,7 @@ test("runLaunch omp #535: refuses launch when http rewrites needed and extension
         fs.writeFileSync(path.join(ompHome, "config.yml"), `extensions:\n  - ${otherInstall}\n`);
         await runLaunch(
             { client: "omp", clientArgs: [], overrides: {} },
-            { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42422 }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.ok(!clientArgsSeen[0].includes("-e"), "installed entry loads the plugin — no -e double load");
@@ -708,7 +709,7 @@ test("runLaunch hermes #535: proxy env routing, no HERMES_HOME overlay, real con
     try {
         await runLaunch(
             { client: "hermes", clientArgs: [], overrides: {} },
-            { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42422 }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.deepEqual(exitCalls, [0]);
         assert.ok(childEnv, "client spawned");
@@ -762,7 +763,7 @@ test("runLaunch pi #535: refuses launch when ONLY https (hand-wrapped) rewrites 
     const spawnImpl: SpawnFn = () => makeFakeChild(42422);
     try {
         await assert.rejects(
-            runLaunch({ client: "pi", clientArgs: [], overrides: {} }, { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve() }),
+            runLaunch({ client: "pi", clientArgs: [], overrides: {} }, { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42422 }), spawnImpl, sleep: () => Promise.resolve() }),
             /needs provider URL rewrites but the bili extension cannot load/,
         );
     } finally {
@@ -818,6 +819,7 @@ test("runLaunch omp: native -e plugin injected only when no loadable config entr
         return makeFakeChild(42422);
     };
     const fetchImpl = async () => ({ ok: true });
+    const fetchHealthInfo = async () => ({ ok: true, pid: 42422 });
 
     const prevExit = process.exit;
     const exitCalls: number[] = [];
@@ -830,7 +832,7 @@ test("runLaunch omp: native -e plugin injected only when no loadable config entr
         // no config.yml at all → -e injected
         await runLaunch(
             { client: "omp", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo, spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.deepEqual(clientArgsSeen[0].slice(0, 2), ["-e", distAgent]);
@@ -843,7 +845,7 @@ test("runLaunch omp: native -e plugin injected only when no loadable config entr
         clientArgsSeen.length = 0;
         await runLaunch(
             { client: "omp", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo, spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.ok(!clientArgsSeen[0].includes("-e"));
@@ -853,7 +855,7 @@ test("runLaunch omp: native -e plugin injected only when no loadable config entr
         clientArgsSeen.length = 0;
         await runLaunch(
             { client: "omp", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo, spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.deepEqual(clientArgsSeen[0].slice(0, 2), ["-e", distAgent]);
@@ -920,7 +922,10 @@ test("ompPluginLoadedFrom: only entries whose file exists count as loaded", () =
     }
 });
 
+// #1753: spawn-wait fallback stubs identify as the most recently faked child.
+let lastFakeChildPid: number | undefined;
 function makeFakeChild(pid: number): SpawnChild {
+    lastFakeChildPid = pid;
     const handlers = new Map<string, ((...args: unknown[]) => void)[]>();
     return {
         pid,
@@ -945,7 +950,7 @@ test("ensureProxyRunning: spawns a fresh proxy when no live instance is recorded
     const fetchImpl = async () => ({ ok: true });
     const handle = await ensureProxyRunning(
         { host: "127.0.0.1", port: 8787, passthrough: false, debug: false },
-        { fetchImpl, spawnImpl, readInstanceFile: () => undefined },
+        { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: 0 }), spawnImpl, readInstanceFile: () => undefined },
     );
     assert.equal(spawnCalls, 1);
     assert.ok(handle.child);
@@ -955,6 +960,7 @@ test("ensureProxyRunning: spawns a fresh proxy when no live instance is recorded
 
 test("ensureProxyRunning: spawns when not healthy, polls until healthy", async () => {
     let probes = 0;
+    let healthProbes = 0;
     const fetchImpl = async () => {
         probes++;
         return { ok: probes >= 2 };
@@ -966,7 +972,7 @@ test("ensureProxyRunning: spawns when not healthy, polls until healthy", async (
     };
     const handle = await ensureProxyRunning(
         { host: "127.0.0.1", port: 8787, passthrough: false, debug: false },
-        { fetchImpl, spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
+        { fetchImpl, fetchHealthInfo: async () => ({ ok: ++healthProbes >= 2, pid: 42421 }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
     );
     assert.equal(handle.child?.pid, 42421);
     assert.ok(spawnedArgs !== null);
@@ -975,7 +981,7 @@ test("ensureProxyRunning: spawns when not healthy, polls until healthy", async (
     const portIdx = spawnedArgs.indexOf("--port");
     assert.ok(portIdx >= 0, "spawn args include --port");
     assert.equal(spawnedArgs[portIdx + 1], String(handle.port));
-    assert.ok(probes >= 2);
+    assert.ok(healthProbes >= 2, "fallback polls health until the child answers");
 });
 
 test("ensureProxyRunning: throws when never healthy within deadline", async () => {
@@ -990,7 +996,7 @@ test("ensureProxyRunning: throws when never healthy within deadline", async () =
     await assert.rejects(
         ensureProxyRunning(
             { host: "127.0.0.1", port: 8787, passthrough: false, debug: false },
-            { fetchImpl, spawnImpl, now, sleep, readInstanceFile: () => undefined },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: false }), spawnImpl, now, sleep, readInstanceFile: () => undefined },
         ),
         /did not become healthy/,
     );
@@ -1015,6 +1021,7 @@ test("ensureProxyRunning: registers a child 'error' handler so an async spawn fa
             {
                 spawnImpl: () => child,
                 fetchImpl: async () => ({ ok: false }),
+                fetchHealthInfo: async () => undefined,
                 readInstanceFile: () => undefined,
                 sleep: () => new Promise((r) => setTimeout(r, 0)),
             },
@@ -1103,6 +1110,7 @@ test("ensureProxyRunning: attach registers opts.parentPid when given, never on s
             registerWatcher,
             scriptPath: FP_SCRIPT,
             spawnImpl: () => { spawned = true; return makeFakeChild(42432); },
+            fetchHealthInfo: async () => ({ ok: true, pid: 42432 }),
             sleep: () => Promise.resolve(),
         },
     );
@@ -1170,7 +1178,7 @@ test("ensureProxyRunning: same lane attaches, different declared lanes spawn sep
         {
             spawnImpl,
             fetchImpl: async () => ({ ok: true }),
-            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1" }),
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", pid: 42460 }),
             readInstanceFile: () => (reads++ === 0 ? recordedInstance({ lane: "pi" }) : undefined),
             sleep: () => Promise.resolve(),
             scriptPath: FP_SCRIPT,
@@ -1273,6 +1281,7 @@ test("ensureProxyRunning: a lane'd launch with port 0 binds the zone preference 
         {
             fetchImpl: async () => ({ ok: true }),
             spawnImpl,
+            fetchHealthInfo: async () => ({ ok: true, pid: 42441 }),
             sleep: () => Promise.resolve(),
             readInstanceFile: () => undefined,
             zonePreferredPort: (lane) => {
@@ -1303,6 +1312,7 @@ test("ensureProxyRunning: an unlane'd launch keeps the OS ephemeral default — 
         { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
         {
             fetchImpl: async () => ({ ok: true }),
+            fetchHealthInfo: async () => ({ ok: true, pid: 42442 }),
             spawnImpl,
             sleep: () => Promise.resolve(),
             readInstanceFile: () => undefined,
@@ -1397,7 +1407,7 @@ test("ensureProxyRunning: stale code (fingerprint mismatch) is not attached — 
                 return makeFakeChild(42461);
             },
             fetchImpl: async () => ({ ok: true }),
-            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1" }),
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", pid: 42461 }),
             readInstanceFile: () => (reads++ === 0 ? recordedInstance({ codeFingerprint: "stale-dist-hash" }) : undefined),
             sleep: () => Promise.resolve(),
             scriptPath: FP_SCRIPT,
@@ -1418,7 +1428,7 @@ test("ensureProxyRunning: pre-#1225 instance without codeFingerprint is never at
                 return makeFakeChild(42464);
             },
             fetchImpl: async () => ({ ok: true }),
-            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1" }),
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", pid: 42464 }),
             readInstanceFile: () => (reads++ === 0 ? recordedInstance({ codeFingerprint: undefined }) : undefined),
             sleep: () => Promise.resolve(),
             scriptPath: FP_SCRIPT,
@@ -1556,7 +1566,8 @@ test("ensureProxyRunning: strictPort launcher refuses a different-port starter's
                     return makeFakeChild(42473);
                 },
                 fetchImpl: async () => ({ ok: true }),
-                fetchHealthInfo: async (origin) => (origin.endsWith("8807") ? { ok: true, instanceId: "inst-wait" } : undefined),
+                fetchHealthInfo: async (origin) =>
+                    origin.endsWith("8807") ? { ok: true, instanceId: "inst-wait" } : origin.endsWith("8808") ? { ok: true, pid: 42473 } : undefined,
                 // Before spawn: the starter's proxy is up on ANOTHER port. After
                 // spawn: a dead-owner record so the readback falls back to the
                 // preferred-origin health probe.
@@ -1596,6 +1607,7 @@ test("ensureProxyRunning: active starting marker of a different lane → spawns 
                     return makeFakeChild(42462);
                 },
                 fetchImpl: async () => ({ ok: true }),
+                fetchHealthInfo: async () => ({ ok: true, pid: 42462 }),
                 readInstanceFile: () => undefined,
                 sleep: () => {
                     sleeps++;
@@ -1625,7 +1637,7 @@ test("ensureProxyRunning: incompatible recorded instance (modelWindows) is not a
         {
             spawnImpl,
             fetchImpl: async () => ({ ok: true }),
-            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1" }),
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", pid: 42434 }),
             readInstanceFile: () => (reads++ === 0 ? recordedInstance() : undefined),
             sleep: () => Promise.resolve(),
         },
@@ -1645,7 +1657,7 @@ test("ensureProxyRunning: dead recorded pid is ignored (no attach)", async () =>
         {
             spawnImpl,
             fetchImpl: async () => ({ ok: true }),
-            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1" }),
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", pid: 42435 }),
             readInstanceFile: () => recordedInstance({ pid: 99999999 }),
             sleep: () => Promise.resolve(),
         },
@@ -1690,6 +1702,7 @@ test("ensureProxyRunning: stale starting marker (dead owner) → removed, then s
                     return makeFakeChild(42451);
                 },
                 fetchImpl: async () => ({ ok: true }),
+                fetchHealthInfo: async () => ({ ok: true, pid: 42451 }),
                 readInstanceFile: () => undefined,
                 sleep: () => Promise.resolve(),
             },
@@ -1714,6 +1727,7 @@ test("ensureProxyRunning: expired starting marker (hung owner) → spawns (#707)
                     return makeFakeChild(42452);
                 },
                 fetchImpl: async () => ({ ok: true }),
+                fetchHealthInfo: async () => ({ ok: true, pid: 42452 }),
                 readInstanceFile: () => undefined,
                 sleep: () => Promise.resolve(),
             },
@@ -1740,6 +1754,7 @@ test("ensureProxyRunning: waiter bails early when the starter clears its marker 
                     return makeFakeChild(42453);
                 },
                 fetchImpl: async () => ({ ok: true }),
+                fetchHealthInfo: async () => ({ ok: true, pid: 42453 }),
                 readInstanceFile: () => undefined,
                 sleep: () => {
                     if (++sleeps === 1) removeStartingMarker();
@@ -1945,7 +1960,7 @@ test("ensureProxyRunning: port 0 (no explicit --port) spawns on an OS-assigned e
     };
     const handle = await ensureProxyRunning(
         { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
-        { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
+        { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
     );
     assert.ok(spawnedArgs !== null);
     const portIdx = spawnedArgs.indexOf("--port");
@@ -1964,7 +1979,7 @@ test("ensureProxyRunning: explicit port is honored verbatim (no ephemeral reassi
     };
     const handle = await ensureProxyRunning(
         { host: "127.0.0.1", port: 8787, passthrough: false, debug: false },
-        { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
+        { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
     );
     assert.ok(spawnedArgs !== null);
     const portIdx = spawnedArgs.indexOf("--port");
@@ -3182,7 +3197,7 @@ test("runLaunch dsh: non-loopback upstreams ride proxy envs, loopback keeps the 
             { client: "dsh", clientArgs: ["--profile", "headless", "task"], overrides: {} },
             // hermetic: never attach to / handshake against a real proxy
             // whose instance file happens to live on this machine
-            { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
+            { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
         );
         assert.equal(envSeen.length, 1);
         const seenEnv = envSeen[0];
@@ -3282,7 +3297,7 @@ test("runLaunch dsh: no loopback custom providers — no DSH_HOME overlay (#535 
     try {
         await runLaunch(
             { client: "dsh", clientArgs: [], overrides: {} },
-            { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
+            { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve(), readInstanceFile: () => undefined },
         );
         assert.equal(envSeen.length, 1);
         const seenEnv = envSeen[0];
@@ -3404,7 +3419,7 @@ test("ensureProxyRunning: spawns the resolved Node runtime, not blind process.ex
     };
     await ensureProxyRunning(
         { host: "127.0.0.1", port: 8787, passthrough: false, debug: false },
-        { fetchImpl: async () => ({ ok: true }), spawnImpl, readInstanceFile: () => undefined, nodeRuntime: "/custom/node" },
+        { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42425 }), spawnImpl, readInstanceFile: () => undefined, nodeRuntime: "/custom/node" },
     );
     assert.equal(spawnedCmd, "/custom/node");
 });
@@ -3471,7 +3486,7 @@ test("runLaunch omp: launcher hands per-model windows to the spawned proxy", asy
     try {
         await runLaunch(
             { client: "omp", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.deepEqual(exitCalls, [0]);
         assert.equal(proxyEnvs.length, 1, "proxy spawned once");
@@ -3692,7 +3707,7 @@ test("runLaunch codex: budget args injected for MITM mode (built-in table window
     try {
         await runLaunch(
             { client: "codex", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         const args = clientArgsSeen[0];
@@ -3708,7 +3723,7 @@ test("runLaunch codex: budget args injected for MITM mode (built-in table window
         clientArgsSeen.length = 0;
         await runLaunch(
             { client: "codex", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.ok(!clientArgsSeen[0].some((a) => a.startsWith("model_context_window=")), JSON.stringify(clientArgsSeen[0]));
@@ -3718,7 +3733,7 @@ test("runLaunch codex: budget args injected for MITM mode (built-in table window
         clientArgsSeen.length = 0;
         await runLaunch(
             { client: "codex", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientArgsSeen.length, 1);
         assert.ok(!clientArgsSeen[0].some((a) => a.startsWith("model_context_window=")), JSON.stringify(clientArgsSeen[0]));
@@ -3777,7 +3792,7 @@ test("runLaunch claude: CLAUDE_CODE_AUTO_COMPACT_WINDOW injected (built-in table
     try {
         await runLaunch(
             { client: "claude", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1);
         assert.equal(clientEnvs[0]?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "200000");
@@ -3787,7 +3802,7 @@ test("runLaunch claude: CLAUDE_CODE_AUTO_COMPACT_WINDOW injected (built-in table
         clientEnvs.length = 0;
         await runLaunch(
             { client: "claude", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1);
         assert.equal(clientEnvs[0]?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined);
@@ -3798,7 +3813,7 @@ test("runLaunch claude: CLAUDE_CODE_AUTO_COMPACT_WINDOW injected (built-in table
         clientEnvs.length = 0;
         await runLaunch(
             { client: "claude", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1);
         assert.equal(clientEnvs[0]?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "200000");
@@ -4102,7 +4117,7 @@ test("runLaunch codebuddy: CODEBUDDY_BASE_URL /bili/ rewrite + budget injected (
     try {
         await runLaunch(
             { client: "codebuddy", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1);
         assert.match(clientEnvs[0]?.CODEBUDDY_BASE_URL ?? "", /^http:\/\/127\.0\.0\.1:\d+\/bili\/https:\/\/tencent\.sso\.codebuddy\.cn\/v2$/);
@@ -4114,7 +4129,7 @@ test("runLaunch codebuddy: CODEBUDDY_BASE_URL /bili/ rewrite + budget injected (
         clientEnvs.length = 0;
         await runLaunch(
             { client: "codebuddy", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1);
         assert.equal(clientEnvs[0]?.CODEBUDDY_AUTO_COMPACT_WINDOW, undefined);
@@ -4338,7 +4353,7 @@ test("runLaunch qoder: cert-MITM envs, transport forced, budget aligned, default
     try {
         await runLaunch(
             { client: "qoder", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1);
         const seenEnv = clientEnvs[0]!;
@@ -4745,7 +4760,7 @@ test("runLaunch trae: cert-MITM envs (SSL_CERT_FILE combined bundle), no budget/
     try {
         await runLaunch(
             { client: "trae", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1);
         const seenEnv = clientEnvs[0]!;
@@ -4830,7 +4845,7 @@ async function captureLaunchedClientEnv(client: ClientName): Promise<NodeJS.Proc
     try {
         await runLaunch(
             { client, clientArgs: [], overrides: {} },
-            { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42424 }), spawnImpl, sleep: () => Promise.resolve() },
         );
     } finally {
         process.exit = prevExit;
@@ -4957,7 +4972,7 @@ async function runAiderLaunch(
     try {
         await runLaunch(
             { client: "aider", clientArgs, overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
     } finally {
         process.exit = prevExit;
@@ -5195,7 +5210,7 @@ test("runLaunch kimi: cert-MITM envs (combined CA on SSL_CERT_FILE + NODE_EXTRA_
     try {
         await runLaunch(
             { client: "kimi", clientArgs: [], overrides: {} },
-            { fetchImpl, spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1);
         const seenEnv = clientEnvs[0]!;
@@ -5417,7 +5432,7 @@ test("runLaunch mcode: cert-MITM envs (combined CA on SSL_CERT_FILE + NODE_EXTRA
     const prevExit = process.exit;
     process.exit = (() => undefined) as typeof process.exit;
     try {
-        await runLaunch({ client: "mcode", clientArgs: [], overrides: {} }, { fetchImpl, spawnImpl, sleep: () => Promise.resolve() });
+        await runLaunch({ client: "mcode", clientArgs: [], overrides: {} }, { fetchImpl, fetchHealthInfo: async () => ({ ok: true, pid: lastFakeChildPid }), spawnImpl, sleep: () => Promise.resolve() });
         assert.equal(clientEnvs.length, 1);
         const seenEnv = clientEnvs[0]!;
         const origin = seenEnv.HTTPS_PROXY;
@@ -5628,7 +5643,7 @@ test("runLaunch goose: custom provider rides the regenerated GOOSE_PATH_ROOT ove
     try {
         await runLaunch(
             { client: "goose", clientArgs: [], overrides: {} },
-            { fetchImpl: async () => ({ ok: true }), spawnImpl, sleep: () => Promise.resolve() },
+            { fetchImpl: async () => ({ ok: true }), fetchHealthInfo: async () => ({ ok: true, pid: 42424 }), spawnImpl, sleep: () => Promise.resolve() },
         );
         assert.equal(clientEnvs.length, 1, "goose client spawned exactly once");
         const seenEnv = clientEnvs[0]!;
@@ -5729,4 +5744,96 @@ test("attach diagnostics record a lifecycle-gate refusal (#1623)", async () => {
     );
     assert.equal(inst, undefined);
     assert.ok(diag.some((m) => m.includes("refusing to attach")), `diag was: ${JSON.stringify(diag)}`);
+});
+
+// #1753: the spawn-wait fallback must verify the healthy responder on the
+// preferred port is the child WE spawned. A foreign proxy squats the preferred
+// port (that is exactly why our child laddered away); trusting "healthy" alone
+// exports the client to an instance the attach gate (#1225) would have rejected.
+test("ensureProxyRunning: a healthy squatter on the preferred port is not mistaken for the spawned child (#1753)", async () => {
+    const child = makeFakeChild(42451);
+    const spawned: string[] = [];
+    let childToken = "";
+    const spawnImpl: SpawnFn = (_cmd, args, options) => {
+        spawned.push(...args);
+        childToken = options.env?.BILI_LAUNCH_TOKEN ?? "";
+        return child;
+    };
+    let recorded = false;
+    const settled: Array<[string | undefined, number]> = [];
+    const handle = await ensureProxyRunning(
+        { host: "127.0.0.1", port: 18787, passthrough: false, debug: false },
+        {
+            // The preferred port answers health — but with a FOREIGN pid.
+            fetchImpl: async () => ({ ok: true }),
+            fetchHealthInfo: async (origin) => ({
+                ok: true,
+                pid: origin.endsWith(":18787") ? 875250 : 42451,
+            }),
+            spawnImpl,
+            sleep: () => {
+                return Promise.resolve();
+            },
+            // After the first squatter probe, the child's laddered record appears.
+            readInstanceFile: () =>
+                recorded
+                    ? recordedInstance({ origin: "http://127.0.0.1:18790", port: 18790, pid: 42451, launchToken: childToken })
+                    : undefined,
+            now: (() => {
+                let ticks = 0;
+                return () => {
+                    if (++ticks === 2) recorded = true;
+                    return ticks * 100;
+                };
+            })(),
+            writeZonePort: (lane, port) => {
+                settled.push([lane, port]);
+            },
+        },
+    );
+    assert.equal(handle.origin, "http://127.0.0.1:18790", "client is exported to the child's real (laddered) origin");
+    assert.equal(handle.port, 18790);
+    // Fixed-port launches never settle sticky themselves (#1660 settles lane'd
+    // ephemerals; the child side drifts the zone record on its own boot).
+    assert.deepEqual(settled, [], "the squatter's port is never settled sticky");
+});
+
+test("ensureProxyRunning: the fallback still accepts the preferred port when the responder IS the spawned child (#1753)", async () => {
+    // Legacy/broken-state-dir child that never writes an instance record but
+    // does answer health — and the health pid matches the spawned child.
+    const spawnImpl: SpawnFn = () => makeFakeChild(42452);
+    const handle = await ensureProxyRunning(
+        { host: "127.0.0.1", port: 8787, passthrough: false, debug: false },
+        {
+            fetchImpl: async () => ({ ok: true }),
+            fetchHealthInfo: async () => ({ ok: true, pid: 42452 }),
+            spawnImpl,
+            sleep: () => Promise.resolve(),
+            readInstanceFile: () => undefined,
+        },
+    );
+    assert.equal(handle.origin, `http://127.0.0.1:8787`);
+    assert.equal(handle.port, 8787);
+});
+
+test("ensureProxyRunning: a squatter without a matching child record ends in a loud failure, not a silent misroute (#1753)", async () => {
+    const spawnImpl: SpawnFn = () => makeFakeChild(42453);
+    let ticks = 0;
+    await assert.rejects(
+        ensureProxyRunning(
+            { host: "127.0.0.1", port: 8787, passthrough: false, debug: false },
+            {
+                fetchImpl: async () => ({ ok: true }),
+                fetchHealthInfo: async () => ({ ok: true, pid: 875250 }),
+                spawnImpl,
+                now: () => ticks * 1000,
+                sleep: () => {
+                    ticks += 10;
+                    return Promise.resolve();
+                },
+                readInstanceFile: () => undefined,
+            },
+        ),
+        /did not become healthy/,
+    );
 });
