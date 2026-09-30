@@ -214,17 +214,18 @@ test("plugin tool routing ladder: arb → witness beats two-active → refuse-to
 });
 
 /** Drive the REAL MCP shim (src/mcp.ts) over stdio JSON-RPC the way a codex
- *  host does: no plugin headers, identity from spawn env only. */
+ *  host does: no plugin headers, identity from spawn env only. Env is spread
+ *  from process.env (issue760 spawnShell pattern) — a stripped env loses
+ *  SystemRoot/PATH on Windows and the shim spawn fails before it can reply. */
 function mcpCall(baseUrl: string, conversationId: string, method: string, params: Record<string, unknown> | undefined, id: number): Promise<{ stdout: string[]; stderr: string }> {
     return new Promise((resolve, reject) => {
         const env: NodeJS.ProcessEnv = {
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
-            HOME: process.env.HOME,
-            XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+            ...process.env,
             BILI_MCP_PROXY: baseUrl,
             BILI_CONVERSATION_ID: conversationId,
+            CLAUDE_CODE_SESSION_ID: "",
         };
-        const child = spawn(process.execPath, ["--import", "tsx", path.join(process.cwd(), "src", "mcp.ts")], {
+        const child = spawn(process.execPath, ["--import", "tsx", "src/mcp.ts"], {
             cwd: process.cwd(),
             env,
             stdio: ["pipe", "pipe", "pipe"],
@@ -243,6 +244,10 @@ function mcpCall(baseUrl: string, conversationId: string, method: string, params
         child.stderr.on("data", (d: string) => { stderr += d; });
         child.on("error", reject);
         const send = (obj: unknown) => child.stdin.write(`${JSON.stringify(obj)}\n`);
+        // MCP handshake first (initialize → initialized), then the real call —
+        // the exact order a codex host drives the shim in.
+        send({ jsonrpc: "2.0", id: id - 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } } });
+        send({ jsonrpc: "2.0", method: "notifications/initialized" });
         send({ jsonrpc: "2.0", id, method, params });
         // give the shim a moment, then close stdin so it exits after replying
         setTimeout(() => child.stdin.end(), 300);
