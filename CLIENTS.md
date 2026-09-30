@@ -364,7 +364,7 @@ bili only compresses requests whose path matches a known wire protocol (`/chat/c
 
 That outcome is now loud instead of silent (#1290):
 
-- the client-side fetch hook logs each distinct unrouted endpoint once per process (`…is not a recognized model endpoint, so bili did not route it through the proxy…`);
+- the client-side fetch hook logs each distinct unrouted **POST** endpoint once per process (`…is not a recognized model endpoint, so bili did not route it through the proxy…`); non-POST traffic — npm registries, catalog JSONs, git refs — is silent by design (#1657: a GET cannot carry a prompt);
 - `unrecognizedPaths` (per-path counts) in `curl -s http://localhost:8787/__bili/stats` (loopback-only);
 - an `UNRECOGNIZED PATHS (instance-level)` section in `acp_status` output while such requests exist.
 
