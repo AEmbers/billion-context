@@ -140,17 +140,21 @@ export const BILI_SEARCH_CONTEXT_TOOL_GOOGLE = {
 
 // #1179 CCR v2: host-side range-restore extension of decompress. Optional
 // startId/endId (mNNNNN refs) restore only the block's messages inside that
-// span instead of the whole block. Served unconditionally on every wire + the
-// plugin manifest (one definition, no drift — same rule as conversation_id
-// above); execution is gated on CCR being armed for the session
-// (resolveDecompressRange fails explicitly when it is not).
+// span instead of the whole block. Execution is gated on CCR being armed for
+// the session (resolveDecompressRange fails explicitly when it is not), so
+// the params are advertised ONLY where they can work (#1712): proxy-lane wire
+// injection serves the *_NO_RANGE variant while the session is unarmed, and
+// the plugin manifest serves them only when the base config enables CCR
+// (plugin policy is the base block verbatim, #1345) — same conservative rule
+// as acp_retrieve/absorb/rule in handlePluginManifest (#1192/#1271). Blank or
+// whitespace values are treated as omitted at execution (whole-block restore).
 const DECOMPRESS_RANGE_PARAM_START = {
     type: "string",
-    description: "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled).",
+    description: "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled). Omit both to restore the whole block; empty values count as omitted.",
 };
 const DECOMPRESS_RANGE_PARAM_END = {
     type: "string",
-    description: "Optional mNNNNN message ref, inclusive upper bound. Used together with startId.",
+    description: "Optional mNNNNN message ref, inclusive upper bound. Used together with startId; omit both to restore the whole block.",
 };
 
 function withRangeParams(schema: JsonSchemaObject): JsonSchemaObject {
@@ -166,6 +170,15 @@ export const BILI_ACP_TOOLS_ANTHROPIC = ACP_TOOLS_ANTHROPIC.map((t) => (t.name =
 export const BILI_ACP_TOOLS_OPENAI = ACP_TOOLS_OPENAI.map((t) => (t.function.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL_OPENAI : t.function.name === DECOMPRESS_TOOL_NAME ? BILI_DECOMPRESS_TOOL_OPENAI : t));
 export const BILI_ACP_TOOLS_RESPONSES = ACP_TOOLS_RESPONSES.map((t) => (t.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL_RESPONSES : t.name === DECOMPRESS_TOOL_NAME ? BILI_DECOMPRESS_TOOL_RESPONSES : t));
 export const BILI_ACP_TOOLS_GOOGLE = ACP_TOOLS_GOOGLE.map((t) => (t.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL_GOOGLE : t.name === DECOMPRESS_TOOL_NAME ? BILI_DECOMPRESS_TOOL_GOOGLE : t));
+
+// #1712: no-range variants — identical except decompress lacks startId/endId.
+// Served where range restore cannot be armed so the advertised schema never
+// offers what execution will refuse (see the #1179 note above).
+export const BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE = ACP_TOOLS_ANTHROPIC.map((t) => (t.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL : t));
+export const BILI_ACP_TOOLS_OPENAI_NO_RANGE = ACP_TOOLS_OPENAI.map((t) => (t.function.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL_OPENAI : t));
+export const BILI_ACP_TOOLS_RESPONSES_NO_RANGE = ACP_TOOLS_RESPONSES.map((t) => (t.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL_RESPONSES : t));
+export const BILI_ACP_TOOLS_GOOGLE_NO_RANGE = ACP_TOOLS_GOOGLE.map((t) => (t.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL_GOOGLE : t));
+export const BILI_ACP_READONLY_TOOLS_RESPONSES_NO_RANGE = ACP_READONLY_TOOLS_RESPONSES.map((t) => (t.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL_RESPONSES : t));
 export const BILI_ACP_READONLY_TOOLS_RESPONSES = ACP_READONLY_TOOLS_RESPONSES.map((t) => (t.name === SEARCH_CONTEXT_TOOL_NAME ? BILI_SEARCH_CONTEXT_TOOL_RESPONSES : t.name === DECOMPRESS_TOOL_NAME ? BILI_DECOMPRESS_TOOL_RESPONSES : t));
 
 // The kernel ships no Responses-format absorb const (the four ACP tools have

@@ -152,14 +152,6 @@
               "type": "boolean",
               "description": "Restore all the way to original messages"
             },
-            "startId": {
-              "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
-            },
-            "endId": {
-              "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
-            },
             "conversation_id": {
               "type": "string",
               "description": "Your bili conversation id (the value from the 'your bili conversation id' line in the proxy notes). Pass it on every call when your host shares one MCP process across several concurrent conversations; omit it when the host bound the session itself."
@@ -374,14 +366,6 @@
               "full": {
                 "type": "boolean",
                 "description": "Restore all the way to original messages"
-              },
-              "startId": {
-                "type": "string",
-                "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
-              },
-              "endId": {
-                "type": "string",
-                "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
               },
               "conversation_id": {
                 "type": "string",
@@ -604,14 +588,6 @@
             "full": {
               "type": "boolean",
               "description": "Restore all the way to original messages"
-            },
-            "startId": {
-              "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive lower bound of a sub-range of this block. With endId, restores only that span instead of the whole block (requires CCR: compress.ccr.enabled)."
-            },
-            "endId": {
-              "type": "string",
-              "description": "Optional mNNNNN message ref, inclusive upper bound. Used together with startId."
             },
             "conversation_id": {
               "type": "string",
