@@ -100,6 +100,7 @@ type OracleEntry = {
   lastUser: string;
   lastUserHead?: string;
   lastUserRef: string | null;
+  title?: boolean;
 };
 
 function readOracle(reqLog: string): OracleEntry[] {
@@ -487,7 +488,9 @@ test(
     assert.equal(load.code, 0, `load run failed (code=${load.code}); stderr:\n${load.stderr}`);
     assert.match(load.stdout, /收到#done/, `load run should finish; stdout:\n${load.stdout}`);
     const rows1 = readOracle(ctx.reqLog);
-    const fillerRow = rows1.find((o) => o.lastUser.includes("filler line 0"));
+    // #1699: v2 title side-channel re-sends the same filler text verbatim
+    // (no ref tags, no tools) and races the main turn in reqLog — filter it out.
+    const fillerRow = rows1.find((o) => o.lastUser.includes("filler line 0") && !o.title);
     assert.ok(fillerRow, "filler prompt must reach the upstream (oracle)");
     const conv = fillerRow.conv;
     assert.ok(conv !== null && /^ses_/.test(conv), "run one must establish a parent session");
