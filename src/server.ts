@@ -72,6 +72,7 @@ import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
 import { applyRanges } from "./stream.js";
+import { attachSubagentSessions } from "./subagent-sessions.js";
 import { buildSessionCacheReport, handleAcpCache, noteClientAbort, noteForwardedBody, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
 import { warnCacheCollapse } from "./cache-warn.js";
 import { preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
@@ -3316,6 +3317,7 @@ async function prepareAnthropic(
         storeEffectiveAbsorb(session, loopConfig);
         storeEffectiveRules(session, config);
         turn.messages = applyAbsorbView(turn.messages, session.state, loopConfig, tokenCount);
+        turn.messages = attachSubagentSessions(turn.messages, session);
         // Drop sub-viability fragments before any consumer sees them: a tiny
         // range in the list makes batched compress attempts fail atomically
         // (kernel validates the whole batch). Mirrors billion-context-pi.
@@ -3547,6 +3549,7 @@ async function prepareOpenai(
         storeEffectiveAbsorb(session, loopConfig);
         storeEffectiveRules(session, config);
         turn.messages = applyAbsorbView(turn.messages, session.state, loopConfig, tokenCount);
+        turn.messages = attachSubagentSessions(turn.messages, session);
         // Drop sub-viability fragments before any consumer sees them: a tiny
         // range in the list makes batched compress attempts fail atomically
         // (kernel validates the whole batch). Mirrors billion-context-pi.
@@ -3795,6 +3798,7 @@ async function prepareGoogle(
         storeEffectiveAbsorb(session, loopConfig);
         storeEffectiveRules(session, config);
         turn.messages = applyAbsorbView(turn.messages, session.state, loopConfig, tokenCount);
+        turn.messages = attachSubagentSessions(turn.messages, session);
         // Drop sub-viability fragments before any consumer sees them (the
         // kernel validates a compress batch atomically).
         if (turn.nudge) turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
@@ -4085,6 +4089,7 @@ async function prepareResponses(
         storeEffectiveAbsorb(session, loopConfig);
         storeEffectiveRules(session, config);
         turn.messages = applyAbsorbView(turn.messages, session.state, loopConfig, tokenCount);
+        turn.messages = attachSubagentSessions(turn.messages, session);
         // Drop sub-viability fragments before any consumer sees them: a tiny
         // range in the list makes batched compress attempts fail atomically
         // (kernel validates the whole batch). Mirrors billion-context-pi.
