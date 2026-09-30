@@ -104,7 +104,14 @@ test("runDshPlugin: spawns the resolved binary, not a hardcoded bare name (#1732
         _setDshRunnersForTest({ sync: (plan) => { seen.push(plan); return { stdout: "", stderr: "" }; } });
         const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH ?? ""}` };
         runDshPlugin(["plugin", "--profile", "x", "add", "billion-context"], env);
-        assert.equal(seen[0].command, `${dir}/${binName}`);
+        const resolved = `${dir}/${binName}`;
+        if (process.platform === "win32") {
+            // #679: .cmd shims spawn through comspec /d /s /c — the resolved path lives in the wrapped line
+            assert.equal(seen[0].command, process.env.COMSPEC?.trim() || "cmd.exe");
+            assert.ok(seen[0].args.join(" ").includes(resolved), `wrap line missing ${resolved}: ${seen[0].args.join(" ")}`);
+        } else {
+            assert.equal(seen[0].command, resolved);
+        }
     } finally {
         _setDshRunnersForTest(undefined);
         rmrf(dir);
