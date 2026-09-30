@@ -5,7 +5,7 @@
 // unpaired halves.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { safePrefix, safeSuffix, scrubLoneSurrogates } from "../src/util.ts";
+import { safePrefix, safeSuffix, scrubLoneSurrogates } from "../src/text-safe.ts";
 
 const E = "\u{1F4E5}";
 

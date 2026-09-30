@@ -11,7 +11,7 @@ import {
     type PriceProfile,
 } from "acp-kernel";
 import { log as loggerLog } from "./logger.js";
-import type { Session } from "./session.js";
+import { reanchorNudgeOnUsageDrop, type Session } from "./session.js";
 
 // Render window for handleAcpCache's detail:"full" text view (#1489). The
 // ledger itself is unbounded — this only bounds how many lines the text
@@ -495,9 +495,17 @@ export function settleUsageReport(
         // re-sends the unfolded history, so its usage report over-reports the
         // context the NEXT request will actually carry (see stream.ts applyRanges).
         session.stats.lastInputTokens = Math.max(0, s.total - (session.stats.compressCreditTokens ?? 0));
+        // #1569: calibration anchor for estimate-grade turns — written ONLY by
+        // real upstream usage reports (all three response shapes funnel here),
+        // never by estimate-grade samples or arming paths; dropped at native-
+        // compaction boundaries via resetSessionCompression (session.ts).
+        session.stats.lastUsageGradeTokens = session.stats.lastInputTokens;
         session.stats.lastInputTokensSource = "usage";
         // #1110: a real usage report retires the one-shot overflow arm.
         delete session.stats.overflowArmTokens;
+        // #1595: a real report landing far below a stale-high nudge reference
+        // retires that reference too (one call covers all three lanes).
+        reanchorNudgeOnUsageDrop(session);
     }
     if (s.reportedCached !== null && s.total > 0) {
         session.stats.cachedTokens += s.reportedCached;

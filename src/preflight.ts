@@ -16,7 +16,7 @@ import { fetchWithTimeout, isTransientUpstreamError, replayMaxAttempts, replayBa
 import { proxyDispatcher } from "./upstream-proxy.js";
 import { lastCompressSuffix, type Session } from "./session.js";
 import { peekRegistryOutputLimit } from "./registry.js";
-import { safePrefix } from "./util.js";
+import { safePrefix } from "./text-safe.js";
 
 // #247: proactive pre-forward compression. When the session's real context
 // (previous turn's upstream input_tokens) exceeds the current model's window

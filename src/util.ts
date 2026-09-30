@@ -47,56 +47,6 @@ export function safeJsonParse(s: string): unknown {
     }
 }
 
-// #816/#1615: back off a cut that lands between the two halves of a UTF-16
-// surrogate pair so the excerpt never ends on a lone high surrogate (#816).
-// JSON.stringify escapes an unpaired half as a bare \uXXXX sequence that strict
-// upstreams reject for the WHOLE body, and receipt excerpts live in history and
-// are re-sent every turn — one bad cut permanently 400'd the session (#1615).
-// Moved here from decompress-shared.ts (#1615): the helper lived in one
-// unrelated module, which is why sibling excerpt sites kept missing it.
-export function safePrefix(text: string, n: number): string {
-    let cut = Math.min(n, text.length);
-    if (cut > 0 && cut < text.length) {
-        const c = text.charCodeAt(cut - 1);
-        if (c >= 0xD800 && c <= 0xDBFF) cut -= 1;
-    }
-    return text.slice(0, cut);
-}
-
-/** Tail-side dual of safePrefix: keep at most n code units from the END,
- *  backing off when the window would start on a low surrogate whose high half
- *  sits just before it (#1615: summaryFingerprintLine's `slice(-100)`). */
-export function safeSuffix(text: string, n: number): string {
-    let start = Math.max(0, text.length - n);
-    if (start > 0 && start < text.length) {
-        const c = text.charCodeAt(start);
-        if (c >= 0xDC00 && c <= 0xDFFF) start += 1;
-    }
-    return text.slice(start);
-}
-
-/** Replace UNPAIRED UTF-16 surrogate code units with U+FFFD. Clamping the cuts
- *  cannot help when the input itself carries lone surrogates (a model can emit
- *  them via JSON \uXXXX escapes and they survive JSON.parse) — applied to
- *  fingerprint excerpts as belt-and-braces (#1615). Returns the same string
- *  when it contains no surrogates at all. */
-export function scrubLoneSurrogates(text: string): string {
-    if (!/[\ud800-\udfff]/.test(text)) return text;
-    let out = "";
-    for (let i = 0; i < text.length; i++) {
-        const c = text.charCodeAt(i);
-        if (c >= 0xD800 && c <= 0xDBFF) {
-            const next = text.charCodeAt(i + 1);
-            if (next >= 0xDC00 && next <= 0xDFFF) { out += text[i] + text[i + 1]; i++; continue; }
-            out += "\uFFFD";
-            continue;
-        }
-        if (c >= 0xDC00 && c <= 0xDFFF) { out += "\uFFFD"; continue; }
-        out += text[i];
-    }
-    return out;
-}
-
 /** True if a socket remote address is loopback. Covers the IPv4 127.0.0.0/8
  *  block and IPv6 ::1, including the IPv4-mapped ::ffff:127.x.x.x form Node
  *  reports for dual-stack sockets. Shared by the admin-endpoint gate
