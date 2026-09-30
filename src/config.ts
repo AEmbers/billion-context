@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { configFile } from "./paths.js";
 import { log as loggerLog } from "./logger.js";
 import { validateHttpProxy, type ProxyFallbackOptions } from "./upstream-proxy.js";
+import { maskUrlForLog } from "./log-mask.js";
 import { resolveOutputHeadroomCap } from "./util.js";
 
 import { parseCompatRoles } from "./compat-roles.js";
@@ -1500,8 +1501,9 @@ export function parseCompressSettings(v: unknown): (CompressSettings & { injectT
 
 function rejectLegacyRoute(key: string, value: unknown): void {
     if (typeof value !== "string") return;
+    const masked = maskUrlForLog(value);
     throw new Error(
-        `[acp-config] legacy provider route \"${key}\": \"${value}\" is no longer valid; ` +
-        `use the upstream URL as the key, for example { \"${value.replace(/\/+$/, "")}\": {} }`,
+        `[acp-config] legacy provider route \"${key}\": \"${masked}\" is no longer valid; ` +
+        `use the upstream URL as the key, for example { \"${masked.replace(/\/+$/, "")}\": {} }`,
     );
 }

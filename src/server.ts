@@ -17,7 +17,7 @@ import { codexAlignedWindow } from "./codex-models.js";
 import { fetchWithTimeout, fetchWithTransportRetry, MAX_REQUEST_BYTES, upstreamTimeoutMs } from "./fetch-util.js";
 import { formatUpstreamError, getUpstreamConnectionStatus, recordUpstreamConnection, resolveProxy, resolveProxyDecision, proxyDispatcher, type UpstreamProxyDecision } from "./upstream-proxy.js";
 import { clearUpstreamAlertsForHost, getUpstreamAlerts, recordUpstreamAlert } from "./upstream-alerts.js";
-import { maskHeaderForLog, maskHeadersForLog, maskHostPortForLog, setMaskHostsEnabled, maskUrlForLog, maskUrlsInText } from "./log-mask.js";
+import { CREDENTIAL_HEADER_RE, maskHeaderForLog, maskHeadersForLog, maskHostPortForLog, setMaskHostsEnabled, maskUrlForLog, maskUrlsInText } from "./log-mask.js";
 // Protocol codecs + the historical-image strip primitive live in the kernel now
 // (single source of truth shared with the omp/pi adapters): import from
 // "acp-kernel/wire" (kernel #215).
@@ -1394,7 +1394,7 @@ async function handle(
                 // ran and the content-encoding header stays intact) so the upstream
                 // applies its own decode - mirroring the JSON.parse path.
                 protocol = null;
-                log("warn", `decode body failed (${String(decErr)}) - forwarding raw body verbatim to ${upstreamOrigin}`);
+                log("warn", `decode body failed (${String(decErr)}) - forwarding raw body verbatim to ${maskUrlsInText(upstreamOrigin)}`);
             }
         }
     } catch (err) {
@@ -1948,7 +1948,7 @@ async function handle(
         if (!clientProvided) {
             anonAffinity = prefixAffinity.resolve(affinityMessageList());
             if (!anonAffinity) {
-                log("warn", `400: no stable conversation identity on ${protocol} request → ${upstreamOrigin}; refusing to create a content-fingerprint session (#286)`);
+                log("warn", `400: no stable conversation identity on ${protocol} request → ${maskUrlsInText(upstreamOrigin)}; refusing to create a content-fingerprint session (#286)`);
                 res.writeHead(400, { "content-type": "application/json" });
                 res.end(JSON.stringify(protocol === "anthropic"
                     ? { type: "error", error: { type: "invalid_request_error", message: NO_IDENTITY_MESSAGE } }
@@ -5370,7 +5370,7 @@ async function forward(
                 // Mask all but a short prefix so the header NAME is visible
                 // (so we know the key is sent and roughly how) without leaking
                 // the credential into the log.
-                const masked = /key|auth|token/i.test(k) ? safePrefix(s, 8) + "..." + safeSuffix(s, 4) + ` (${s.length} chars)` : safePrefix(s, 60);
+                const masked = CREDENTIAL_HEADER_RE.test(k) ? safePrefix(s, 8) + "..." + safeSuffix(s, 4) + ` (${s.length} chars)` : safePrefix(s, 60);
                 log("info", `[${sid}] client hdr ${k}=${masked}`);
             }
         }
@@ -5543,7 +5543,7 @@ async function forward(
                     // Same-request re-sends (compress-retry loops) carry the
                     // rewrite too — wireTransform reads compatRoles at call time.
                     compatRoles = { ...compatRoles, [rejection.role]: target };
-                    const providerKey = new URL(upstreamUrl).origin;
+                    const providerKey = maskUrlForLog(new URL(upstreamUrl).origin);
                     log("info", `[${prepared?.session.id ?? "passthrough"}] [compat] upstream rejected role "${rejection.role}" — auto-rewrote ${rewritten} message role(s) to "${target}", retry OK (remembered for this session only). To make permanent, add: {"providers":{"${providerKey}":{"compat":{"roles":{"${rejection.role}":"${target}"}}}}`);
                 };
                 type HopOutcome = "ok" | "placement-400" | "other";
