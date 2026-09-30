@@ -179,9 +179,44 @@ export function _setDshRunnersForTest(r: { sync?: DshSyncRun; async?: DshAsyncRu
     testRunners = r;
 }
 
-function dshCommand(env: NodeJS.ProcessEnv): string {
+/** #1732: resolve the dsh executable to spawn, in priority order:
+ *  1. BILI_DSH_BIN override — explicit user choice, used as-is;
+ *  2. PATH lookup (win32 honors PATHEXT ordering);
+ *  3. known install locations a GUI-launched process's minimal PATH omits —
+ *     same #1429 pattern as launcher.resolveNodeRuntime: a dsh profile
+ *     bundle's bili proxy runs inside the dsh desktop app's process tree,
+ *     whose PATH does not carry the npm/pnpm global bin dirs, so bare "dsh"
+ *     fails with "'dsh' is not recognized" and the #1196 owner-channel
+ *     refresh stayed dead on Windows;
+ *  4. bare "dsh" fallback — keeps today's behavior when nothing is found, so
+ *     the error path still fires with actionable context. */
+export function resolveDshBinary(
+    env: NodeJS.ProcessEnv = process.env,
+    platform: NodeJS.Platform = process.platform,
+    existsImpl: (p: string) => boolean = fs.existsSync,
+    execPath: string = process.execPath,
+): string {
     const override = env.BILI_DSH_BIN?.trim();
-    return override && override.length > 0 ? override : "dsh";
+    if (override && override.length > 0) return override;
+    const sep = platform === "win32" ? ";" : ":";
+    const extensions = platform === "win32"
+        ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0)
+        : [""];
+    // join with "/" like resolveNodeRuntime — Windows accepts both separators
+    const nodeDir = path.dirname(execPath);
+    const home = platform === "win32" ? env.USERPROFILE ?? "" : env.HOME ?? "";
+    const extraDirs = platform === "win32"
+        ? [nodeDir, env.APPDATA ? env.APPDATA + "/npm" : "", env.LOCALAPPDATA ? env.LOCALAPPDATA + "/pnpm" : ""]
+        : [nodeDir, "/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", home ? home + "/.local/bin" : ""];
+    for (const dir of [...(env.PATH ?? "").split(sep), ...extraDirs]) {
+        if (!dir) continue;
+        for (const ext of extensions) {
+            const name = ext === "" ? "dsh" : `dsh${ext}`;
+            const candidate = dir.endsWith("/") || dir.endsWith("\\") ? dir + name : dir + "/" + name;
+            if (existsImpl(candidate)) return candidate;
+        }
+    }
+    return "dsh";
 }
 
 /** #679: quote one token for cmd.exe's line parser (same rules as the
@@ -216,19 +251,41 @@ export function planDshSpawn(
 function formatDshError(err: unknown, args: readonly string[]): Error {
     const e = err as { code?: string | number; status?: number; stderr?: string | Buffer; message?: string };
     if (e.code === "ENOENT") {
-        return new Error("dsh CLI not found on PATH — install deepseek-harness first (or set BILI_DSH_BIN to its binary), then retry");
+        return new Error("dsh CLI not found (not on PATH, not in the known install locations probed) — install deepseek-harness, or set BILI_DSH_BIN to its executable path, then retry");
     }
     const stderr = typeof e.stderr === "string" ? e.stderr.trim() : e.stderr instanceof Buffer ? e.stderr.toString("utf8").trim() : "";
     const detail = stderr || (typeof e.message === "string" && e.message.length > 0 ? e.message : `exit ${e.status ?? "?"}`);
     return new Error(`dsh ${args.join(" ")} failed: ${detail}`);
 }
 
+/** #1732: decode subprocess output bytes. Windows console output from
+ *  cmd.exe/pnpm arrives in the system codepage (GBK/CP936 on Chinese
+ *  Windows) — strict UTF-8 rejects those bytes, so fall back to GBK before
+ *  accepting a lossy UTF-8 interpretation (the old `encoding: "utf8"` mode
+ *  turned the classic "'dsh' 不是内部或外部命令" failure into mojibake in the
+ *  log file). Pure ASCII and valid UTF-8 output decodes identically either way. */
+export function decodeChildOutput(buf: Buffer | string | null | undefined): string {
+    if (buf == null) return "";
+    const raw = typeof buf === "string" ? Buffer.from(buf, "utf8") : buf;
+    if (raw.length === 0) return "";
+    try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(raw);
+    } catch {
+        try {
+            return new TextDecoder("gbk").decode(raw);
+        } catch {
+            return raw.toString("utf8");
+        }
+    }
+}
+
 // spawnSync (not execFileSync): its options accept windowsVerbatimArguments,
 // which execFileSync's do not — and the #679 cmd.exe wrap needs it verbatim.
+// No encoding option: capture raw buffers and decode via decodeChildOutput
+// (#1732 — codepage-aware), so GBK stderr survives instead of mojibake.
 function defaultSyncRun(plan: DshPlan): { stdout: string; stderr: string } {
     const res = spawnSync(plan.command, plan.args, {
         timeout: DSH_EXEC_TIMEOUT_MS,
-        encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
         windowsVerbatimArguments: plan.windowsVerbatimArguments,
         windowsHide: true,
@@ -236,10 +293,10 @@ function defaultSyncRun(plan: DshPlan): { stdout: string; stderr: string } {
     if (res.error) throw res.error;
     if (res.status !== 0 && res.status !== null) {
         const err = new Error(`exit ${res.status}`);
-        Object.assign(err, { status: res.status, stderr: res.stderr ?? "" });
+        Object.assign(err, { status: res.status, stderr: decodeChildOutput(res.stderr) });
         throw err;
     }
-    return { stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+    return { stdout: decodeChildOutput(res.stdout), stderr: decodeChildOutput(res.stderr) };
 }
 
 const pExecFile = promisify(execFile);
@@ -247,18 +304,17 @@ const pExecFile = promisify(execFile);
 async function defaultAsyncRun(plan: DshPlan): Promise<{ stdout: string; stderr: string }> {
     const { stdout, stderr } = await pExecFile(plan.command, plan.args, {
         timeout: DSH_EXEC_TIMEOUT_MS,
-        encoding: "utf8",
         windowsVerbatimArguments: plan.windowsVerbatimArguments,
         windowsHide: true,
     });
-    return { stdout, stderr };
+    return { stdout: decodeChildOutput(stdout), stderr: decodeChildOutput(stderr) };
 }
 
 /** Run `dsh <args…>` synchronously (CLI context — blocking is fine).
  *  Throws with actionable context when the dsh CLI is missing or exits
  *  non-zero (dsh forwards pnpm's stderr, e.g. "pnpm not found on PATH"). */
 export function runDshPlugin(args: string[], env: NodeJS.ProcessEnv = process.env): void {
-    const plan = planDshSpawn(dshCommand(env), args);
+    const plan = planDshSpawn(resolveDshBinary(env), args);
     const run = testRunners?.sync ?? defaultSyncRun;
     try {
         run(plan);
@@ -271,7 +327,7 @@ export function runDshPlugin(args: string[], env: NodeJS.ProcessEnv = process.en
  *  loop (pnpm resolution can take seconds — a synchronous spawn here would
  *  freeze active SSE streams mid-update). */
 export async function runDshPluginAsync(args: string[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
-    const plan = planDshSpawn(dshCommand(env), args);
+    const plan = planDshSpawn(resolveDshBinary(env), args);
     const run = testRunners?.async ?? defaultAsyncRun;
     try {
         await run(plan);
@@ -313,7 +369,8 @@ export async function refreshDshProfileBundles(
             await runDshPluginAsync(["plugin", "--profile", name, "add", `${DSH_PACKAGE}@${targetVersion}`], env);
             refreshed += 1;
         } catch (err) {
-            log("warn", `[update] dsh profile ${name}: bundle refresh to ${targetVersion} failed: ${err instanceof Error ? err.message : String(err)}`);
+            const detail = err instanceof Error ? err.message : String(err);
+            log("warn", `[update] dsh profile ${name}: bundle refresh to ${targetVersion} failed: ${detail} — manual fix: run \`dsh plugin --profile ${name} add billion-context@${targetVersion}\` from a shell where \`dsh\` resolves (or point BILI_DSH_BIN at dsh's executable)`);
         }
     }
     if (refreshed > 0) {
