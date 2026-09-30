@@ -5,9 +5,11 @@
   "type": "module",
   "main": "dist/index.js",
   "exports": {
-    ".": "./dist/index.js",
+    ".": "./dist/agent/dsh-native.js",
     "./server": "./dist/agent/opencode-native.js",
-    "./dsh": "./dist/agent/dsh-native.js"
+    "./dsh": "./dist/agent/dsh-native.js",
+    "./dsh/package.json": "./package.json",
+    "./client": "./dist/agent/dsh-native-client.js"
   },
   "bin": {
     "bili": "./dist/index.js",
@@ -90,6 +92,9 @@
   "dsh": {
     "bundle": {
       "patch": "./dsh.bundle.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "optionalDependencies": {

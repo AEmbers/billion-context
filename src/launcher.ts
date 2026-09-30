@@ -32,6 +32,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { execFileSync, spawn, type StdioOptions } from "node:child_process";
 import { DEFAULT_MITM_DOMAINS } from "./mitm.js";
@@ -2163,8 +2164,78 @@ export function prepareCodexHome(codexHome: string, origin: string, conversation
  *  plugin is injected even when the user has no custom providers (pure
  *  built-in deepseek route). Returns the patch file path (undefined when it
  *  could not be written — dsh then just boots without the plugin). */
-export function writeDshAcpPatch(dshHome: string): string | undefined {
-    const pluginUrl = pathToFileURL(selfDistFile("agent/dsh-native.js")).href;
+const DSH_BARE_ENTRY = "billion-context";
+
+/** #1590: shim package making the bare `billion-context` root resolvable from the two
+ *  anchors dsh uses at runtime, without touching dsh's own tree:
+ *  - the ESM host import is anchored at the active PROFILE dir, whose walk-up
+ *    reaches <DSH_HOME>/node_modules (every profile lives under DSH_HOME);
+ *  - the client scanner's CJS resolve anchors inside dsh's install tree and
+ *    only reaches a global npm prefix through NODE_PATH, which the launcher
+ *    seeds with the same dir. The shim is a minimal package.json carrying the
+ *  `dsh.client` declaration the scanner reads plus two SYMLINKS into bili's
+ *  live dist — an auto-update that moves dist self-heals on the next launch.
+ *  Returns false when nothing was written (existing shims stay untouched). */
+export function writeDshClientShimFiles(shimDir: string, hostBundle: string, clientBundle: string, version: string): boolean {
+    try {
+        if (!fs.existsSync(hostBundle) || !fs.existsSync(clientBundle)) return false;
+        fs.rmSync(shimDir, { recursive: true, force: true });
+        fs.mkdirSync(shimDir, { recursive: true });
+        fs.writeFileSync(
+            path.join(shimDir, "package.json"),
+            `${JSON.stringify({
+                name: "billion-context",
+                version,
+                type: "module",
+                exports: { ".": "./index.js", "./dsh": "./index.js", "./dsh/package.json": "./package.json", "./client": "./bundle.js" },
+                dsh: { client: { platform: "web" } },
+            })}\n`,
+        );
+        fs.symlinkSync(hostBundle, path.join(shimDir, "index.js"));
+        fs.symlinkSync(clientBundle, path.join(shimDir, "bundle.js"));
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** #1590: place the shim under a DSH_HOME variant (base home and/or the
+ *  launcher's overlay copy — overlay/profiles is a symlink back to the base
+ *  profiles, so both walk-up interpretations are covered). No-op when bili's
+ *  own dist bundles are missing (e.g. tests running before a build). */
+export function writeDshClientShim(dshHome: string): boolean {
+    const hostBundle = selfDistFile("agent/dsh-native.js");
+    const clientBundle = selfDistFile("agent/dsh-native-client.js");
+    let version = "0.0.0";
+    try {
+        version = JSON.parse(fs.readFileSync(path.join(selfPackageRoot(), "package.json"), "utf8")).version ?? version;
+    } catch {}
+    return writeDshClientShimFiles(path.join(dshHome, "node_modules", "billion-context"), hostBundle, clientBundle, version);
+}
+
+/** #1590: entry name for the launcher's --patch overlay. The BARE package
+ *  specifier "billion-context" (package root — never a subpath: dsh's client
+ *  scanner drops subpath entry names in exactPackageSpecifier) lets dsh load
+ *  the host half AND its client scanner attach the browser half (the "bili设置"
+ *  settings entry) — but only when the package root import lands on the dsh
+ *  host module, i.e. when the shim above (whose "." export points at
+ *  dsh-native) sits in this DSH_HOME's walk-up chain. Probed by resolving the
+ *  root specifier and checking the resolved file IS the host half: a stale or
+ *  foreign install (root "." pointing elsewhere, e.g. the CLI entry) or a
+ *  broken shim (dangling symlink) degrades to the legacy file URL (host half
+ *  only) instead of failing dsh boot or importing the wrong module. */
+export function dshPluginEntry(dshHome: string): string {
+    try {
+        const entry = createRequire(path.join(dshHome, "probe.cjs")).resolve(DSH_BARE_ENTRY);
+        const real = fs.realpathSync(entry);
+        if (!fs.existsSync(real) || !real.endsWith(path.join("agent", "dsh-native.js"))) throw new Error("root import does not resolve to the dsh host half");
+        return DSH_BARE_ENTRY;
+    } catch {}
+    return pathToFileURL(selfDistFile("agent/dsh-native.js")).href;
+}
+
+export function writeDshAcpPatch(dshHome: string, entryName?: string): string | undefined {
+    const pluginUrl = entryName ?? pathToFileURL(selfDistFile("agent/dsh-native.js")).href;
     const dir = `${dshHome}-bili`;
     try {
         fs.mkdirSync(dir, { recursive: true });
@@ -3601,7 +3672,21 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
         // settings rewrite above) unless a persistent `bili plugin install dsh`
         // already provides it — a second `id: bili-native` insert would trip
         // cordis' duplicate-entry-id check and hard-fail dsh boot.
-        const dshAcpPatch = dshNativeInstalled() ? undefined : writeDshAcpPatch(dshHomeDir);
+        // #1590: seed the resolvable shim under BOTH DSH_HOME variants (the
+        // overlay's profiles symlink back to the base home, so ESM walk-up
+        // from the real profile path lands there) and point the client
+        // scanner's CJS resolution at the base one through NODE_PATH —
+        // together they let dsh attach our browser half (the settings entry)
+        // alongside the host plugin in every lane.
+        writeDshClientShim(dshHomeDir);
+        if (dshOverlayHome !== undefined) writeDshClientShim(dshOverlayHome);
+        const dshNm = path.join(dshHomeDir, "node_modules");
+        const prevNodePath = env.NODE_PATH;
+        env.NODE_PATH = prevNodePath !== undefined && prevNodePath.length > 0 ? `${dshNm}${path.delimiter}${prevNodePath}` : dshNm;
+        let dshAcpPatch: string | undefined;
+        if (!dshNativeInstalled()) {
+            dshAcpPatch = writeDshAcpPatch(dshHomeDir, dshPluginEntry(dshOverlayHome ?? dshHomeDir));
+        }
         if (dshAcpPatch) clientArgs = dshArgsWithPatch(clientArgs, dshAcpPatch);
     } else if (base === "kimi") {
         // #757: cert-MITM like hermes/dsh — Kimi Code honors standard proxy
