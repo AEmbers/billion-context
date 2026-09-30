@@ -69,3 +69,41 @@ test("hydrate on a missing or corrupt file is a no-op", () => {
     fs.writeFileSync(file, "{not json");
     hydratePrefixAffinity();
 });
+
+test("writeSnapshot unions with on-disk chains instead of clobbering a sibling instance's (#1724)", () => {
+    const m6 = messages(6);
+    const a = prefixAffinity.resolve(m6);
+    assert.ok(a);
+    prefixAffinity.note(a.sessionId, a.incomingDepth, a.tailHash, a.itemHashes);
+
+    const sib = new PrefixAffinityResolver();
+    const b = sib.resolve(messages(9));
+    assert.ok(b && b.sessionId !== a.sessionId);
+    sib.note(b.sessionId, b.incomingDepth, b.tailHash, b.itemHashes);
+
+    const file = path.join(tmp, "billion-context", "prefix-affinity.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ version: 1, entries: [...sib.exportSnapshot(), ...prefixAffinity.exportSnapshot()] }));
+
+    flushPrefixAffinity();
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { entries: { sessionId: string }[] };
+    const ids = parsed.entries.map((e) => e.sessionId);
+    assert.ok(ids.includes(a.sessionId), "our own chain survives our own write");
+    assert.ok(ids.includes(b.sessionId), "sibling chain preserved across our write (#1724)");
+});
+
+test("merge keeps the deeper disk copy when our in-memory snapshot is stale (#1724)", () => {
+    const a = prefixAffinity.resolve(messages(6));
+    assert.ok(a);
+    prefixAffinity.note(a.sessionId, a.incomingDepth, a.tailHash, a.itemHashes);
+    const mine = prefixAffinity.exportSnapshot()[0];
+    assert.ok(mine);
+    const deeper = { ...mine, depth: mine.depth + 2, lastSeen: mine.lastSeen + 1000 };
+    const file = path.join(tmp, "billion-context", "prefix-affinity.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ version: 1, entries: [deeper] }));
+
+    flushPrefixAffinity();
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { entries: { depth: number }[] };
+    assert.equal(parsed.entries[0].depth, mine.depth + 2, "fresher disk copy not rolled back by our stale write");
+});
