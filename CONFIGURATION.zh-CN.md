@@ -694,8 +694,8 @@
 | `BILI_ADVISORY_URL` | 公告文档 URL 覆盖。默认：已配置 registry（感知 `BILI_UPDATE_REGISTRY`）上的伴生包 `billion-context-advisories`。文件配置键：`advisoryUrl`。 |
 | ~~`BILI_HOST_USAGE_CREDIT`~~ / ~~`hostUsageCredit`~~ | **#660 已移除。** 曾用于选择宿主可见的用量模式。#408 的未折叠基线回补（backfill）已整体删除 —— 所有宿主现在统一上报“实际转发（后折叠）请求”的 provider 实测用量，与 `[acp-usage] input=` 一致。遗留该环境变量 / 配置键的旧值会被忽略，请删除。教训详见 PR #691 的 “Bug 历史教训” 一节。 |
 | `ACP_PROVIDERS` | 指向外部 `providers.json` 的路径（旧版 / 共享文件）。 |
-| `BILI_REPLAY_RETRY_BASE_MS` | acp-loop 回放重试的基础退避延迟（毫秒）：上游瞬时拒绝后重试（默认 `1500`；设 `0` 关闭延迟）。见 #189。 |
-| `BILI_REPLAY_RETRY_MAX` | acp-loop 回放重试的总次数（默认 `3`；设 `1` 彻底关闭重试 —— 旧版 fail-fast 行为）。见 #189。 |
+| `BILI_REPLAY_RETRY_BASE_MS` | 回放重试的基础退避延迟（毫秒）：上游瞬时拒绝后重试（默认 `1500`；设 `0` 关闭延迟）。见 #189。同时驱动主路径传输重试的退避（#1688）。 |
+| `BILI_REPLAY_RETRY_MAX` | 回放重试的总次数（默认 `3`；设 `1` 彻底关闭重试 —— 旧版单次尝试行为）。见 #189。在 acp-loop/preflight/compress 循环上适用于瞬时 HTTP 故障与 #1263 fail-fast 网络故障（响应前 reset/refused —— 代理回收类），从不适用于超时/中止类。在主模型请求路径上（#1688）仅重放 fail-fast 响应前网络故障；HTTP 判定（4xx/5xx）一律原样透传、不重试。 |
 | ~~`BILI_STREAM_STALL_MS`~~ | **#1714 已移除**（退役 #1452 的可选流式阶段停滞守卫）。#1706 中一个残留的 `400` 导出把每次思考阶段的静默都误判成截断；本地模型部署在流式中途合法地静默数分钟（思考阶段、长 prefill），任何有限子预算对某些环境都不安全。上游静默——prefill 与流式中途一律——现在只受常开的 `BILI_UPSTREAM_TIMEOUT_MS` 空闲预算约束（默认 12 分钟，可调）。旧值被忽略；bili 启动时会点名一次残留导出（`no longer read`）——请从 shell profile 中删除。 |
 | `BILI_KEEP_ALIVE_TIMEOUT_MS` | 客户端侧套接字的 keep-alive 超时（毫秒，默认 `5000`，与 Node 隐式默认一致；#1452）。空闲客户端连接由 Node 内建回收器以干净 FIN 回收；此开关把原先隐式的值显式化并可配置，回收在连接生命周期台账（debug 日志）中分类为 `reason=idle-timeout`。非数字或非正值回退到 `5000`。 |
 | `BILI_EXPOSURE_LOG_INTERVAL_MS` | 长驻暴露遥测行 `[exposure] uptime=… liveConns=… tcpHandles=… handles=… sessions=… blindTunnels=… inFlight=…` 的周期（毫秒，默认 `3600000` 即每小时；#1452）。`0` 关闭。目的是让套接字句柄泄漏与僵尸连接在长期运行日志中现形，而不是靠事后取证。 |
