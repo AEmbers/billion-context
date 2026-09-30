@@ -2,11 +2,12 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import path from "node:path";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import type { Logger } from "../src/logger.ts";
+import { rmrf } from "./tmp-rm.ts";
 
 const root = mkdtempSync(path.join(tmpdir(), "bc-auto-restart-"));
 process.env.XDG_CACHE_HOME = path.join(root, "cache");
@@ -22,7 +23,7 @@ after(() => {
     delete process.env.XDG_CONFIG_HOME;
     delete process.env.XDG_DATA_HOME;
     delete process.env.XDG_STATE_HOME;
-    rmSync(root, { recursive: true, force: true });
+    rmrf(root);
 });
 
 function makeLog(): { log: Logger; entries: string[] } {

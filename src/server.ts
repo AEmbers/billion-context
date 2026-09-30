@@ -16,6 +16,7 @@ import { contextFromRegistry, loadRegistry, peekRegistryContext, peekRegistryOut
 import { codexAlignedWindow } from "./codex-models.js";
 import { fetchWithTimeout, MAX_REQUEST_BYTES, upstreamTimeoutMs } from "./fetch-util.js";
 import { formatUpstreamError, getUpstreamConnectionStatus, recordUpstreamConnection, resolveProxy, resolveProxyDecision, proxyDispatcher, type UpstreamProxyDecision } from "./upstream-proxy.js";
+import { clearUpstreamAlertsForHost, getUpstreamAlerts, recordUpstreamAlert } from "./upstream-alerts.js";
 import { maskHeaderForLog, maskHeadersForLog, maskHostPortForLog, setMaskHostsEnabled, maskUrlForLog, maskUrlsInText } from "./log-mask.js";
 // Protocol codecs + the historical-image strip primitive live in the kernel now
 // (single source of truth shared with the omp/pi adapters): import from
@@ -108,7 +109,7 @@ import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConver
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks, maybeAdoptResume } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
-import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
+import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, isPluginFoldCallId, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, pluginRuntimeInfoForConversation, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, runtimeConversationId, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats, liveBlindTunnels } from "./mitm.js";
 import { evaluateChain, extractChainCarriers, stampOutbound, stripEmbeddedChainCarriers } from "./chain-checkpoint.js";
 import type { BiliMessage } from "acp-kernel/wire";
@@ -480,6 +481,14 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     const backstopRaw = Number(process.env.BILI_CLIENT_ERROR_BACKSTOP_MS);
     const clientErrorBackstopMs = Number.isInteger(backstopRaw) && backstopRaw >= 0 ? backstopRaw : 30_000;
     log("info", `[conn] keepAliveTimeout=${keepAliveTimeoutMs}ms clientErrorBackstop=${clientErrorBackstopMs}ms`);
+    // #1714: BILI_STREAM_STALL_MS is retired (#1706 incident: a stale 400ms
+    // export turned every thinking-phase silence into a false truncation).
+    // The value is now ignored; name it once at startup so stale shell exports
+    // announce themselves instead of silently dying.
+    const retiredStallEnv = process.env.BILI_STREAM_STALL_MS;
+    if (retiredStallEnv !== undefined && retiredStallEnv.trim() !== "") {
+        log("warn", `[config] BILI_STREAM_STALL_MS=${retiredStallEnv} is no longer read (#1714) — ignored; upstream silence is bounded by the ${Math.round(upstreamTimeoutMs() / 60000)}-minute idle budget (BILI_UPSTREAM_TIMEOUT_MS)`);
+    }
     // #1452: per-connection lifecycle ledger — turns "which side closed this
     // socket, and why" from forensic inference into one debug line per
     // connection (zero payload content). reason=destroyed means nobody ended
@@ -1178,9 +1187,14 @@ async function handle(
             }, 15_000);
             result.clearTimer();
             recordUpstreamConnection(targetUrl, proxyUrl);
+            // #1682: a successful probe clears active alerts for this host so
+            // the banner reflects the fix immediately, without waiting for traffic.
+            clearUpstreamAlertsForHost(targetUrl);
             res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: true, status: result.response.status, target: targetUrl, proxy: proxyUrl ?? null }));
         } catch (error) {
+            // #1682: probe failures deliberately do NOT feed the alert table —
+            // they are user-initiated diagnostics, not live-traffic evidence.
             recordUpstreamConnection(targetUrl, proxyUrl, error);
             res.writeHead(502, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: formatUpstreamError(error, targetUrl, proxyUrl) }));
@@ -1336,7 +1350,13 @@ async function handle(
             });
             if (!verdict.ok) {
                 log("warn", `[tunnel] denied ${maskUrlsInText(route.upstream)}: ${verdict.message}`);
-                res.writeHead(403, { "content-type": "application/json" });
+                // #1686: a resolution failure is transport-class (the resolver was
+                // momentarily unreachable; the name itself may be perfectly valid),
+                // not a permission decision — 403 tells clients "never will succeed"
+                // and kills their retry logic mid-outage. Policy denials stay 403;
+                // a malformed embedded URL is a client error (400).
+                const status = verdict.code === "unresolvable" ? 502 : verdict.code === "invalid" ? 400 : 403;
+                res.writeHead(status, { "content-type": "application/json" });
                 res.end(JSON.stringify({ error: verdict.message, code: "tunnel_destination_denied", detail: verdict.code }));
                 return;
             }
@@ -2327,8 +2347,9 @@ async function handle(
         storeEffectiveSearchPlanAware(session, resolvedSearchPlanAware);
         // #546: restore a client-shrunk output budget BEFORE the side gate so a
         // tool-carrying main request re-enters the pipeline at full budget (see
-        // restoreOutputBudget for the starvation mechanism).
-        restoreOutputBudget(parsed, session, log);
+        // restoreOutputBudget for the starvation mechanism). #1665: the
+        // operator-declared model output limit floors the restore target.
+        restoreOutputBudget(parsed, session, log, resolveConfiguredOutputLimit(opts.routes, route?.rewrittenUrl, (parsed as { model?: string }).model));
         // #896: the per-scope output-headroom cap (compress.outputHeadroomMaxPct,
         // three-level merge; default 0.25, aligned with billion-context-pi).
         // Resolved once here so the side-request guard below AND the main-path
@@ -2767,14 +2788,16 @@ const ACP_TAG_MARK = "\x3cacp ";
 //
 // Per mode (see TECHNICAL-NOTES.md "Two compression modes"): in plugin/launcher mode the
 // tool call is ALWAYS in the re-sent history (the agent owns compression), so
-// this strips every acp_summary and the carrier is the tool call; in proxy mode
+// this strips every acp_summary and the carrier is the tool call — recognized
+// by the plugin_<ts> callId minted at the tool API (#1567: an id-match alone
+// was unsatisfiable there); in proxy mode
 // the tool call is usually absent (ephemeral server-side execution) or
 // nonexistent (preflight), so acp_summary survives as the carrier and
 // systemToUser later re-voices the survivors as USER messages (leaving them at
 // their anchors) for strict backends (#377).
 /** [#651] Strip oversized reasoning from closed compress turns (see
  *  src/reasoning-drop.ts) with an ops log line when anything was dropped. */
-function withReasoningDrop(
+export function withReasoningDrop(
     msgs: BiliMessage[],
     reasoning: CompressReasoningConfig | undefined,
     log: (level: string, msg: string) => void,
@@ -2784,6 +2807,16 @@ function withReasoningDrop(
     // [#684] strict-echo upstreams: reasoning must round-trip with tool_calls,
     // so #651's drop must not fire. Learned/static strictness both land here.
     if (strictEcho) return msgs;
+    // [#1658] Anthropic-wire twin of that gate, detected from the payload
+    // itself: a reasoning message carrying a signature is a SIGNED thinking
+    // block on the wire (the kernel stamps thinkingSignature from the wire
+    // signature; only the Anthropic codec does), and signed thinking must
+    // round-trip with its tool_use sibling or the upstream rejects the pair
+    // (#684 invariant). Dropping the pre-compress run would orphan it, so
+    // any signed thinking in view disables the drop for this request.
+    // Presence-based and per-request: Claude sessions without extended
+    // thinking keep #651's savings.
+    if (msgs.some((m) => m.contentType === "reasoning" && typeof m.thinkingSignature === "string" && m.thinkingSignature.length > 0)) return msgs;
     const out = dropCompressReasoning(msgs, reasoning);
     if (out.length !== msgs.length) {
         log("info", `[${sessionId}] compress-reasoning: dropped ${msgs.length - out.length} reasoning message(s) from closed compress turns (#651)`);
@@ -2823,10 +2856,12 @@ export function warnReasoningPairs(
  *  inbound assistant message WITH a thinking block now rides an outbound
  *  assistant message with none. Outbound-only asymmetry (some tool_use turns
  *  think, others don't) is ordinary Claude Code traffic: turns without
- *  extended thinking never carry a block, and #651's dropCompressReasoning
- *  creates the same shape by design — the old heuristic warned on every
- *  healthy multi-turn session. Turns match by stable tool_use id (the kernel
- *  codec round-trips it verbatim); benign asymmetry stays fully silent. */
+ *  extended thinking never carry a block. #651's dropCompressReasoning can no
+ *  longer create this shape either — since [#1658] the drop is gated out
+ *  whenever signed thinking is in view. Turns match by stable tool_use id
+ *  (the kernel codec round-trips it verbatim); benign asymmetry stays fully
+ *  silent. Any remaining fire means another path lost thinking (e.g. a fold
+ *  pruned the block while preserving the tool_use) — investigate. */
 export function warnAnthropicThinkingPairs(
     inboundMessages: unknown[],
     outboundMessages: unknown[],
@@ -2916,11 +2951,54 @@ export function warnResponsesReasoningPairs(
     }
 }
 
+/** #1567 hardening: a plugin-fold block's in-place anchor is redundant ONLY
+ *  while the client's own compress pair for that exact fold actually rides
+ *  the (post-prepare) history. The pair is recognized by tool name plus the
+ *  folded range quoted in its call args — flat {startId,endId} or
+ *  {content:[{startId,endId}]}, both accepted by the plugin tool API. This
+ *  restores the self-verifying carrier handoff a raw prefix strip lost: a
+ *  pruned or contract-violating client (pair absent) keeps the anchor, so an
+ *  active fold never ends up with zero carriers. It also covers kernel-side
+ *  pruning: hideConsumedCompressCalls (KEEP_LAST_ORPHANED) runs in the
+ *  pipeline BEFORE this strip, so an older pair already hidden from the wire
+ *  is absent here and its anchor correctly survives. Unparseable args count
+ *  as no match (anchor kept — fail-safe direction). Blocks predating range
+ *  recording (no startRef/endRef) degrade to "any compress call present",
+ *  the pre-hardening prefix-strip behavior. */
+function inboundCompressPairPresent(messages: BiliMessage[], b: { startRef?: string; endRef?: string }): boolean {
+    const loose = !b.startRef || !b.endRef;
+    for (const m of messages) {
+        if (m.contentType !== "tool-call" || m.toolName !== COMPRESS_TOOL_NAME) continue;
+        if (loose) return true;
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(m.text ?? "");
+        } catch {
+            continue;
+        }
+        const obj = parsed as { startId?: string; endId?: string; content?: unknown };
+        const ranges: Array<{ startId?: string; endId?: string }> = Array.isArray(obj?.content) ? (obj.content as Array<{ startId?: string; endId?: string }>) : [obj];
+        for (const r of ranges) {
+            if (r?.startId === b.startRef && r?.endId === b.endRef) return true;
+        }
+    }
+    return false;
+}
+
 export function stripKernelSummaries(messages: BiliMessage[], state: CompressionState): BiliMessage[] {
     const carried = new Set<string>();
     for (const b of state.blocks) {
         if (!b.active || !b.compressCallId) continue;
-        if (messages.some((m) => m.contentType === "tool-call" && m.toolCallId === b.compressCallId)) {
+        // #1567: plugin tool API folds are minted a synthetic plugin_<ts> callId
+        // the client can never echo, so the plain id match is unsatisfiable for
+        // them — yet the client's own re-sent compress pair IS their carrier by
+        // contract, making the in-place anchor redundant. Strip it, but only
+        // while that pair actually rides the (post-prepare) history
+        // (inboundCompressPairPresent): a pruned or contract-violating client
+        // must never lose the summary outright (zero carriers).
+        // Preflight blocks (no compressCallId) keep skipping above: no tool
+        // call exists for them, so their anchor is the only carrier.
+        if (isPluginFoldCallId(b.compressCallId) ? inboundCompressPairPresent(messages, b) : messages.some((m) => m.contentType === "tool-call" && m.toolCallId === b.compressCallId)) {
             carried.add(`acp_summary_${b.blockId}`);
         }
     }
@@ -3926,7 +4004,42 @@ async function prepareResponses(
     const renderTags: "text-only" | "none" = process.env.ACP_RENDER_NONE || isCompactionTrigger ? "none" : "text-only";
 
     try {
+        // [#1638] Plugin mode: position-preserve mid-history system/developer
+        // items. Clients like OMP append custom_message-derived developer
+        // notifications mid-history and re-send them every turn; the kernel
+        // hoists system/developer content from ANY position into
+        // projection.systemParts, so the merged developer block injected at
+        // the front of the rebuilt input churns every turn and breaks the
+        // upstream prefix cache (sawtooth down to the instructions-only
+        // residual). Marking the non-head items with an unknown type just for
+        // the duration of responsesToCore keeps them out of systemParts and
+        // puts them in the projection layout as coreId-less slots, which
+        // patchResponsesInput re-emits verbatim in their original position —
+        // the position-preserved semantics the openai-chat wire already has
+        // (head-only hoist, kernel src/wire/openai.ts). Proxy mode (native
+        // codex) keeps the hoist-and-anchor behavior (#1085).
+        const inplaceSysDev: { item: { type?: string; role?: unknown }; type: string | undefined }[] = [];
+        if (pluginMode && Array.isArray(parsed.input)) {
+            let head = true;
+            for (const rawItem of parsed.input) {
+                const item = rawItem as { type?: string; role?: unknown };
+                const isSysDevMsg = (item.type === undefined || item.type === "message") &&
+                    (item.role === "system" || item.role === "developer");
+                if (isSysDevMsg) {
+                    if (head) continue;
+                    inplaceSysDev.push({ item, type: item.type });
+                    item.type = "__bili_inplace_sysdev";
+                    continue;
+                }
+                if (item.type === "additional_tools" || item.type === "mcp_list_tools") continue;
+                head = false;
+            }
+        }
         const projection = responsesToCore(parsed);
+        for (const { item, type } of inplaceSysDev) {
+            if (type === undefined) delete item.type;
+            else item.type = type;
+        }
         responsesProjection = projection;
         // Compaction-trigger requests are the compression mechanism itself —
         // their payload shape must not gain anchor state or note items.
@@ -4002,6 +4115,7 @@ async function prepareResponses(
             if (absorbActive) devParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
             const devContent = devParts.join("\n\n---\n\n");
             responsesDevContent = devContent;
+            if (forgedSummaries.length > 0) log("debug", `[${sessionId}] [inject] ${forgedSummaries.length} captured summary block(s) re-injected into developer message`);
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
             if (!process.env.ACP_NO_INJECT_TOOL && injectTools) {
                 const respExtra = [...(absorbActive ? [absorbTools.responses] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
@@ -4012,6 +4126,7 @@ async function prepareResponses(
         } else if (projection.systemParts.length > 0 || forgedSummaries.length > 0) {
             const devContent = [...projection.systemParts, ...forgedSummaries].join("\n\n---\n\n");
             responsesDevContent = devContent;
+            if (forgedSummaries.length > 0) log("debug", `[${sessionId}] [inject] ${forgedSummaries.length} captured summary block(s) re-injected into developer message`);
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
         }
         if (sysNotes.length > 0) {
@@ -4039,6 +4154,7 @@ async function prepareResponses(
                         : rebuiltInput;
                     inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) });
                     rebuiltInput = inputItems;
+                    log("debug", `[${sessionId}] [inject] ephemeral nudge appended as trailing user turn (${rendered.text.length} chars)`);
                 }
             } catch {
             }
@@ -4054,6 +4170,7 @@ async function prepareResponses(
                 : rebuiltInput;
             inputItems.push({ type: "message", role: "user", content: imgNote });
             rebuiltInput = inputItems;
+            log("debug", `[${sessionId}] [inject] image-full restore note appended as trailing user turn (${imgNote.length} chars)`);
         }
         transformOk = true;
     } catch (err) {
@@ -4675,6 +4792,104 @@ function beginPreflightHold(res: http.ServerResponse, prepared: Prepared, log: (
     return () => clearInterval(iv);
 }
 
+// #1647: sibling of the #568 hold, covering the STREAMING phase. After the 2xx
+// commit, bili keeps consuming upstream bytes that never reach the client — the
+// rewriter/strip pipes swallow SSE comment pings (`: ping`, which llama.cpp &
+// friends emit precisely to keep intermediate hops alive), and the
+// fake-completion backstop + compress loop buffer whole rounds before emitting.
+// The CLIENT-side undici default bodyTimeout (300s, inactivity-based; Node's
+// built-in fetch cannot override it per-request) then kills any prefill longer
+// than 300s even though leg 2 (#551/#556) survived it — and wrappers misread
+// that death as a dead proxy and silently re-send DIRECT (losing compression).
+// Hold the client exactly like #568 does: while zero bytes reach the socket,
+// emit one SSE comment line (a spec-mandated no-op for every SSE consumer).
+// Armed once per response at the 2xx commit point; self-clears on res close,
+// so no stop() needs threading through the pipe branches below. Safe under any
+// framing: content-length is a hop header stripped from respHeaders, so the
+// response is always chunked downstream.
+const STREAM_KEEPALIVE_DEFAULT_MS = 15_000;
+
+function streamKeepaliveMs(): number {
+    const raw = process.env.BILI_STREAM_KEEPALIVE_MS;
+    if (!raw) return STREAM_KEEPALIVE_DEFAULT_MS;
+    const v = Number(raw);
+    return Number.isFinite(v) && v >= 0 ? Math.floor(v) : STREAM_KEEPALIVE_DEFAULT_MS;
+}
+
+export function beginStreamKeepalive(res: http.ServerResponse, sid: string, log: (level: string, msg: string) => void): void {
+    const idleMs = streamKeepaliveMs();
+    if (idleMs <= 0 || res.destroyed || res.writableEnded) return;
+    const sock = res.socket;
+    if (!sock) return;
+    let baseline = sock.bytesWritten;
+    let warned = false;
+    let stopped = false;
+    // Line-boundary guard: an SSE comment is a no-op ONLY when it starts at a
+    // line boundary. Every processed pipe in this file re-emits whole events,
+    // but the raw pipeThrough lanes (title-gen, classifier bypass,
+    // ACP_NO_INJECT_TOOL — server.ts !useRewriter branch) forward upstream
+    // chunks verbatim, so a partial `data:` line can sit un-terminated on the
+    // wire when the interval fires. Injecting a comment there splices it into
+    // the client's JSON. Track the last byte written and skip the beat while
+    // mid-line; the 300s budget tolerates skips, corruption does not.
+    // `__biliKeepaliveBoundary` (on the res) is the live boundary state so a
+    // second arming on the same res shares one truth; undefined = not yet patched.
+    const anyRes = res as unknown as { __biliKeepaliveBoundary?: boolean };
+    let origWrite: typeof res.write;
+    if (anyRes.__biliKeepaliveBoundary === undefined) {
+        origWrite = res.write.bind(res);
+        anyRes.__biliKeepaliveBoundary = true; // headers just committed — at a boundary
+        res.write = ((...args: Parameters<typeof origWrite>) => {
+            const chunk = args[0];
+            try {
+                if (typeof chunk === "string") {
+                    if (chunk.length > 0) anyRes.__biliKeepaliveBoundary = chunk.endsWith("\n");
+                } else if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) {
+                    if (chunk.length > 0) anyRes.__biliKeepaliveBoundary = chunk[chunk.length - 1] === 0x0a;
+                }
+            } catch { /* observation must never break the write */ }
+            return origWrite(...args);
+        }) as typeof res.write;
+    }
+    const stop = (): void => {
+        if (stopped) return;
+        stopped = true;
+        clearInterval(iv);
+        res.removeListener("close", stop);
+    };
+    res.once("close", stop);
+    // Check cadence: idleMs/3 keeps worst-case gap-to-first-keepalive well
+    // inside the threshold even with timer drift; the 50ms floor only matters
+    // for tiny opt-in values (tests / exotic setups).
+    const iv = setInterval(() => {
+        try {
+            if (res.destroyed || res.writableEnded || !res.socket) {
+                stop();
+                return;
+            }
+            const written = res.socket.bytesWritten;
+            if (written > baseline) {
+                baseline = written;
+                return;
+            }
+            // Mid-line: skip this beat. No baseline mutation, so the next tick
+            // re-checks; when the pending line completes, its own write flips
+            // the flag and keep-alives resume. (Note: a keep-alive write itself
+            // bumps bytesWritten, so the following tick sees "progress" and
+            // skips — effective cadence ≈ 2×interval. Harmless vs the 300s
+            // budget; noted here so the 2× isn't mistaken for a bug.)
+            if (anyRes.__biliKeepaliveBoundary === false) return;
+            res.write(": bili-keepalive\n\n");
+            if (!warned) {
+                warned = true;
+                log("info", `[${sid}] stream silent ${idleMs}ms — holding client with SSE keep-alive comments past its undici body timeout (#1647)`);
+            }
+        } catch {
+            stop();
+        }
+    }, Math.max(50, Math.floor(idleMs / 3)));
+}
+
 /** #1493: the OUTBOUND payload size (what would actually be sent upstream):
  *  post-fold message content + wire overhead + images. Single source of truth —
  *  BOTH preflightCompressIfNeeded (trigger floor + fit gates) and armFailureShrink
@@ -5022,6 +5237,7 @@ async function forward(
     affinity?: string,
     overflowRefold?: (realWindow: number | undefined) => Promise<string | Buffer | null>,
 ): Promise<void> {
+    const forwardStartedAt = Date.now();
     // E2: a codex native-compaction request intercepted in prepare() carries a
     // forged success response — serve it without contacting upstream.
     if (prepared?.codexForge) {
@@ -5094,18 +5310,25 @@ async function forward(
             }
         }
     }
-    // #1421: outbound chain checkpoint — every request THIS instance actually
+    // #1421/#1683: outbound chain checkpoint — when egress stamping is enabled
+    // (chainEgressStamp, DEFAULT OFF), every request THIS instance actually
     // processed leaves with a request-level stamp, so a downstream bili applies
-    // first-processor-wins even when x-bili-hop was stripped in transit. Lands
+    // first-processor-wins even when x-bili-hop was stripped in transit. The
+    // carrier is model-visible (insertCheckpointCarrier), which is why this is
+    // opt-in: models read it as phantom user input and burn tokens on it. Lands
     // AFTER compat roles + output steering: the digest must cover the exact
     // bytes forwarded. Best-effort — a stamp failure never breaks the forward.
     // Passthrough/side/forge/classifier forwards carry no stamp: only a real
     // kernel pass (processedMessages non-empty — side/classifier Prepareds are
-    // empty) claims processing, per the first-processor-wins contract.
-    if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainContentDetection !== false) {
+    // empty) claims processing, per the first-processor-wins contract. Inbound
+    // recognition + hop passthrough are unaffected by this switch.
+    if (prepared && !prepared.sidePassthrough && prepared.processedMessages.length > 0 && typeof wireBody === "string" && opts.chainEgressStamp === true) {
         try {
             const stamped = stampOutbound(JSON.parse(wireBody), prepared.protocol, instanceId);
-            if (stamped !== null) wireBody = JSON.stringify(stamped);
+            if (stamped !== null) {
+                wireBody = JSON.stringify(stamped);
+                log("debug", `[${prepared.session.id}] [stamp] outbound ${prepared.protocol} request carries checkpoint carrier`);
+            }
         } catch (err) {
             log("debug", `[${prepared.session.id}] [chain] outbound stamping failed (${String(err)}); forwarding unstamped`);
         }
@@ -5227,6 +5450,12 @@ async function forward(
     registerRequestAbort(res, clientAbort);
     res.on("close", () => {
         if (!res.writableEnded) {
+            // #1647: without this, a client killed by its own undici bodyTimeout
+            // (starved by upstream-caused silence) is indistinguishable in the log
+            // from a user cancel. Elapsed + bytes-to-client separates the two.
+            const ageMs = Date.now() - forwardStartedAt;
+            const clientBytes = res.socket?.bytesWritten ?? 0;
+            log("info", `[${prepared?.session.id ?? "passthrough"}] client disconnected mid-stream after ${ageMs}ms (${clientBytes} bytes written to client)`);
             clientAbort.abort();
             if (prepared?.session) noteClientAbort(prepared.session);
         }
@@ -5235,8 +5464,11 @@ async function forward(
     try {
         upstreamResult = await fetchWithTimeout(upstreamUrl, init, undefined, clientAbort.signal);
         recordUpstreamConnection(upstreamUrl, proxyUrl);
+        // #1682: any resolved response proves the host is reachable again.
+        clearUpstreamAlertsForHost(upstreamUrl);
     } catch (error) {
         recordUpstreamConnection(upstreamUrl, proxyUrl, error);
+        recordUpstreamAlert(upstreamUrl, error, proxyUrl !== undefined);
         // #604: a network-level failure (socket reset, timeout abort) also never
         // reports usage — arm the emergency shrink like the 5xx branch below.
         if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure", outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").armEstimate);
@@ -5619,6 +5851,16 @@ async function forward(
             loggerLog("warn", `[${prepared?.session.id ?? "unknown"}] ← upstream ${upstream.status} returned a null body; responding empty to client`);
         }
         return;
+    }
+    // #1647: hold the client across streaming-phase silence — upstream pings
+    // swallowed by the rewrite/strip pipes, buffered rounds (see
+    // beginStreamKeepalive). SSE only: comment injection is framing-safe only
+    // where the body is an event stream. Self-clears on res close.
+    if (
+        prepared?.stream === true &&
+        (upstream.headers.get("content-type") ?? "").includes("text/event-stream")
+    ) {
+        beginStreamKeepalive(res, prepared.session.id, log);
     }
     // #1536: origin of the URL fetched for THIS request — cache-invalidation
     // attribution identity shared by the plugin pipes below and the compress
@@ -6302,6 +6544,7 @@ async function sendOverview(res: http.ServerResponse, opts: ProxyOptions): Promi
         blindTunnels: getBlindTunnelStats(),
         conflicts: summarizeConflicts(listSessions()),
         passthrough: { enabled: !!opts.passthrough, source: opts.passthroughSource },
+        alerts: getUpstreamAlerts(),
     }, null, 2));
 }
 

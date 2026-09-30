@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { resolveZonePortBase } from "./config.js";
 import { stateDir } from "./paths.js";
 
 /** Instance registry (#394/#403/#417): the proxy-origin file is upgraded from
@@ -87,6 +88,54 @@ export function readProxyInstanceFile(file?: string): ProxyInstanceFile | { orig
 
 export function instanceFilePath(): string {
     return path.join(stateDir(), "proxy-origin");
+}
+
+export function portZoneFilePath(): string {
+    return path.join(stateDir(), "port-zone.json");
+}
+
+/** #1660: the sticky per-lane port inside the self-managed zone. The +1
+ *  ladder can drift a lane off its base (EADDRINUSE at 18787 → 18788 → …);
+ *  once a lane runs at a drifted port, every later launch must TRY that
+ *  port first — the lane's persistent wrappers and managed URLs point at
+ *  it. Tolerates a missing/garbage file (undefined → base). */
+export function readZonePort(lane: string, file: string = portZoneFilePath()): number | undefined {
+    let raw: string;
+    try {
+        raw = fs.readFileSync(file, "utf8");
+    } catch {
+        return undefined;
+    }
+    try {
+        const parsed = JSON.parse(raw) as { lanes?: Record<string, unknown> };
+        const v = parsed?.lanes?.[lane];
+        if (typeof v === "number" && Number.isInteger(v) && v > 0 && v < 65536) return v;
+        return undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/** #1660: record a lane's settled zone port (the spawn path writes the port
+ * the child ACTUALLY bound — preferred or laddered). Best-effort RMW via the
+ * same atomic tmp+rename as every registry marker; never throws. */
+export function writeZonePort(lane: string, port: number, file: string = portZoneFilePath()): void {
+    if (!Number.isInteger(port) || port <= 0 || port >= 65536) return;
+    let cur: { lanes?: Record<string, number> } = {};
+    try {
+        const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { lanes?: Record<string, number> };
+        if (parsed !== null && typeof parsed === "object" && parsed.lanes !== null && typeof parsed.lanes === "object") cur = parsed;
+    } catch {}
+    atomicWriteJson({ lanes: { ...(cur.lanes ?? {}), [lane]: port } }, file);
+}
+
+/** #1660: the port a lane'd launch should TRY to bind — the lane's sticky
+ *  record (a past ladder drift this lane still points at), else the zone
+ *  base (BILI_ZONE_PORT override). Explicit user overrides
+ *  (BILI_CLAUDE_NATIVE_PORT / BILI_ZCODE_PORT) are resolved separately by
+ *  the lanes and imply strict-port launches. */
+export function lanePreferredPort(lane: string, env: NodeJS.ProcessEnv = process.env, file: string = portZoneFilePath()): number {
+    return readZonePort(lane, file) ?? resolveZonePortBase(env);
 }
 
 /** #1225: content identity of a bili entry script (sha256 of its bytes).

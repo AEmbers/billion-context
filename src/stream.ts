@@ -7,7 +7,7 @@ import { effectiveAbsorbConfig, executeAbsorb, isProxyToolFor } from "./absorb.j
 import { executeSearchContextTarget, resolveDecompress } from "./decompress-shared.js";
 import { adoptContentStore, contentStoreOf, ccrEnabled, drainPendingRetrievals, executeRetrieve, retrieveToolName } from "./store.js";
 import { IMAGE_FULL_TOOL_NAME, executeImageFull, imageCompressionEnabled } from "./image-compress.js";
-import { containsMarkerLineText, containsRenderTagText, stripAcpTags } from "./loop/tag-echo-filter.js";
+import { containsBiliInternalText, containsMarkerLineText, containsRenderTagText, stripAcpTags } from "./loop/tag-echo-filter.js";
 import { maxShrinkPerCompress } from "./fetch-util.js";
 import { safePrefix, safeSuffix, scrubLoneSurrogates } from "./text-safe.js";
 
@@ -517,8 +517,8 @@ export function rewriteJsonResponse(body: unknown, ctx: RewriteCtx): unknown {
     if (converted && !sawRealToolUse) b.stop_reason = "end_turn";
     for (const blk of newContent) {
         const t = (blk as { type?: string; text?: string }).text;
-        if (typeof t === "string" && (containsRenderTagText(t) || containsMarkerLineText(t))) {
-            ctx.log(`[warn: tag echo] non-stream model output contains ACP echo (render tags/markers), stripped: ${t.slice(0, 120).replace(/\n/g, " ")}`);
+        if (typeof t === "string" && (containsRenderTagText(t) || containsMarkerLineText(t) || containsBiliInternalText(t))) {
+            ctx.log(`[warn: tag echo] non-stream model output contains ACP echo (render tags/markers/internal artifacts), stripped: ${t.slice(0, 120).replace(/\n/g, " ")}`);
             (blk as { text?: string }).text = stripAcpTags(t);
         }
     }

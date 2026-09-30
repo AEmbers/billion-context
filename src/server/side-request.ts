@@ -72,6 +72,7 @@ export function restoreOutputBudget(
     parsed: unknown,
     session: { id: string; metadata: Record<string, unknown> },
     log: (level: string, msg: string) => void,
+    configuredOutputLimit?: number,
 ): void {
     const field = outputBudgetField(parsed);
     if (!field) return;
@@ -83,10 +84,26 @@ export function restoreOutputBudget(
         return;
     }
     if (!Array.isArray(p.tools) || p.tools.length === 0) return;
-    const highWater = session.metadata.outputBudgetHighWater;
-    if (typeof highWater === "number" && highWater > SIDE_REQUEST_MAX_TOKENS) {
-        writeOutputBudget(p, field, highWater);
-        log("info", `[${session.id}] output budget restored ${value} -> ${highWater} (#546: client shrank it from its raw-history estimate)`);
+    const highWaterRaw = session.metadata.outputBudgetHighWater;
+    const highWater = typeof highWaterRaw === "number" && highWaterRaw > SIDE_REQUEST_MAX_TOKENS ? highWaterRaw : undefined;
+    // #1665: the remembered water mark can itself be pathologically low — a
+    // client that sizes its budget from RAW history decays through small
+    // positive values (…, 680, 234) before starving at <=200, so "last
+    // non-starved wins" ends holding a death rattle; a session first opened
+    // into bili with an already-oversized history never seeds anything at all.
+    // Floor the restore target at the operator-declared model output limit
+    // (ModelEntry.output, #924 surface) so a broken client cannot pin the
+    // session at a few hundred tokens forever. The #453 clamp downstream
+    // still bounds the result by real window headroom.
+    let target = highWater;
+    const floor = typeof configuredOutputLimit === "number" && configuredOutputLimit > SIDE_REQUEST_MAX_TOKENS ? configuredOutputLimit : undefined;
+    if (floor !== undefined && (target === undefined || floor > target)) target = floor;
+    if (typeof target === "number") {
+        writeOutputBudget(p, field, target);
+        const note = target === floor && floor !== undefined
+            ? (highWater === undefined ? "; no healthy high-water yet — using configured output limit (#1665)" : `; high-water ${highWater} below configured output limit — floored (#1665)`)
+            : "";
+        log("info", `[${session.id}] output budget restored ${value} -> ${target} (#546: client shrank it from its raw-history estimate${note})`);
     }
 }
 

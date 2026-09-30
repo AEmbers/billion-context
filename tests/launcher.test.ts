@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type { PathLike } from "node:fs";
+import { rmrf } from "./tmp-rm.ts";
 type SymlinkKind = "dir" | "file" | "junction";
 import net from "node:net";
 import os from "node:os";
@@ -18,6 +19,7 @@ import {
 } from "../src/instance.ts";
 import {
     LAUNCHER_DEFAULT_HOST,
+    findLiveAttachableInstance,
     isLaunchClient,
     baseClientName,
     piTestArgs,
@@ -497,7 +499,7 @@ test("runLaunch pi: native -e plugin injected only when not installed", async ()
         if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = prevPiDir;
         if (stubbed) fs.rmSync(distAgent, { force: true });
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -575,7 +577,7 @@ test("runLaunch pi #535: refuses launch when http rewrites needed and extension 
         if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = prevPiDir;
         if (distExisted) fs.renameSync(distBackup, distAgent);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -654,7 +656,7 @@ test("runLaunch omp #535: refuses launch when http rewrites needed and extension
         if (prevOmpDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = prevOmpDir;
         if (distExisted) fs.renameSync(distBackup, distAgent);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -731,7 +733,7 @@ test("runLaunch hermes #535: proxy env routing, no HERMES_HOME overlay, real con
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 test("runLaunch pi #535: refuses launch when ONLY https (hand-wrapped) rewrites needed and extension cannot load", async () => {
@@ -770,7 +772,7 @@ test("runLaunch pi #535: refuses launch when ONLY https (hand-wrapped) rewrites 
         if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = prevPiDir;
         if (distExisted) fs.renameSync(distBackup, distAgent);
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -847,7 +849,7 @@ test("runLaunch omp: native -e plugin injected only when no loadable config entr
         assert.ok(!clientArgsSeen[0].includes("-e"));
 
         // stale entry (file gone) → omp would fail to load it; -e injected again
-        fs.rmSync(path.dirname(otherInstall), { recursive: true, force: true });
+        rmrf(path.dirname(otherInstall));
         clientArgsSeen.length = 0;
         await runLaunch(
             { client: "omp", clientArgs: [], overrides: {} },
@@ -866,7 +868,7 @@ test("runLaunch omp: native -e plugin injected only when no loadable config entr
         if (prevOmpDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = prevOmpDir;
         if (stubbed) fs.rmSync(distAgent, { force: true });
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -894,7 +896,7 @@ test("piPluginInstalled: dead bili-shaped entries do not count as installed (#13
         fs.writeFileSync(path.join(piHome, "settings.json"), JSON.stringify({ packages: [path.join(home, "some-other-pkg")] }));
         assert.equal(piPluginInstalled(piHome), false);
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -914,7 +916,7 @@ test("ompPluginLoadedFrom: only entries whose file exists count as loaded", () =
         fs.writeFileSync(path.join(ompHome, "config.yml"), "extensions:\n  - /some/other/plugin.js\n");
         assert.equal(ompPluginLoadedFrom(ompHome), false); // foreign plugin
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -1193,12 +1195,15 @@ test("ensureProxyRunning: armed daemon (no lane) stays shareable with any client
     assert.equal(handle.attached, true);
 });
 
-// #1335: the attach gate — an unarmed listener (a manually started `bili start`
-// daemon: no BILI_PARENT_PID, refuses watchers, never dies with its users) is
-// never attached by default; the hook spawns its own session-owned proxy so
-// every session runs the currently installed bili and the proxy dies with the
-// last session (#1186 semantics).
-test("ensureProxyRunning: unarmed listener is not attached by default — self-managed spawn (#1335)", async () => {
+// #1335: the attach gate — an unarmed listener is never attached by
+// default; the hook spawns its own session-owned proxy so every session runs
+// the currently installed bili and the proxy dies with the last session
+// (#1186 semantics). #1660 narrows the gate to LANE'D instances: a lane'd
+// proxy with a dead/unarmed watchdog is a lifecycle-drift symptom and is
+// refused; a USER-ZONE instance (manual `bili start`: no lane, no launch
+// token) is deliberately maintained by the user and IS attachable — see the
+// dedicated user-zone test below.
+test("ensureProxyRunning: unarmed LANE'D listener is not attached by default — self-managed spawn (#1335/#1660)", async () => {
     let spawnCalls = 0;
     let registered = 0;
     let childToken = "";
@@ -1214,7 +1219,7 @@ test("ensureProxyRunning: unarmed listener is not attached by default — self-m
             },
             fetchImpl: async () => ({ ok: true }),
             fetchHealthInfo: async () => ({ ok: true, instanceId: "daemon-1", watchdog: { armed: false } }),
-            readInstanceFile: () => (spawned ? recordedInstance({ launchToken: childToken }) : recordedInstance({ instanceId: "daemon-1" })),
+            readInstanceFile: () => (spawned ? recordedInstance({ launchToken: childToken }) : recordedInstance({ instanceId: "daemon-1", lane: "claude-native" })),
             registerWatcher: async () => {
                 registered++;
                 return "refused";
@@ -1223,13 +1228,98 @@ test("ensureProxyRunning: unarmed listener is not attached by default — self-m
             scriptPath: FP_SCRIPT,
         },
     );
-    assert.equal(spawnCalls, 1, "self-managed proxy spawned instead of attaching to the unarmed daemon");
+    assert.equal(spawnCalls, 1, "self-managed proxy spawned instead of attaching to the unarmed lane'd daemon");
     assert.ok(handle.child);
     assert.equal(handle.attached, undefined);
     assert.equal(registered, 0, "no watcher registration is attempted against the refused daemon");
 });
 
-test("ensureProxyRunning: unverifiable listener (no watchdog field, pre-#1330 build) is treated as unarmed (#1335)", async () => {
+test("ensureProxyRunning: unarmed USER-ZONE daemon (manual `bili start`) is attached by default (#1660)", async () => {
+    let spawnCalls = 0;
+    let registered = 0;
+    const handle = await ensureProxyRunning(
+        { host: "127.0.0.1", port: 8787, passthrough: false, debug: false, lane: "pi" },
+        {
+            spawnImpl: () => {
+                spawnCalls++;
+                return makeFakeChild(42505);
+            },
+            fetchImpl: async () => ({ ok: true }),
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "manual-1", watchdog: { armed: false } }),
+            readInstanceFile: () => recordedInstance({ instanceId: "manual-1" }),
+            registerWatcher: async () => {
+                registered++;
+                return "ok";
+            },
+            sleep: () => new Promise((r) => setTimeout(r, 0)),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(spawnCalls, 0, "the user-maintained daemon is reused, not doubled");
+    assert.equal(handle.attached, true);
+    assert.equal(registered, 1);
+});
+
+test("ensureProxyRunning: a lane'd launch with port 0 binds the zone preference and settles it sticky (#1660)", async () => {
+    let spawnedArgs: string[] | null = null;
+    const preferred: string[] = [];
+    const settled: Array<[string, number]> = [];
+    const spawnImpl: SpawnFn = (_cmd, args) => {
+        spawnedArgs = [...args];
+        return makeFakeChild(42441);
+    };
+    const handle = await ensureProxyRunning(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false, lane: "zcode" },
+        {
+            fetchImpl: async () => ({ ok: true }),
+            spawnImpl,
+            sleep: () => Promise.resolve(),
+            readInstanceFile: () => undefined,
+            zonePreferredPort: (lane) => {
+                preferred.push(lane);
+                return 18787;
+            },
+            writeZonePort: (lane, port) => {
+                settled.push([lane, port]);
+            },
+        },
+    );
+    assert.deepEqual(preferred, ["zcode"], "the lane's zone preference resolves the spawn port");
+    assert.ok(spawnedArgs !== null);
+    const portIdx = spawnedArgs.indexOf("--port");
+    assert.equal(spawnedArgs[portIdx + 1], "18787", "zone base is the spawn port, not an OS ephemeral");
+    assert.equal(handle.port, 18787);
+    assert.deepEqual(settled, [["zcode", 18787]], "the settled port is recorded sticky for later launches");
+});
+
+test("ensureProxyRunning: an unlane'd launch keeps the OS ephemeral default — no zone, no sticky (#1660)", async () => {
+    let spawnedArgs: string[] | null = null;
+    const settled: Array<[string, number]> = [];
+    const spawnImpl: SpawnFn = (_cmd, args) => {
+        spawnedArgs = [...args];
+        return makeFakeChild(42442);
+    };
+    const handle = await ensureProxyRunning(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            fetchImpl: async () => ({ ok: true }),
+            spawnImpl,
+            sleep: () => Promise.resolve(),
+            readInstanceFile: () => undefined,
+            writeZonePort: (lane, port) => {
+                settled.push([lane, port]);
+            },
+        },
+    );
+    assert.ok(spawnedArgs !== null);
+    const portIdx = spawnedArgs.indexOf("--port");
+    const childPort = Number(spawnedArgs[portIdx + 1]);
+    assert.ok(Number.isInteger(childPort) && childPort > 0, `ephemeral port assigned, got ${childPort}`);
+    assert.equal(handle.port, childPort);
+    assert.deepEqual(settled, [], "no sticky write without a lane");
+});
+
+test("ensureProxyRunning: unverifiable lane'd listener (no watchdog field, pre-#1330 build) is treated as unarmed (#1335)", async () => {
     let spawnCalls = 0;
     let childToken = "";
     let spawned = false;
@@ -1244,7 +1334,7 @@ test("ensureProxyRunning: unverifiable listener (no watchdog field, pre-#1330 bu
             },
             fetchImpl: async () => ({ ok: true }),
             fetchHealthInfo: async () => ({ ok: true, instanceId: "stale-daemon" }),
-            readInstanceFile: () => (spawned ? recordedInstance({ launchToken: childToken }) : recordedInstance({ instanceId: "stale-daemon" })),
+            readInstanceFile: () => (spawned ? recordedInstance({ launchToken: childToken }) : recordedInstance({ instanceId: "stale-daemon", lane: "zcode" })),
             sleep: () => new Promise((r) => setTimeout(r, 0)),
             scriptPath: FP_SCRIPT,
         },
@@ -1274,7 +1364,7 @@ test("ensureProxyRunning: attachExternal escape hatch restores attaching to an u
     assert.equal(handle.attached, true, "deliberate setups keep the old behavior via the opt-in");
 });
 
-test("ensureProxyRunning: strictPort launch fails fast when its pinned port is held by an unarmed proxy (#1335/#964)", async () => {
+test("ensureProxyRunning: strictPort launch fails fast when its pinned port is held by an unarmed LANE'D proxy (#1335/#964/#1660)", async () => {
     let spawnCalls = 0;
     await assert.rejects(
         ensureProxyRunning(
@@ -1286,7 +1376,7 @@ test("ensureProxyRunning: strictPort launch fails fast when its pinned port is h
                 },
                 fetchImpl: async () => ({ ok: true }),
                 fetchHealthInfo: async () => ({ ok: true, instanceId: "daemon-1", watchdog: { armed: false } }),
-                readInstanceFile: () => recordedInstance({ origin: "http://127.0.0.1:8799", port: 8799, instanceId: "daemon-1" }),
+                readInstanceFile: () => recordedInstance({ origin: "http://127.0.0.1:8799", port: 8799, instanceId: "daemon-1", lane: "claude-native" }),
                 sleep: () => Promise.resolve(),
                 scriptPath: FP_SCRIPT,
             },
@@ -2289,7 +2379,7 @@ test("readOmpConfig: reads models.yml from omp home", () => {
         const cfg = readOmpConfig(home);
         assert.equal(cfg.providers.a.baseUrl, "http://x:1/v1");
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -2298,7 +2388,7 @@ test("readOmpConfig: missing models.yml → {}", () => {
     try {
         assert.deepEqual(readOmpConfig(home), { providers: {} });
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -2343,7 +2433,7 @@ test("readOpencodeConfig: reads provider baseURLs from opencode.json", () => {
         assert.equal(cfg.providers["noUrl"], undefined);
         assert.equal(readOpencodeConfig(path.join(dir, "missing.json")).providers["local"], undefined);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2383,7 +2473,7 @@ test("readOpencodeConfig: parses JSONC (comments + trailing commas)", () => {
         const cfg = readOpencodeConfig(cfgFile);
         assert.deepEqual(cfg.providers["local"], { baseURL: "http://127.0.0.1:18081/v1" });
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2444,7 +2534,7 @@ test("readOpencodeConfigRoot: merges config.json → opencode.json → opencode.
 
         assert.equal(readOpencodeConfigRoot({ XDG_CONFIG_HOME: path.join(dir, "empty-xdg") }), undefined);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2477,22 +2567,22 @@ test("prepareOpencodeHttpRewrite: writes rewritten copy from a JSONC user config
         assert.equal(fs.readFileSync(cfgFile, "utf8"), original);
         // the caller's merged root must stay pristine (rewrite happens on a clone)
         assert.deepEqual(root, { plugin: ["opencode-acp@latest"], provider: { "zhipuai-lb": { options: { baseURL: "http://127.0.0.1:18081/v1" } } } });
-        fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
+        rmrf(path.dirname(tmpFile));
         assert.equal(prepareOpencodeHttpRewrite(root, "http://127.0.0.1:8787", [], []), undefined);
         const withPlugin = prepareOpencodeHttpRewrite(root, "http://127.0.0.1:8787", [], [], "/opt/bili/dist/agent/opencode.js", false, { ...spawnEnv });
         assert.ok(withPlugin);
         const injected = JSON.parse(fs.readFileSync(withPlugin, "utf8"));
         assert.deepEqual(injected.plugin, ["/opt/bili/dist/agent/opencode.js"]);
         assert.equal(injected.provider["zhipuai-lb"].options.baseURL, "http://127.0.0.1:18081/v1");
-        fs.rmSync(path.dirname(withPlugin), { recursive: true, force: true });
+        rmrf(path.dirname(withPlugin));
         const missingCfg = prepareOpencodeHttpRewrite(undefined, "http://127.0.0.1:8787", [], [], "/opt/bili/dist/agent/opencode.js");
         assert.ok(missingCfg);
         const fromEmpty = JSON.parse(fs.readFileSync(missingCfg, "utf8"));
         assert.deepEqual(fromEmpty.plugin, ["/opt/bili/dist/agent/opencode.js"]);
         assert.deepEqual(fromEmpty.compaction, { auto: false });
-        fs.rmSync(path.dirname(missingCfg), { recursive: true, force: true });
+        rmrf(path.dirname(missingCfg));
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2518,15 +2608,15 @@ test("prepareOpencodeHttpRewrite: strips opencode-acp entries in all spec forms 
         assert.deepEqual(out.plugins, []);
         // first stripped spec wins — the copy the host would have loaded first
         assert.equal(spawnEnv["BILI_OPENCODE_ACP_SPEC"], "opencode-acp@latest");
-        fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
+        rmrf(path.dirname(tmpFile));
         // no acp entries → env untouched
         const env2: NodeJS.ProcessEnv = {};
         const plain = prepareOpencodeHttpRewrite({ plugin: ["other"], provider: {} }, "http://127.0.0.1:8787", [], [], "/opt/p.js", false, env2);
         assert.ok(plain);
         assert.equal(env2["BILI_OPENCODE_ACP_SPEC"], undefined);
-        fs.rmSync(path.dirname(plain), { recursive: true, force: true });
+        rmrf(path.dirname(plain));
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2542,9 +2632,9 @@ test("prepareOpencodeHttpRewrite: pluginDirMode wraps the plugin in an index.js 
         const shim = fs.readFileSync(path.join(entry, "index.js"), "utf8");
         assert.match(shim, /export \{ default \} from "\/opt\/bili\/dist\/agent\/opencode\.js";/);
         assert.deepEqual(injected.compaction, { auto: false });
-        fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
+        rmrf(path.dirname(tmpFile));
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2584,9 +2674,9 @@ test("prepareOpencodeHttpRewrite: re-anchors relative local plugin specs against
         assert.equal(fs.readFileSync(path.join(cfgDir, "opencode.json"), "utf8"), original);
         assert.equal((root.plugin as unknown[])[0], "./ntfy.js");
         assert.equal(((root.plugins as Array<Record<string, unknown>>)[0] as Record<string, unknown>).package, "./ntfy");
-        fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
+        rmrf(path.dirname(tmpFile));
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2605,9 +2695,9 @@ test("prepareOpencodeHttpRewrite: OPENCODE_CONFIG dir wins as the relative-spec 
         assert.ok(tmpFile);
         const cloned = JSON.parse(fs.readFileSync(tmpFile, "utf8"));
         assert.deepEqual(cloned.plugins, [{ package: path.resolve(ocDir, "./local") }]);
-        fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
+        rmrf(path.dirname(tmpFile));
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2628,7 +2718,7 @@ test("opencodeMajorVersion: parses --version output, defaults to 1 on failure", 
         assert.equal(opencodeMajorVersion(mk("oc-v2.sh", "opencode v2.0.3")), 2);
         assert.equal(opencodeMajorVersion(mk("oc-v1.sh", "1.14.46")), 1);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2656,7 +2746,7 @@ test("resolveOpencodeConfigFile: OPENCODE_CONFIG wins; first existing file, .jso
         fs.writeFileSync(legacyFile, "{}");
         assert.equal(resolveOpencodeConfigFile(env), legacyFile);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2720,7 +2810,7 @@ test("readHermesConfig + resolveHermesHome", () => {
         const cfg = readHermesConfig(dir);
         assert.equal(cfg.providers.x?.api, "http://1.2.3.4:9/v1");
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2775,7 +2865,7 @@ test("readDshConfig + resolveDshHome + parseDshSettingsYaml", () => {
         assert.deepEqual(parseDshSettingsYaml('x:\n  baseURL: \'"notaurl\"\'\n'), []);
         assert.deepEqual(parseDshSettingsYaml('x:\n  baseURL: "https://api.quoted.io/v1"\n'), ["https://api.quoted.io/v1"]);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2849,11 +2939,11 @@ test("prepareDshHome: rewrites baseURL lines, shares siblings, never touches the
         assert.equal(fs.readFileSync(path.join(dir, "settings.yaml"), "utf8"), original);
         assert.equal(fs.readFileSync(path.join(overlay, ".credentials.yaml"), "utf8"), "DEEPSEEK_API_KEY: sk-x");
         assert.ok(fs.lstatSync(path.join(overlay, "profiles")).isSymbolicLink());
-        fs.rmSync(overlay, { recursive: true, force: true });
+        rmrf(overlay);
 
         assert.equal(prepareDshHome(dir, "http://127.0.0.1:8787", []), undefined);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2871,9 +2961,9 @@ test("prepareDshHome: preserves CRLF line endings when rewriting", () => {
         assert.ok(txt.includes("\r\n"), "CRLF preserved");
         assert.ok(!/\r\n\r\n/.test(txt), "no doubled newlines");
         assert.ok(txt.includes("baseURL: http://127.0.0.1:8787/bili/http://127.0.0.1:8199/v1\r"));
-        fs.rmSync(overlay, { recursive: true, force: true });
+        rmrf(overlay);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2887,9 +2977,9 @@ test("writeDshAcpPatch: writes insert overlay with file:// plugin URL into <home
         assert.ok(txt.startsWith("- insert:\n"));
         assert.match(txt, /^ {4}- id: bili-native\n {6}name: file:\/\/.+dsh-native\.js$/m);
         assert.match(txt, /^- id: compaction-basic\n  config:\n    auto: false\n$/m);
-        fs.rmSync(`${dir}-bili`, { recursive: true, force: true });
+        rmrf(`${dir}-bili`);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2908,7 +2998,7 @@ test("prepareDshHome: returns undefined for unreadable settings even with rewrit
         const rewrites: HttpRewrite[] = [{ key: "dsh-1", realUpstream: "http://127.0.0.1:8199/v1" }];
         assert.equal(prepareDshHome(dir, "http://127.0.0.1:8787", rewrites), undefined);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2941,9 +3031,9 @@ test("prepareCodexHome: no real config → overlay holds only the bili MCP block
         assert.ok(fs.lstatSync(path.join(overlay, "sessions")).isSymbolicLink());
         assert.equal(fs.readFileSync(path.join(dir, "auth.json"), "utf8"), authOriginal);
         assert.ok(!fs.existsSync(path.join(dir, "config.toml")));
-        fs.rmSync(overlay, { recursive: true, force: true });
+        rmrf(overlay);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2962,9 +3052,9 @@ test("prepareCodexHome: real config without bili → original preserved, block a
         assert.ok(txt.includes('[model_providers.openai]'));
         assert.equal((txt.match(/\[mcp_servers\.bili\]/g) ?? []).length, 1);
         assert.equal(fs.readFileSync(path.join(dir, "config.toml"), "utf8"), original);
-        fs.rmSync(overlay, { recursive: true, force: true });
+        rmrf(overlay);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -2995,9 +3085,9 @@ test("prepareCodexHome: pre-existing [mcp_servers.bili] is replaced, never dupli
         assert.ok(txt.includes(`BILI_CONVERSATION_ID = ${JSON.stringify("conv-3")}`), "per-spawn conversation id added");
         assert.ok(txt.includes('model = "gpt-5"'), "unrelated top-level key kept");
         assert.ok(txt.includes('[other_table]') && txt.includes('keep = "me"'), "unrelated table kept");
-        fs.rmSync(overlay, { recursive: true, force: true });
+        rmrf(overlay);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -3028,9 +3118,9 @@ test("prepareCodexMcpInjection: win32 redirects CODEX_HOME to the overlay, drops
         assert.ok(fs.existsSync(path.join(`${dir}-bili`, "config.toml")));
         const txt = fs.readFileSync(path.join(`${dir}-bili`, "config.toml"), "utf8");
         assert.equal((txt.match(/\[mcp_servers\.bili\]/g) ?? []).length, 1);
-        fs.rmSync(`${dir}-bili`, { recursive: true, force: true });
+        rmrf(`${dir}-bili`);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -3135,7 +3225,7 @@ test("runLaunch dsh: non-loopback upstreams ride proxy envs, loopback keeps the 
         assert.ok(/- id: bili-native\n {6}name: file:\/\/\/.*dsh-native\.js\n/.test(patchTxt));
         assert.match(patchTxt, /^- id: compaction-basic\n  config:\n    auto: false\n$/m);
         assert.deepEqual(argsSeen[0], ["--patch", patchFile, "--profile", "headless", "task"]);
-        fs.rmSync(overlay, { recursive: true, force: true });
+        rmrf(overlay);
     } finally {
         process.exit = prevExit;
         if (prevBin === undefined) delete process.env.BILI_CLIENT_BIN;
@@ -3144,7 +3234,7 @@ test("runLaunch dsh: non-loopback upstreams ride proxy envs, loopback keeps the 
         else process.env.DSH_HOME = prevDshHome;
         if (prevNoProxy === undefined) delete process.env.NO_PROXY;
         else process.env.NO_PROXY = prevNoProxy;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -3213,7 +3303,7 @@ test("runLaunch dsh: no loopback custom providers — no DSH_HOME overlay (#535 
         else process.env.BILI_CLIENT_BIN = prevBin;
         if (prevDshHome === undefined) delete process.env.DSH_HOME;
         else process.env.DSH_HOME = prevDshHome;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -3399,7 +3489,7 @@ test("runLaunch omp: launcher hands per-model windows to the spawned proxy", asy
         else process.env.USERPROFILE = prevUserProfile;
         if (prevOmpDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = prevOmpDir;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -3558,7 +3648,7 @@ test("readClaudeSettings: model from env block / top-level, autoCompactWindow fr
         cfg = readClaudeSettings(home, os.tmpdir(), {});
         assert.deepEqual(cfg, {});
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -3643,7 +3733,7 @@ test("runLaunch codex: budget args injected for MITM mode (built-in table window
         else process.env.ANTHROPIC_MODEL = prevAnthropicModel;
         if (prevAutoCompact === undefined) delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
         else process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = prevAutoCompact;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -3723,7 +3813,7 @@ test("runLaunch claude: CLAUDE_CODE_AUTO_COMPACT_WINDOW injected (built-in table
         else process.env.ANTHROPIC_MODEL = prevAnthropicModel;
         if (prevAutoCompact === undefined) delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
         else process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = prevAutoCompact;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -3796,7 +3886,7 @@ test("readCodebuddyConfig: settings env block / top-level model / autoCompactWin
         cfg = readCodebuddyConfig(cbDir, os.tmpdir(), {});
         assert.deepEqual(cfg, {});
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -3831,8 +3921,8 @@ test("readCodebuddyConfig: two-tier models.json, project level wins per model", 
             "https://project.example.com/v1/chat/completions",
         ]);
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
-        fs.rmSync(cwd, { recursive: true, force: true });
+        rmrf(home);
+        rmrf(cwd);
     }
 });
 
@@ -4042,7 +4132,7 @@ test("runLaunch codebuddy: CODEBUDDY_BASE_URL /bili/ rewrite + budget injected (
         else process.env.CODEBUDDY_AUTO_COMPACT_WINDOW = prevAutoCompact;
         if (prevConfigDir === undefined) delete process.env.CODEBUDDY_CONFIG_DIR;
         else process.env.CODEBUDDY_CONFIG_DIR = prevConfigDir;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -4071,7 +4161,7 @@ test("qoderIsCnSite: on-disk config dirs only break the tie (no dirs → intl)",
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -4096,7 +4186,7 @@ test("resolveQoderHome: env override > CLI_HOME+dir name > site default", () => 
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -4128,7 +4218,7 @@ test("readQoderConfig: settings.json model (string + object) and model server ho
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -4197,7 +4287,7 @@ test("resolveClientCommand: qoder resolves `qoder`, falls back to `qodercli`", (
         fs.writeFileSync(path.join(dir, "qoder"), "");
         assert.deepEqual(resolveClientCommand("qoder", env), { command: path.join(dir, "qoder"), prefixArgs: [] });
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -4280,7 +4370,7 @@ test("runLaunch qoder: cert-MITM envs, transport forced, budget aligned, default
         else process.env.QODER_MODEL_TRANSPORT = prevTransport;
         if (prevNoProxy === undefined) delete process.env.NO_PROXY;
         else process.env.NO_PROXY = prevNoProxy;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -4297,7 +4387,7 @@ test("resolveTraeHome: TRAE_CONFIG_DIR override > ~/.trae", () => {
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -4382,8 +4472,8 @@ test("readAiderConfUrls: home > git root > cwd precedence, quoted values (#1048)
         fs.rmSync(gitConf);
         assert.deepEqual(readAiderConfUrls(work, confEnv), ["https://cwd.example.com/v1"]);
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
-        fs.rmSync(repo, { recursive: true, force: true });
+        rmrf(home);
+        rmrf(repo);
     }
 });
 
@@ -4461,7 +4551,7 @@ test("resolveClientCommand: aider resolves the `aider` bin generically (#1048)",
         fs.writeFileSync(path.join(dir, "aider"), "");
         assert.deepEqual(resolveClientCommand("aider", env), { command: path.join(dir, "aider"), prefixArgs: [] });
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -4541,7 +4631,7 @@ test("resolveGooseDirs: GOOSE_PATH_ROOT wins; XDG fallback scatters under Block 
             agentsDir: path.join("/x/data", "Block", "goose", ".agents"),
         });
     } finally {
-        fs.rmSync(root, { recursive: true, force: true });
+        rmrf(root);
     }
 });
 
@@ -4561,7 +4651,7 @@ test("readGooseConfig: active_provider + custom_providers base_urls; GOOSE_PROVI
         assert.equal(readGooseConfig(dirs, { GOOSE_PROVIDER: "override" }).activeProvider, "override");
         assert.deepEqual(readGooseConfig(resolveGooseDirs({ GOOSE_PATH_ROOT: "/nonexistent-bili-test" }), {}).customProviders, {});
     } finally {
-        fs.rmSync(root, { recursive: true, force: true });
+        rmrf(root);
     }
 });
 
@@ -4597,7 +4687,7 @@ test("prepareGooseHome/finalizeGooseHome: overlay layout, patched urls, merge-ba
         assert.ok(!fs.readFileSync(path.join(cfgDir, "custom_providers", "newprov.toml"), "utf8").includes(origin), "new file content verbatim");
         assert.equal(prepareGooseHome(env, origin, []), undefined, "no rewrites → no overlay");
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -4613,7 +4703,7 @@ test("resolveClientCommand: trae resolves `traecli`, falls back to `trae-cli` th
         fs.writeFileSync(path.join(dir, "traecli"), "");
         assert.deepEqual(resolveClientCommand("trae", env), { command: path.join(dir, "traecli"), prefixArgs: [] });
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmrf(dir);
     }
 });
 
@@ -4680,7 +4770,7 @@ test("runLaunch trae: cert-MITM envs (SSL_CERT_FILE combined bundle), no budget/
         else process.env.BILI_CLIENT_BIN = prevBin;
         if (prevNoProxy === undefined) delete process.env.NO_PROXY;
         else process.env.NO_PROXY = prevNoProxy;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -4755,7 +4845,7 @@ async function captureLaunchedClientEnv(client: ClientName): Promise<NodeJS.Proc
         }
         if (prevMarker === undefined) delete process.env.BILI_TEST_MARKER;
         else process.env.BILI_TEST_MARKER = prevMarker;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
     assert.equal(clientEnvs.length, 1, `${client} client spawned exactly once`);
     return clientEnvs[0]!;
@@ -4884,7 +4974,7 @@ async function runAiderLaunch(
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
         }
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
     assert.ok(clientEnv, "aider client spawned");
     assert.ok(proxyEnv, "proxy child spawned");
@@ -5007,7 +5097,7 @@ test("readKimiConfig + resolveKimiHome: KIMI_CODE_HOME override, env channels, s
             { id: "m2", contextWindow: 262144 },
         ]);
     } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -5051,14 +5141,14 @@ test("resolveClientCommand: kimi resolves `kimi` on PATH, falls back to <home>/b
         assert.deepEqual(resolveClientCommand("kimi", env), { command: path.join(dir, "kimi"), prefixArgs: [] });
         const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "bili-kimi-empty-"));
         assert.deepEqual(resolveClientCommand("kimi", { PATH: emptyDir, KIMI_CODE_HOME: "/tmp/kh" }), { command: path.join("/tmp/kh", "bin", "kimi"), prefixArgs: [] });
-        fs.rmSync(emptyDir, { recursive: true, force: true });
+        rmrf(emptyDir);
     } finally {
         if (prevHome === undefined) delete process.env.HOME;
         else process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(dir, { recursive: true, force: true });
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(dir);
+        rmrf(home);
     }
 });
 
@@ -5131,7 +5221,7 @@ test("runLaunch kimi: cert-MITM envs (combined CA on SSL_CERT_FILE + NODE_EXTRA_
         else process.env.BILI_CLIENT_BIN = prevBin;
         if (prevNoProxy === undefined) delete process.env.NO_PROXY;
         else process.env.NO_PROXY = prevNoProxy;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -5198,7 +5288,7 @@ test("readMcodeConfig: window merge keeps the known maxOutput when a larger cont
         else process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -5228,13 +5318,13 @@ test("readMcodeConfig + resolveMcodeInstallDir: union-scan ~/.minimax*/config.ya
         const overridden = readMcodeConfig({ MINIMAX_DATA_DIR: dataDir });
         assert.deepEqual(Object.keys(overridden.providers), ["minimax_api"]);
         assert.equal(overridden.providers["minimax_api"]?.baseUrl, "https://override.example.com/");
-        fs.rmSync(dataDir, { recursive: true, force: true });
+        rmrf(dataDir);
     } finally {
         if (prevHome === undefined) delete process.env.HOME;
         else process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -5276,14 +5366,14 @@ test("resolveClientCommand: mcode resolves `mcode` on PATH, falls back to <insta
         assert.deepEqual(resolveClientCommand("mcode", env), { command: path.join(dir, "mcode"), prefixArgs: [] });
         const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "bili-mcode-empty-"));
         assert.deepEqual(resolveClientCommand("mcode", { PATH: emptyDir, MCODE_INSTALL_DIR: "/tmp/md" }), { command: path.join("/tmp/md", "bin", "mcode"), prefixArgs: [] });
-        fs.rmSync(emptyDir, { recursive: true, force: true });
+        rmrf(emptyDir);
     } finally {
         if (prevHome === undefined) delete process.env.HOME;
         else process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
-        fs.rmSync(dir, { recursive: true, force: true });
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(dir);
+        rmrf(home);
     }
 });
 
@@ -5352,7 +5442,7 @@ test("runLaunch mcode: cert-MITM envs (combined CA on SSL_CERT_FILE + NODE_EXTRA
         else process.env.BILI_CLIENT_BIN = prevBin;
         if (prevNoProxy === undefined) delete process.env.NO_PROXY;
         else process.env.NO_PROXY = prevNoProxy;
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
 });
 
@@ -5395,7 +5485,7 @@ test("readOpencodeProjectLayer: git-bounded walk, nearest wins, .opencode dir, j
         const layer2 = readOpencodeProjectLayer(sibling);
         assert.deepEqual(Object.keys(layer2.providers).sort(), ["dotdir", "onlyRoot", "shared"]);
     } finally {
-        fs.rmSync(base, { recursive: true, force: true });
+        rmrf(base);
     }
 });
 
@@ -5418,7 +5508,7 @@ test("readOpencodeProjectLayer: outside a repo walks all ancestor levels", () =>
         assert.deepEqual(layer.providers["topP"], { baseURL: "http://127.0.0.1:6/top", file: path.join(top, "opencode.json") });
         assert.deepEqual(layer.providers["midP"], { baseURL: "http://127.0.0.1:7/mid", file: path.join(mid, "opencode.json") });
     } finally {
-        fs.rmSync(base, { recursive: true, force: true });
+        rmrf(base);
     }
 });
 
@@ -5430,7 +5520,7 @@ test("opencodeEffectiveCwd: honors --dir, defaults to process.cwd()", () => {
         assert.equal(opencodeEffectiveCwd(["--dir", abs]), abs);
         assert.equal(opencodeEffectiveCwd(["--dir=" + abs]), abs);
     } finally {
-        fs.rmSync(abs, { recursive: true, force: true });
+        rmrf(abs);
     }
     assert.equal(opencodeEffectiveCwd(["--dir", "rel/z"]), path.resolve("rel/z"));
 });
@@ -5571,6 +5661,72 @@ test("runLaunch goose: custom provider rides the regenerated GOOSE_PATH_ROOT ove
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
         }
-        fs.rmSync(home, { recursive: true, force: true });
+        rmrf(home);
     }
+});
+
+// #1623: attach decisions must leave a trace. Every silent drop/skip branch
+// in probeLiveInstances/pickAttachable now emits a reason via attachDiag so
+// "why did we spawn instead of attaching?" is diagnosable from bili.log.
+
+test("findLiveAttachableInstance probes only — no spawn, no wait (#1623)", async () => {
+    let spawned = false;
+    const inst = await findLiveAttachableInstance(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            spawnImpl: () => { spawned = true; return makeFakeChild(42433); },
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", watchdog: { armed: true } }),
+            readInstanceFile: () => recordedInstance(),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(spawned, false);
+    assert.equal(inst?.origin, "http://127.0.0.1:8787");
+});
+
+test("attach diagnostics record an owner-process-gone drop (#1623)", async () => {
+    const diag: string[] = [];
+    const inst = await findLiveAttachableInstance(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", watchdog: { armed: true } }),
+            readInstanceFile: () => recordedInstance({ pid: 99999999 }),
+            attachDiag: (m) => diag.push(m),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(inst, undefined);
+    assert.ok(diag.some((m) => m.includes("owner process gone")), `diag was: ${JSON.stringify(diag)}`);
+});
+
+test("attach diagnostics record a fingerprint-mismatch skip (#1623)", async () => {
+    const diag: string[] = [];
+    const inst = await findLiveAttachableInstance(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1", watchdog: { armed: true } }),
+            readInstanceFile: () => recordedInstance({ codeFingerprint: "deadbeef" }),
+            attachDiag: (m) => diag.push(m),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(inst, undefined);
+    assert.ok(diag.some((m) => m.includes("code-fingerprint-mismatch")), `diag was: ${JSON.stringify(diag)}`);
+});
+
+test("attach diagnostics record a lifecycle-gate refusal (#1623)", async () => {
+    const diag: string[] = [];
+    // #1660: an unarmed instance WITHOUT a lane is a user-zone manual start
+    // and attaches by default — the refusal path needs a lane'd one.
+    const inst = await findLiveAttachableInstance(
+        { host: "127.0.0.1", port: 0, passthrough: false, debug: false },
+        {
+            fetchHealthInfo: async () => ({ ok: true, instanceId: "inst-1" }),
+            readInstanceFile: () => recordedInstance({ lane: "zcode" }),
+            attachDiag: (m) => diag.push(m),
+            scriptPath: FP_SCRIPT,
+        },
+    );
+    assert.equal(inst, undefined);
+    assert.ok(diag.some((m) => m.includes("refusing to attach")), `diag was: ${JSON.stringify(diag)}`);
 });
