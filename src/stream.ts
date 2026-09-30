@@ -10,6 +10,7 @@ import { adoptContentStore, contentStoreOf, ccrEnabled, drainPendingRetrievals, 
 import { IMAGE_FULL_TOOL_NAME, executeImageFull, imageCompressionEnabled } from "./image-compress.js";
 import { containsBiliInternalText, containsMarkerLineText, containsRenderTagText, stripAcpTags } from "./loop/tag-echo-filter.js";
 import { maxShrinkPerCompress } from "./fetch-util.js";
+import { attachSubagentSessions, subagentSessionNote, subagentSessionsOf, syncSubagentSessions } from "./subagent-sessions.js";
 import { safePrefix, safeSuffix, scrubLoneSurrogates } from "./text-safe.js";
 
 export type RewriteCtx = {
@@ -490,11 +491,26 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         // #1294 P1: append a fingerprint line per created/updated block —
         // kernel refolds update an existing block's summary in place (same id),
         // so "updated" means any pre-existing block whose summary changed.
-        for (const b of res.state.blocks) {
+        // #1702: opencode sub-agent session ids are captured mechanically at
+        // this same fold commit into a metadata sidecar (structured field
+        // extraction from the dispatch pairs — summary text never carries the
+        // duty), and the receipt names them so the id stays model-visible.
+        const changedBlocks = res.state.blocks.filter((b) => {
             const prev = beforeSummaries.get(b.blockId);
-            if (prev === undefined || prev !== b.summary) {
-                msg += `\n${summaryFingerprintLine(b.blockId, b.summary)}`;
-                logMsg += `\n${summaryFingerprintLogLine(b.blockId, b.summary)}`;
+            return prev === undefined || prev !== b.summary;
+        });
+        syncSubagentSessions(ctx.session, changedBlocks, ctx.compressMessages ?? ctx.messages);
+        const subagentMap = subagentSessionsOf(ctx.session);
+        for (const b of changedBlocks) {
+            msg += `\n${summaryFingerprintLine(b.blockId, b.summary)}`;
+            logMsg += `\n${summaryFingerprintLogLine(b.blockId, b.summary)}`;
+            const ids = subagentMap[b.blockId];
+            if (ids !== undefined && ids.length > 0) {
+                // block id + opaque ses_ identifier only — no summary text, so the
+                // note is safe in the log copy as well (#1718 scope is excerpts).
+                const note = `\n${subagentSessionNote(b.blockId, ids)}`;
+                msg += note;
+                logMsg += note;
             }
         }
         // #189 staged compression (gated): a rewrite above the configured max
