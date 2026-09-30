@@ -10,6 +10,7 @@ import { adoptContentStore, contentStoreOf, ccrEnabled, drainPendingRetrievals, 
 import { IMAGE_FULL_TOOL_NAME, executeImageFull, imageCompressionEnabled } from "./image-compress.js";
 import { containsBiliInternalText, containsMarkerLineText, containsRenderTagText, stripAcpTags } from "./loop/tag-echo-filter.js";
 import { maxShrinkPerCompress } from "./fetch-util.js";
+import { attachSubagentSessions, subagentSessionNote, subagentSessionsOf, syncSubagentSessions } from "./subagent-sessions.js";
 import { safePrefix, safeSuffix, scrubLoneSurrogates } from "./text-safe.js";
 
 export type RewriteCtx = {
@@ -236,7 +237,7 @@ function droppedEntriesNote(diagnostics: CompressParseDiagnostics): string {
         return `[The compress arguments arrived TRUNCATED — only the complete leading entries could be salvaged; any requested range not listed above was LOST, not compressed. Check acp_status for what is still compressible and re-issue the missing range(s).]`;
     }
     if (diagnostics.invalidItems <= 0) return "";
-    const reasons = (diagnostics.invalidReasons ?? []).slice(0, 3).map((r) => (r.length > 160 ? r.slice(0, 160) + "..." : r));
+    const reasons = (diagnostics.invalidReasons ?? []).slice(0, 3).map((r) => (r.length > 160 ? safePrefix(r, 160) + "..." : r));
     const why = reasons.length > 0 ? reasons.join(" | ") : `${diagnostics.invalidItems} entr(ies) failed validation (parse kind=${diagnostics.kind})`;
     const n = diagnostics.invalidItems;
     return `[${n} of the submitted entr${n === 1 ? "y" : "ies"} ${n === 1 ? "was" : "were"} REJECTED and NOT compressed: ${why}. Re-issue the rejected range${n === 1 ? "" : "s"} in a new compress call.]`;
@@ -296,7 +297,7 @@ function postCompressTail(ctx: RewriteCtx, cleanSuccess: boolean): string {
 // succeeded.
 function applyErrorNote(r: { errors: string[] }): string {
     if (r.errors.length === 0) return "";
-    const errs = r.errors.slice(0, 3).map((e) => e.length > 200 ? `${e.slice(0, 200)}…` : e).join(" | ");
+    const errs = r.errors.slice(0, 3).map((e) => e.length > 200 ? `${safePrefix(e, 200)}…` : e).join(" | ");
     return ` Errors: ${errs}`;
 }
 
@@ -312,7 +313,7 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         // header with no entries — stored in client history and re-sent forever,
         // and useless for self-correction. Inline the reasons instead (full
         // list stays logged above).
-        const reasons = rawReasons.slice(0, 3).map((r) => (r.length > 160 ? r.slice(0, 160) + "..." : r));
+        const reasons = rawReasons.slice(0, 3).map((r) => (r.length > 160 ? safePrefix(r, 160) + "..." : r));
         const why = reasons.length > 0 ? ` Rejected entries: ${reasons.join(" | ")}.` : "";
         // #1366: a call with NO content at all ({} / "" args — an "empty companion"
         // compress() emitted alongside the real one) must never be told to
@@ -490,11 +491,26 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
         // #1294 P1: append a fingerprint line per created/updated block —
         // kernel refolds update an existing block's summary in place (same id),
         // so "updated" means any pre-existing block whose summary changed.
-        for (const b of res.state.blocks) {
+        // #1702: opencode sub-agent session ids are captured mechanically at
+        // this same fold commit into a metadata sidecar (structured field
+        // extraction from the dispatch pairs — summary text never carries the
+        // duty), and the receipt names them so the id stays model-visible.
+        const changedBlocks = res.state.blocks.filter((b) => {
             const prev = beforeSummaries.get(b.blockId);
-            if (prev === undefined || prev !== b.summary) {
-                msg += `\n${summaryFingerprintLine(b.blockId, b.summary)}`;
-                logMsg += `\n${summaryFingerprintLogLine(b.blockId, b.summary)}`;
+            return prev === undefined || prev !== b.summary;
+        });
+        syncSubagentSessions(ctx.session, changedBlocks, ctx.compressMessages ?? ctx.messages);
+        const subagentMap = subagentSessionsOf(ctx.session);
+        for (const b of changedBlocks) {
+            msg += `\n${summaryFingerprintLine(b.blockId, b.summary)}`;
+            logMsg += `\n${summaryFingerprintLogLine(b.blockId, b.summary)}`;
+            const ids = subagentMap[b.blockId];
+            if (ids !== undefined && ids.length > 0) {
+                // block id + opaque ses_ identifier only — no summary text, so the
+                // note is safe in the log copy as well (#1718 scope is excerpts).
+                const note = `\n${subagentSessionNote(b.blockId, ids)}`;
+                msg += note;
+                logMsg += note;
             }
         }
         // #189 staged compression (gated): a rewrite above the configured max

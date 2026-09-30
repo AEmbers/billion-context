@@ -58,7 +58,10 @@ function toolResultsOf(messages) {
     const out = [];
     for (const msg of messages) {
         if (msg?.role === "tool") {
-            out.push({ name: names.get(msg.tool_call_id) ?? "?", content: String(flatContent(msg.content)).slice(0, 160) });
+            // 400 (not 160): the compress receipt carries its subagent-session
+            // note AFTER the fingerprint line (~185 chars total) — 160 would
+            // cut exactly that assertion surface off (e2e-subagent-sessions).
+            out.push({ name: names.get(msg.tool_call_id) ?? "?", content: String(flatContent(msg.content)).slice(0, 400) });
         }
     }
     return out;
@@ -211,6 +214,11 @@ const server = http.createServer((req, res) => {
                         toolName: reply.toolName ?? null,
                         toolArgs: reply.toolArgs ?? null,
                         lastUser: firstUserText.slice(0, 120),
+                        // head of the TRUE last user message (lastUser above
+                        // is the first user message's head — historical
+                        // field name): lets follow-up runs be identified by
+                        // their own prompt once the filler dominates the head.
+                        lastUserHead: (lastUserMsg ? flatContent(lastUserMsg.content) : "").slice(0, 120),
                         lastUserRef: lastUserRefMatch ? lastUserRefMatch[1] : null,
                         // #1699: title side-channel marker — after the fix these
                         // rows route VERBATIM (no ref tags, no injected tools),

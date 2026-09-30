@@ -32,6 +32,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { execFileSync, spawn, type StdioOptions } from "node:child_process";
 import { DEFAULT_MITM_DOMAINS } from "./mitm.js";
@@ -61,7 +62,7 @@ function selfDistFile(name: string): string {
     return path.join(selfPackageRoot(), "dist", name);
 }
 import { nonEmpty, resolvePiHome, resolveOmpHome, resolveDshHome, resolveCodexHome, loadClientConfig, collectModelWindows, collectModelMaxOutputs, type ClientConfig, type CodexConfig, resolveOpencodeConfigFile, readOpencodeConfigRoot, opencodePluginBaseDir, type OpencodeConfig, type OpencodeProvider, type HermesConfig, type HermesProvider, qoderIsCnSite, QODER_DEFAULT_MODEL_HOSTS, resolveTraeHome, readTraeConfig, TRAE_DEFAULT_MODEL_HOSTS, JCODE_DEFAULT_MODEL_HOSTS, type TraeConfig, resolveKimiHome, readKimiConfig, parseKimiToml, KIMI_DEFAULT_MODEL_HOSTS, QWEN_DEFAULT_MODEL_HOSTS, type KimiConfig, type KimiProvider, readOpencodeProjectLayer, type OpencodeProjectLayer, readMcodeConfig, resolveMcodeInstallDir, MCODE_DEFAULT_MODEL_HOSTS, type McodeConfig, discoverAiderArgUrls, AIDER_DEFAULT_MODEL_HOSTS, COPILOT_DEFAULT_MODEL_HOSTS, AMP_DEFAULT_MODEL_HOSTS, resolveGooseDirs, readGooseConfig, type GooseConfig, type GooseDirs } from "./client-config.js";
-import { loadRoutes, resolveConfiguredContextLimit, lookupContextLimit, resolveNativeAttachExternal, resolveMitmDomains, type ProviderRoutes } from "./config.js";
+import { loadRoutes, resolveConfiguredContextLimit, lookupContextLimit, resolveNativeAttachExternal, resolveMitmDomains, resolveNonHttpProviders, type ProviderRoutes } from "./config.js";
 import { discoverMitmDomains } from "./discover.js";
 import { contextFromRegistry } from "./registry.js";
 
@@ -821,6 +822,7 @@ export function buildPiEnv(
     httpRewrites: HttpRewrite[] = [],
     httpsRewrites: HttpRewrite[] = [],
     mitmHosts: string[] = [],
+    nonHttpProviders: string[] = [],
 ): NodeJS.ProcessEnv {
     // #535: provider URL rewrites ride env, not a generated models.json —
     // the bili extension (agent/pi.js) consumes this manifest at load and
@@ -849,6 +851,8 @@ export function buildPiEnv(
         // MITM-decrypt and strip it from. Blind-tunnel destinations must NOT be
         // stamped or strict-schema upstreams 400 the foreign field.
         ...(mitmHosts.length > 0 ? { BILI_MITM_HOSTS: mitmHosts.join(",") } : {}),
+        // #1392: the extension's ownsCompaction reads this to narrow its non-http(s) veto.
+        ...(nonHttpProviders.length > 0 ? { BILI_NON_HTTP_PROVIDERS: nonHttpProviders.join(",") } : {}),
     };
 }
 
@@ -2163,8 +2167,78 @@ export function prepareCodexHome(codexHome: string, origin: string, conversation
  *  plugin is injected even when the user has no custom providers (pure
  *  built-in deepseek route). Returns the patch file path (undefined when it
  *  could not be written — dsh then just boots without the plugin). */
-export function writeDshAcpPatch(dshHome: string): string | undefined {
-    const pluginUrl = pathToFileURL(selfDistFile("agent/dsh-native.js")).href;
+const DSH_BARE_ENTRY = "billion-context";
+
+/** #1590: shim package making the bare `billion-context` root resolvable from the two
+ *  anchors dsh uses at runtime, without touching dsh's own tree:
+ *  - the ESM host import is anchored at the active PROFILE dir, whose walk-up
+ *    reaches <DSH_HOME>/node_modules (every profile lives under DSH_HOME);
+ *  - the client scanner's CJS resolve anchors inside dsh's install tree and
+ *    only reaches a global npm prefix through NODE_PATH, which the launcher
+ *    seeds with the same dir. The shim is a minimal package.json carrying the
+ *  `dsh.client` declaration the scanner reads plus two SYMLINKS into bili's
+ *  live dist — an auto-update that moves dist self-heals on the next launch.
+ *  Returns false when nothing was written (existing shims stay untouched). */
+export function writeDshClientShimFiles(shimDir: string, hostBundle: string, clientBundle: string, version: string): boolean {
+    try {
+        if (!fs.existsSync(hostBundle) || !fs.existsSync(clientBundle)) return false;
+        fs.rmSync(shimDir, { recursive: true, force: true });
+        fs.mkdirSync(shimDir, { recursive: true });
+        fs.writeFileSync(
+            path.join(shimDir, "package.json"),
+            `${JSON.stringify({
+                name: "billion-context",
+                version,
+                type: "module",
+                exports: { ".": "./index.js", "./dsh": "./index.js", "./dsh/package.json": "./package.json", "./client": "./bundle.js" },
+                dsh: { client: { platform: "web" } },
+            })}\n`,
+        );
+        fs.symlinkSync(hostBundle, path.join(shimDir, "index.js"));
+        fs.symlinkSync(clientBundle, path.join(shimDir, "bundle.js"));
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** #1590: place the shim under a DSH_HOME variant (base home and/or the
+ *  launcher's overlay copy — overlay/profiles is a symlink back to the base
+ *  profiles, so both walk-up interpretations are covered). No-op when bili's
+ *  own dist bundles are missing (e.g. tests running before a build). */
+export function writeDshClientShim(dshHome: string): boolean {
+    const hostBundle = selfDistFile("agent/dsh-native.js");
+    const clientBundle = selfDistFile("agent/dsh-native-client.js");
+    let version = "0.0.0";
+    try {
+        version = JSON.parse(fs.readFileSync(path.join(selfPackageRoot(), "package.json"), "utf8")).version ?? version;
+    } catch {}
+    return writeDshClientShimFiles(path.join(dshHome, "node_modules", "billion-context"), hostBundle, clientBundle, version);
+}
+
+/** #1590: entry name for the launcher's --patch overlay. The BARE package
+ *  specifier "billion-context" (package root — never a subpath: dsh's client
+ *  scanner drops subpath entry names in exactPackageSpecifier) lets dsh load
+ *  the host half AND its client scanner attach the browser half (the "bili设置"
+ *  settings entry) — but only when the package root import lands on the dsh
+ *  host module, i.e. when the shim above (whose "." export points at
+ *  dsh-native) sits in this DSH_HOME's walk-up chain. Probed by resolving the
+ *  root specifier and checking the resolved file IS the host half: a stale or
+ *  foreign install (root "." pointing elsewhere, e.g. the CLI entry) or a
+ *  broken shim (dangling symlink) degrades to the legacy file URL (host half
+ *  only) instead of failing dsh boot or importing the wrong module. */
+export function dshPluginEntry(dshHome: string): string {
+    try {
+        const entry = createRequire(path.join(dshHome, "probe.cjs")).resolve(DSH_BARE_ENTRY);
+        const real = fs.realpathSync(entry);
+        if (!fs.existsSync(real) || !real.endsWith(path.join("agent", "dsh-native.js"))) throw new Error("root import does not resolve to the dsh host half");
+        return DSH_BARE_ENTRY;
+    } catch {}
+    return pathToFileURL(selfDistFile("agent/dsh-native.js")).href;
+}
+
+export function writeDshAcpPatch(dshHome: string, entryName?: string): string | undefined {
+    const pluginUrl = entryName ?? pathToFileURL(selfDistFile("agent/dsh-native.js")).href;
     const dir = `${dshHome}-bili`;
     try {
         fs.mkdirSync(dir, { recursive: true });
@@ -2427,19 +2501,29 @@ async function probeHealth(
 export interface HealthInfo {
     ok: boolean;
     instanceId?: string;
+    /** Responder's OS pid from /__bili/health. #1753: the spawn-wait
+     *  fallback uses this to verify the healthy responder on the preferred
+     *  port is the child WE spawned (and not a foreign proxy squatting it). */
+    pid?: number;
     /** #1330: watchdog state from /__bili/health. Absent on pre-#1330 builds —
-     *  unverifiable lifecycle, which the #1335 attach gate treats as unarmed. */
-    watchdog?: { armed: boolean };
+     *  unverifiable lifecycle, which the #1335 attach gate treats as unarmed.
+     *  #1753 (shutdown side): `watchers` is the live watcher-pid set — the
+     *  launcher consults it at client exit so a spawned-but-SHARED instance
+     *  is spared for its remaining owners instead of group-killed. */
+    watchdog?: { armed: boolean; watchers?: number[] };
 }
 
 async function fetchHealthInfoDefault(origin: string): Promise<HealthInfo | undefined> {
     try {
         const res = await fetch(healthUrl(origin), { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
         if (!res.ok) return undefined;
-        const data = (await res.json()) as { ok?: boolean; instanceId?: string; watchdog?: unknown };
+        const data = (await res.json()) as { ok?: boolean; instanceId?: string; pid?: unknown; watchdog?: unknown };
         const info: HealthInfo = { ok: Boolean(data.ok), instanceId: typeof data.instanceId === "string" ? data.instanceId : undefined };
+        if (typeof data.pid === "number") info.pid = data.pid;
         if (data.watchdog && typeof data.watchdog === "object" && typeof (data.watchdog as { armed?: unknown }).armed === "boolean") {
-            info.watchdog = { armed: (data.watchdog as { armed: boolean }).armed };
+            const wd = data.watchdog as { armed: boolean; watchers?: unknown };
+            const watchers = Array.isArray(wd.watchers) ? wd.watchers.filter((w): w is number => typeof w === "number") : undefined;
+            info.watchdog = { armed: wd.armed, watchers };
         }
         return info;
     } catch {
@@ -3008,6 +3092,9 @@ export async function ensureProxyRunning(
         // emits 'error', not 'exit'. Unhandled, it becomes an uncaughtException
         // that kills the host process; capture it so we fail fast with the cause.
         let childError: unknown;
+        // #1753: announce a healthy-but-foreign responder on the preferred port
+        // at most once — silence would hide exactly the misroute this fix closes.
+        let squatterAnnounced = false;
         child.on?.("exit", (...rest: unknown[]) => {
             childExit = {
                 code: typeof rest[0] === "number" ? rest[0] : null,
@@ -3038,10 +3125,27 @@ export async function ensureProxyRunning(
             // origin when NO record vouches for it — a LIVE record's owner owns
             // the discovery surface and our child is retry-binding elsewhere.
             // A stale record (dead pid / legacy plain) cannot vouch for anything.
+            // #1753: "healthy on the preferred port" alone is NOT proof the
+            // responder is our child — a foreign proxy can be squatting exactly
+            // that port (which is WHY our child laddered away). Verify the
+            // responder's pid matches the spawned child before exporting its
+            // origin to the client; otherwise keep waiting for the launchToken
+            // handshake instead of pinning the client to an instance the attach
+            // gate (#1225) itself would have rejected.
             const stale = !isProxyInstanceFile(inst) || !isPidAlive(inst.pid);
-            if (stale && (await probeHealth(proxyOrigin(opts.host, port), fetchImpl))) {
-                settleZonePort(port);
-                return { origin: proxyOrigin(opts.host, port), port, child, logPath };
+            if (stale) {
+                const preferredOrigin = proxyOrigin(opts.host, port);
+                const info = await fetchHealthInfo(preferredOrigin);
+                if (info?.ok && child.pid !== undefined && info.pid === child.pid) {
+                    settleZonePort(port);
+                    return { origin: preferredOrigin, port, child, logPath };
+                }
+                if (info?.ok && !squatterAnnounced) {
+                    squatterAnnounced = true;
+                    console.error(
+                        `bili: port ${port} answers health${info.pid !== undefined ? ` (pid ${info.pid})` : ""} but is not the proxy this launcher spawned (child pid ${child.pid ?? "?"}) — waiting for the spawned instance to report its real origin`,
+                    );
+                }
             }
         }
         if (childError !== undefined) {
@@ -3080,6 +3184,46 @@ export function stopProxy(handle: ProxyHandle): void {
     try {
         child.kill?.();
     } catch {}
+}
+
+/** #1753 (shutdown side): the wrapper's exit path used to kill the instance
+ *  it spawned unconditionally — taking down every ATTACHED session riding
+ *  that shared instance (live incident: exiting one `bili pi` killed the
+ *  proxy another live `bili pi` was watching; the client burned its 3
+ *  retries and died until some later wrapper re-spawned an instance on the
+ *  same port). The server's watcher-set watchdog (#7) already implements
+ *  the correct "die when the LAST owner exits" semantics; this guard defers
+ *  to it: if /__bili/health still lists watchers other than ourselves, the
+ *  instance is spared and the server retires it after its last watcher
+ *  leaves (WATCHER_IDLE_GRACE_MS). Health-parse failures degrade to the old
+ *  behavior (kill), which is safe: nothing else claims the instance. */
+export async function stopProxyGuarded(
+    handle: ProxyHandle,
+    fetchHealthInfo: (origin: string) => Promise<HealthInfo | undefined>,
+): Promise<void> {
+    if (handle.attached) return;
+    const child = handle.child;
+    if (!child || child.pid === undefined) return;
+    if (process.platform === "win32") {
+        // #414: POSIX-only kill path; win32 relies on the server-side
+        // parent-gone watchdog, which already honors the watcher set.
+        return;
+    }
+    let info: HealthInfo | undefined;
+    try {
+        info = await fetchHealthInfo(handle.origin);
+    } catch {
+        info = undefined;
+    }
+    const watchers = info?.ok ? (info.watchdog?.watchers ?? []) : [];
+    const others = watchers.filter((w) => w !== process.pid);
+    if (others.length > 0) {
+        console.error(
+            `bili: sparing the shared proxy at ${handle.origin} — ${others.length} other watcher${others.length === 1 ? "" : "s"} still attached; it will retire when the last one exits`,
+        );
+        return;
+    }
+    stopProxy(handle);
 }
 
 /** #679: quote one token for cmd.exe's line parser. Only whitespace-bearing
@@ -3345,6 +3489,7 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
     const extMitmHosts = base === "pi" || base === "omp"
         ? dedupeInOrder([...DEFAULT_MITM_DOMAINS, ...resolveMitmDomains(childMitmEnv), ...domains, ...discoverMitmDomains(discoveryEnv)])
         : [];
+    const extNonHttpProviders = base === "pi" || base === "omp" ? resolveNonHttpProviders(process.env) : [];
     const handle = await ensureProxyRunning({ host, port, passthrough, debug, lane: base, mitmDomains: domains, modelWindows: collectModelWindows(config, base), modelMaxOutputs: collectModelMaxOutputs(config, base) }, deps);
     console.error(
         `bili: started proxy at ${handle.origin} (MITM domains: ${domains.length ? domains.join(", ") : "defaults"})` +
@@ -3398,7 +3543,7 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
         // at extension load from the env manifest (registerProvider; see
         // buildPiEnv), and the old settings.json compaction-off generation is
         // replaced by the extension's session_before_compact cancel.
-        env = buildPiEnv(origin, ca, stripInheritedProxy(process.env), routes.httpRewrites, routes.httpsRewrites, extMitmHosts);
+        env = buildPiEnv(origin, ca, stripInheritedProxy(process.env), routes.httpRewrites, routes.httpsRewrites, extMitmHosts, extNonHttpProviders);
         // #535: never let a stale inherited overlay redirect (from a legacy
         // launch or a shell exported inside one) leak into the child — pi
         // always runs on its REAL home now.
@@ -3422,7 +3567,7 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
         // (the native summarizer would destroy the ACP-tagged context); manual
         // /compact stays user-owned and its surviving summary is archived by
         // the proxy on session_compact. https upstreams ride cert-MITM like pi.
-        env = buildPiEnv(origin, ca, stripInheritedProxy(process.env), routes.httpRewrites, [], extMitmHosts);
+        env = buildPiEnv(origin, ca, stripInheritedProxy(process.env), routes.httpRewrites, [], extMitmHosts, extNonHttpProviders);
         delete env.PI_CODING_AGENT_DIR;
         const ompExt = selfDistFile("agent/omp.js");
         if (ompExt && fs.existsSync(ompExt) && !ompPluginLoadedFrom(ompRealHome)) {
@@ -3531,7 +3676,21 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
         // settings rewrite above) unless a persistent `bili plugin install dsh`
         // already provides it — a second `id: bili-native` insert would trip
         // cordis' duplicate-entry-id check and hard-fail dsh boot.
-        const dshAcpPatch = dshNativeInstalled() ? undefined : writeDshAcpPatch(dshHomeDir);
+        // #1590: seed the resolvable shim under BOTH DSH_HOME variants (the
+        // overlay's profiles symlink back to the base home, so ESM walk-up
+        // from the real profile path lands there) and point the client
+        // scanner's CJS resolution at the base one through NODE_PATH —
+        // together they let dsh attach our browser half (the settings entry)
+        // alongside the host plugin in every lane.
+        writeDshClientShim(dshHomeDir);
+        if (dshOverlayHome !== undefined) writeDshClientShim(dshOverlayHome);
+        const dshNm = path.join(dshHomeDir, "node_modules");
+        const prevNodePath = env.NODE_PATH;
+        env.NODE_PATH = prevNodePath !== undefined && prevNodePath.length > 0 ? `${dshNm}${path.delimiter}${prevNodePath}` : dshNm;
+        let dshAcpPatch: string | undefined;
+        if (!dshNativeInstalled()) {
+            dshAcpPatch = writeDshAcpPatch(dshHomeDir, dshPluginEntry(dshOverlayHome ?? dshHomeDir));
+        }
         if (dshAcpPatch) clientArgs = dshArgsWithPatch(clientArgs, dshAcpPatch);
     } else if (base === "kimi") {
         // #757: cert-MITM like hermes/dsh — Kimi Code honors standard proxy
@@ -3816,7 +3975,7 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
         console.error(`bili: failed to launch ${params.client}: ${err instanceof Error ? err.message : String(err)}`);
         code = 1;
     } finally {
-        stopProxy(handle);
+        await stopProxyGuarded(handle, deps.fetchHealthInfo ?? fetchHealthInfoDefault);
         if (gooseOverlay) {
             try {
                 finalizeGooseHome(gooseOverlay);
@@ -3885,7 +4044,7 @@ export async function runTestPi(params: RunTestPiParams, deps: LauncherDeps = {}
         console.error(`bili: pi test failed: ${err instanceof Error ? err.message : String(err)}`);
         code = 1;
     } finally {
-        stopProxy(handle);
+        await stopProxyGuarded(handle, deps.fetchHealthInfo ?? fetchHealthInfoDefault);
     }
     process.exit(code ?? 0);
 }
