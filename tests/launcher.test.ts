@@ -2989,10 +2989,10 @@ test("writeDshAcpPatch: writes insert overlay with file:// plugin URL into <home
 test("writeDshAcpPatch: honors an explicit bare-specifier entry name (#1590)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-patch-"));
     try {
-        const file = writeDshAcpPatch(dir, "billion-context/dsh");
+        const file = writeDshAcpPatch(dir, "billion-context");
         assert.ok(file);
         const txt = fs.readFileSync(file, "utf8");
-        assert.match(txt, /^ {4}- id: bili-native\n {6}name: billion-context\/dsh$/m);
+        assert.match(txt, /^ {4}- id: bili-native\n {6}name: billion-context$/m);
         fs.rmSync(`${dir}-bili`, { recursive: true, force: true });
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
@@ -3008,8 +3008,9 @@ test("writeDshClientShimFiles + dshPluginEntry: resolvable shim yields the bare 
         fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "bili-launcher-fixture", version: "0.0.0" }));
         const home = path.join(dir, ".dsh");
         fs.mkdirSync(home);
-        const hostBundle = path.join(dir, "host.js");
-        const clientBundle = path.join(dir, "client.js");
+        const hostBundle = path.join(dir, "agent", "dsh-native.js");
+        const clientBundle = path.join(dir, "agent", "dsh-native-client.js");
+        fs.mkdirSync(path.dirname(hostBundle), { recursive: true });
         fs.writeFileSync(hostBundle, "// host\n");
         fs.writeFileSync(clientBundle, "// client\n");
         const shimDir = path.join(home, "node_modules", "billion-context");
@@ -3017,15 +3018,31 @@ test("writeDshClientShimFiles + dshPluginEntry: resolvable shim yields the bare 
         assert.equal(writeDshClientShimFiles(shimDir, hostBundle, clientBundle, "0.1.169"), true);
         const shimPkg = JSON.parse(fs.readFileSync(path.join(shimDir, "package.json"), "utf8"));
         assert.equal(shimPkg.name, "billion-context");
-        assert.deepEqual(shimPkg.exports, { "./dsh": "./index.js", "./dsh/package.json": "./package.json", "./client": "./bundle.js" });
+        assert.deepEqual(shimPkg.exports, { ".": "./index.js", "./dsh": "./index.js", "./dsh/package.json": "./package.json", "./client": "./bundle.js" });
         assert.equal(shimPkg.dsh.client.platform, "web");
         // The bundles are SYMLINKS into bili's live dist — an auto-update that
         // moves dist self-heals on the next launch without rewriting the shim.
         assert.equal(fs.realpathSync(path.join(shimDir, "index.js")), fs.realpathSync(hostBundle));
         assert.equal(fs.realpathSync(path.join(shimDir, "bundle.js")), fs.realpathSync(clientBundle));
 
-        // Resolvable from the home's walk-up chain ⇒ the bare entry.
-        assert.equal(dshPluginEntry(home), "billion-context/dsh");
+        // Resolvable from the home's walk-up chain, and the root import
+        // lands on the host module itself ⇒ the bare entry.
+        assert.equal(dshPluginEntry(home), "billion-context");
+
+        // A shim whose root "." export points elsewhere (e.g. a real install
+        // whose root is the CLI entry, not the dsh host half) must NOT claim
+        // the bare lane: importing the root would boot the CLI inside dsh.
+        // Built in a SEPARATE home: the CJS loader caches package.json reads
+        // per path per process, so mutating the first shim in place would be
+        // invisible to the next resolve.
+        const home2 = path.join(dir, ".dsh2");
+        fs.mkdirSync(home2);
+        const shimDir2 = path.join(home2, "node_modules", "billion-context");
+        assert.equal(writeDshClientShimFiles(shimDir2, hostBundle, clientBundle, "0.1.169"), true);
+        const pkg2 = path.join(shimDir2, "package.json");
+        fs.writeFileSync(pkg2, JSON.stringify({ ...JSON.parse(fs.readFileSync(pkg2, "utf8")), exports: { ".": "./other.js" } }));
+        fs.writeFileSync(path.join(shimDir2, "other.js"), "// not the host half\n");
+        assert.match(dshPluginEntry(home2), /^file:\/\/.+dsh-native\.js$/);
 
         // A stale shim (resolved package.json but dangling index.js symlink)
         // degrades to the legacy file URL instead of failing dsh boot.
@@ -3330,7 +3347,7 @@ test("runLaunch dsh: non-loopback upstreams ride proxy envs, loopback keeps the 
         // walk-up chain ⇒ bare specifier (lets dsh load the host half AND its
         // client scanner attach the browser half), not the legacy file URL;
         // NODE_PATH points the scanner's CJS resolution at the base home.
-        assert.ok(/- id: bili-native\n {6}name: billion-context\/dsh\n/.test(patchTxt));
+        assert.ok(/- id: bili-native\n {6}name: billion-context\n/.test(patchTxt));
         assert.match(patchTxt, /^- id: compaction-basic\n  config:\n    auto: false\n$/m);
         assert.ok(String(seenEnv.NODE_PATH ?? "").startsWith(path.join(dshHome, "node_modules")), `NODE_PATH seeds the scanner: ${seenEnv.NODE_PATH}`);
         assert.deepEqual(argsSeen[0], ["--patch", patchFile, "--profile", "headless", "task"]);

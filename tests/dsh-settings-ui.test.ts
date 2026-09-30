@@ -164,7 +164,7 @@ test("#1590: client bundle registers the settings.section entry bili (wrapper id
     vm.runInContext(code, sandbox, { filename: "dsh-native-client.bundle.js" });
     assert.equal(registrations.length, 1);
     // Must equal the loader entry name the scanner keys its graph row by.
-    assert.equal(registrations[0].id, "billion-context/dsh");
+    assert.equal(registrations[0].id, "billion-context");
 
     const calls: ElementNode[] = [];
     const requireStub = (spec: string): unknown => {

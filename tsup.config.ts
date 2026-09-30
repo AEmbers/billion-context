@@ -70,7 +70,7 @@ defineConfig({
     banner: {
         // Trailing balance: `load({ id, factory: (require) => {` opens call +
         // object + arrow-body, so the footer closes all three.
-        js: "window.__ModuleLoader__.load({ id: \"billion-context/dsh\", factory: (require) => {\nvar module = { exports: {} };\nvar exports = module.exports;\n",
+        js: "window.__ModuleLoader__.load({ id: \"billion-context\", factory: (require) => {\nvar module = { exports: {} };\nvar exports = module.exports;\n",
     },
     footer: {
         js: "\nreturn module.exports;\n}});",

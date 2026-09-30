@@ -2164,9 +2164,9 @@ export function prepareCodexHome(codexHome: string, origin: string, conversation
  *  plugin is injected even when the user has no custom providers (pure
  *  built-in deepseek route). Returns the patch file path (undefined when it
  *  could not be written — dsh then just boots without the plugin). */
-const DSH_BARE_ENTRY = "billion-context/dsh";
+const DSH_BARE_ENTRY = "billion-context";
 
-/** #1590: shim package making `billion-context/dsh` resolvable from the two
+/** #1590: shim package making the bare `billion-context` root resolvable from the two
  *  anchors dsh uses at runtime, without touching dsh's own tree:
  *  - the ESM host import is anchored at the active PROFILE dir, whose walk-up
  *    reaches <DSH_HOME>/node_modules (every profile lives under DSH_HOME);
@@ -2187,7 +2187,7 @@ export function writeDshClientShimFiles(shimDir: string, hostBundle: string, cli
                 name: "billion-context",
                 version,
                 type: "module",
-                exports: { "./dsh": "./index.js", "./dsh/package.json": "./package.json", "./client": "./bundle.js" },
+                exports: { ".": "./index.js", "./dsh": "./index.js", "./dsh/package.json": "./package.json", "./client": "./bundle.js" },
                 dsh: { client: { platform: "web" } },
             })}\n`,
         );
@@ -2213,21 +2213,22 @@ export function writeDshClientShim(dshHome: string): boolean {
     return writeDshClientShimFiles(path.join(dshHome, "node_modules", "billion-context"), hostBundle, clientBundle, version);
 }
 
-/** #1590: entry name for the launcher's --patch overlay. A bare specifier
- *  lets dsh load the host half AND its client scanner attach the browser half
- *  (the "bili设置" settings entry) — but only when resolvable from a profile
- *  dir, i.e. when the shim above sits in this DSH_HOME's walk-up chain (or a
- *  persistent install lives in the profile itself). Probed by resolving the
- *  ACTUAL entry subpath and checking the resolved file: a stale/broken shim
- *  (dangling symlink) or a missing install degrades to the legacy file URL
- *  (host half only) instead of failing dsh boot. Resolving the entry itself
- *  (not a hardcoded sibling) keeps the check honest for real installs, whose
- *  exports map points "./dsh" at dist/, and tolerates Node's self-reference
- *  when the DSH_HOME happens to sit inside a billion-context package. */
+/** #1590: entry name for the launcher's --patch overlay. The BARE package
+ *  specifier "billion-context" (package root — never a subpath: dsh's client
+ *  scanner drops subpath entry names in exactPackageSpecifier) lets dsh load
+ *  the host half AND its client scanner attach the browser half (the "bili设置"
+ *  settings entry) — but only when the package root import lands on the dsh
+ *  host module, i.e. when the shim above (whose "." export points at
+ *  dsh-native) sits in this DSH_HOME's walk-up chain. Probed by resolving the
+ *  root specifier and checking the resolved file IS the host half: a stale or
+ *  foreign install (root "." pointing elsewhere, e.g. the CLI entry) or a
+ *  broken shim (dangling symlink) degrades to the legacy file URL (host half
+ *  only) instead of failing dsh boot or importing the wrong module. */
 export function dshPluginEntry(dshHome: string): string {
     try {
         const entry = createRequire(path.join(dshHome, "probe.cjs")).resolve(DSH_BARE_ENTRY);
-        if (!fs.existsSync(fs.realpathSync(entry))) throw new Error("broken shim bundle");
+        const real = fs.realpathSync(entry);
+        if (!fs.existsSync(real) || !real.endsWith(path.join("agent", "dsh-native.js"))) throw new Error("root import does not resolve to the dsh host half");
         return DSH_BARE_ENTRY;
     } catch {}
     return pathToFileURL(selfDistFile("agent/dsh-native.js")).href;
