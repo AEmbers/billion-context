@@ -22,7 +22,13 @@ defineConfig({
     },
     outDir: "dist",
     clean: true,
-    sourcemap: true,
+    // Sourcemaps are opt-in, not opt-out. They were 73.4 MB of a 98.1 MB dist
+    // and are never read at runtime, so committing them made every git-based
+    // install (and every clone) needlessly heavy — the DSH plugin market
+    // installs this package straight from the repository. Run a local build
+    // with BILI_SOURCEMAP=1 when you actually need to debug the bundle:
+    //   BILI_SOURCEMAP=1 npm run build
+    sourcemap: process.env.BILI_SOURCEMAP === "1",
     splitting: false,
     shims: false,
     // acp-kernel is a BUILD-TIME dependency: tsup inlines it into dist so the
